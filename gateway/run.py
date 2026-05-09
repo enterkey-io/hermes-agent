@@ -13600,10 +13600,12 @@ class GatewayRunner:
             if _env_tp and not _tool_progress_configured
             else (_resolved_tp or _env_tp or "all")
         )
-        # Disable tool progress for webhooks - they don't support message editing,
-        # so each progress line would be sent as a separate message.
+        # Disable tool progress for webhooks and voice — webhooks don't support
+        # message editing (each progress line would be a separate message), and
+        # voice platforms read all text aloud via TTS, so tool output spam is
+        # intolerable there (costly and disorienting).
         from gateway.config import Platform
-        tool_progress_enabled = progress_mode != "off" and source.platform != Platform.WEBHOOK
+        tool_progress_enabled = progress_mode != "off" and source.platform not in (Platform.WEBHOOK, Platform.VOICE)
         # Natural assistant status messages are intentionally independent from
         # tool progress and token streaming. Users can keep tool_progress quiet
         # in chat platforms while opting into concise mid-turn updates.
