@@ -24,7 +24,10 @@ class ResponsesApiTransport(ProviderTransport):
     def convert_messages(self, messages: List[Dict[str, Any]], **kwargs) -> Any:
         """Convert OpenAI chat messages to Responses API input items."""
         from agent.codex_responses_adapter import _chat_messages_to_responses_input
-        return _chat_messages_to_responses_input(messages)
+        return _chat_messages_to_responses_input(
+            messages,
+            is_xai_responses=bool(kwargs.get("is_xai_responses")),
+        )
 
     def convert_tools(self, tools: List[Dict[str, Any]]) -> Any:
         """Convert OpenAI tool schemas to Responses API function definitions."""
@@ -93,7 +96,10 @@ class ResponsesApiTransport(ProviderTransport):
         kwargs = {
             "model": model,
             "instructions": instructions,
-            "input": _chat_messages_to_responses_input(payload_messages),
+            "input": _chat_messages_to_responses_input(
+                payload_messages,
+                is_xai_responses=is_xai_responses,
+            ),
             "tools": response_tools,
             "store": False,
         }
@@ -110,6 +116,10 @@ class ResponsesApiTransport(ProviderTransport):
         if reasoning_enabled and is_xai_responses:
             from agent.model_metadata import grok_supports_reasoning_effort
 
+            # Ask xAI to echo back encrypted reasoning items so we can
+            # replay them on subsequent turns for cross-turn coherence.
+            # See agent/codex_responses_adapter._chat_messages_to_responses_input
+            # for the May 2026 reversal of the earlier suppression gate.
             kwargs["include"] = ["reasoning.encrypted_content"]
             # xAI rejects `reasoning.effort` on grok-4 / grok-4-fast / grok-3
             # / grok-code-fast / grok-4.20-0309-* with HTTP 400 even though
