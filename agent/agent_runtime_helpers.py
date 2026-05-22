@@ -621,6 +621,32 @@ def recover_with_credential_pool(
         if not is_entitlement and status_code == 403 and (agent.provider or "") == "xai-oauth":
             is_entitlement = True
         if is_entitlement:
+            # LOCAL PATCH: before giving up on an "entitlement-shaped" 403,
+            # try rotating to the next pool entry. Upstream treats every
+            # xai-oauth 403 as terminal (defense-in-depth for #26847), but
+            # that hides a real and common failure mode: one pool entry's
+            # access_token has expired AND its refresh_token has been
+            # invalidated by another OAuth flow (e.g. a manual device-flow
+            # rotation that minted a new refresh_token but left the old
+            # entry in the pool). In that case the next pool entry usually
+            # has a healthy token and rotating yields a successful turn —
+            # without ever attempting a refresh against the bad token, so
+            # the upstream concern (refresh loop against an unsubscribed
+            # account) doesn't apply. Only if rotation finds no other entry
+            # do we surface the original entitlement error.
+            rotate_status = status_code if status_code is not None else 403
+            next_entry = pool.mark_exhausted_and_rotate(
+                status_code=rotate_status, error_context=error_context
+            )
+            if next_entry is not None:
+                _ra().logger.info(
+                    "Credential %s (entitlement-shaped) — rotated to pool entry %s "
+                    "instead of refreshing",
+                    rotate_status,
+                    getattr(next_entry, "id", "?"),
+                )
+                agent._swap_credential(next_entry)
+                return True, False
             _ra().logger.info(
                 "Credential %s — entitlement-shaped 403 from %s; "
                 "skipping pool refresh (account lacks subscription, "
