@@ -3336,10 +3336,9 @@ def resolve_codex_runtime_credentials(
 def _read_xai_oauth_tokens(*, _lock: bool = True) -> Dict[str, Any]:
     if _lock:
         with _auth_store_lock():
-            auth_store = _load_auth_store()
+            state = get_provider_auth_state("xai-oauth")
     else:
-        auth_store = _load_auth_store()
-    state = _load_provider_state(auth_store, "xai-oauth")
+        state = get_provider_auth_state("xai-oauth")
     if not state:
         raise AuthError(
             "No xAI OAuth credentials stored. Select xAI Grok OAuth (SuperGrok Subscription) in `hermes model`.",
