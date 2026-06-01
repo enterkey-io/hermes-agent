@@ -13,6 +13,25 @@ source .venv/bin/activate   # or: source venv/bin/activate
 `$HOME/.hermes/hermes-agent/venv` (for worktrees that share a venv with the
 main checkout).
 
+## Local Patch Workflow On Elliott's Server
+
+This checkout is also a live Hermes install used by profile gateways. Source
+fixes must be recoverable across `hermes update`.
+
+- Do not make custom Hermes source changes as loose edits on `main`. If a
+  production hotfix is needed, create a named branch (`fix/<short-bug-name>`,
+  `feature/<short-name>`, or `docs/<short-name>`) and commit the fix there.
+- Keep commits tightly scoped to the bug or feature. Leave unrelated local
+  history and profile config alone.
+- Before restarting a gateway on a patched branch, run focused pytest coverage
+  for the touched path and a profile-scoped smoke test when credentials allow.
+- For Alina, the gateway unit is `hermes-gateway-alina.service`; restart it with
+  `systemctl --user restart hermes-gateway-alina.service` and verify
+  `systemctl --user status hermes-gateway-alina.service --no-pager`.
+- Before `hermes update` or an upstream reset, make sure local patches are
+  committed on branches so they can be rebased or cherry-picked onto the
+  updated checkout.
+
 ## Project Structure
 
 File counts shift constantly — don't treat the tree below as exhaustive.
