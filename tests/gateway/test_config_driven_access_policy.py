@@ -105,6 +105,19 @@ def test_base_adapter_defaults_to_not_owning_access_policy():
     assert BasePlatformAdapter.enforces_own_access_policy.fget(object()) is False
 
 
+def test_voice_platform_is_trusted_without_user_allowlist(monkeypatch):
+    """Vox voice events are trusted internal gateway events, like webhooks."""
+    from gateway.authz_mixin import GatewayAuthorizationMixin
+
+    _clear_auth_env(monkeypatch)
+    runner = object.__new__(GatewayAuthorizationMixin)
+    runner.adapters = {}
+    runner.pairing_store = MagicMock()
+    runner.pairing_store.is_approved.return_value = False
+
+    assert runner._is_user_authorized(_source(Platform.VOICE)) is True
+
+
 @pytest.mark.parametrize(
     "module_path, class_name",
     [

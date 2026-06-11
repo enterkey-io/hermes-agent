@@ -8528,6 +8528,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 return None
             return WeixinAdapter(config)
 
+        elif platform == Platform.VOICE:
+            from gateway.platforms.voice import VoiceAdapter, check_voice_requirements
+            if not check_voice_requirements():
+                logger.warning("Voice: websockets package not installed. Run: pip install websockets")
+                return None
+            return VoiceAdapter(config)
+
         elif platform == Platform.API_SERVER:
             from gateway.platforms.api_server import APIServerAdapter, check_api_server_requirements
             if not check_api_server_requirements():
@@ -16637,9 +16644,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 logger.debug("generic status phrase selection failed: %s", _phrase_err)
                 return "still on it" if kind in {"heartbeat", "waiting", "long_running", "status"} else "one sec"
         # Disable tool progress for webhooks - they don't support message editing,
-        # so each progress line would be sent as a separate message.
+        # so each progress line would be sent as a separate message. Voice
+        # platforms read every progress line aloud, so they stay quiet too.
         from gateway.config import Platform
-        tool_progress_enabled = progress_mode not in {"off", "log"} and source.platform != Platform.WEBHOOK
+        tool_progress_enabled = (
+            progress_mode not in {"off", "log"}
+            and source.platform not in {Platform.WEBHOOK, Platform.VOICE}
+        )
         # "log" mode: tool calls are written to ~/.hermes/logs/tool_calls.log
         # instead of the chat (#3459 / #3458). Gateway-only by design.
         log_mode_enabled = progress_mode == "log" and source.platform != Platform.WEBHOOK
