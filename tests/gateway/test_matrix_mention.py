@@ -15,17 +15,20 @@ from gateway.config import PlatformConfig
 # needing real mautrix APIs mock them individually.
 
 
-def _make_adapter(tmp_path=None):
+def _make_adapter(tmp_path=None, extra=None):
     """Create a MatrixAdapter with mocked config."""
     from plugins.platforms.matrix.adapter import MatrixAdapter
 
+    config_extra = {
+        "homeserver": "https://matrix.example.org",
+        "user_id": "@hermes:example.org",
+    }
+    if extra:
+        config_extra.update(extra)
     config = PlatformConfig(
         enabled=True,
         token="syt_test_token",
-        extra={
-            "homeserver": "https://matrix.example.org",
-            "user_id": "@hermes:example.org",
-        },
+        extra=config_extra,
     )
     adapter = MatrixAdapter(config)
     adapter._text_batch_delay_seconds = 0  # disable batching for tests
@@ -223,6 +226,208 @@ class TestOutboundMentions:
         content = self._sent_content(self.mock_client)
         assert content["msgtype"] == "m.notice"
         assert content["m.mentions"] == {"user_ids": ["@alice:example.org"]}
+
+# ---------------------------------------------------------------------------
+# Multi-agent room observation and coordination
+# ---------------------------------------------------------------------------
+
+
+class _FakeSessionStore:
+    def __init__(self):
+        self.entries = []
+        self.messages = []
+
+    def get_or_create_session(self, source):
+        self.entries.append(source)
+        return SimpleNamespace(session_id="matrix-room-session")
+
+    def append_to_transcript(self, session_id, message, skip_db=False):
+        self.messages.append((session_id, message, skip_db))
+
+
+class TestMatrixGroupCoordination:
+    @pytest.mark.asyncio
+    async def test_observed_unmentioned_group_message_is_persisted_without_reply(self):
+        adapter = _make_adapter(extra={"observe_rooms": ["!room1:example.org"]})
+        _set_dm(adapter, is_dm=False)
+        store = _FakeSessionStore()
+        adapter.set_session_store(store)
+
+        await adapter._on_room_message(
+            _make_event(
+                "aurora should take this one",
+                sender="@maya:servv.net",
+                event_id="$observe1",
+                room_id="!room1:example.org",
+            )
+        )
+
+        adapter.handle_message.assert_not_awaited()
+        assert len(store.entries) == 1
+        shared_source = store.entries[0]
+        assert shared_source.chat_id == "!room1:example.org"
+        assert shared_source.user_id is None
+        assert shared_source.user_name is None
+        assert shared_source.thread_id is None
+        assert store.messages[0][0] == "matrix-room-session"
+        assert store.messages[0][1]["content"].startswith("[maya|@maya:servv.net]\n")
+        assert store.messages[0][1]["observed"] is True
+        assert store.messages[0][1]["message_id"] == "$observe1"
+
+    @pytest.mark.asyncio
+    async def test_observed_group_trigger_uses_shared_room_context(self):
+        adapter = _make_adapter(extra={"observe_rooms": ["!room1:example.org"]})
+        _set_dm(adapter, is_dm=False)
+
+        await adapter._on_room_message(
+            _make_event(
+                "@hermes:example.org summarize this",
+                sender="@maya:servv.net",
+                event_id="$trigger1",
+                room_id="!room1:example.org",
+                mention_user_ids=["@hermes:example.org"],
+            )
+        )
+
+        adapter.handle_message.assert_awaited_once()
+        msg = adapter.handle_message.await_args.args[0]
+        assert msg.source.chat_id == "!room1:example.org"
+        assert msg.source.user_id is None
+        assert msg.source.user_name is None
+        assert msg.source.thread_id is None
+        assert msg.text.startswith("[maya|@maya:servv.net]\n")
+        assert "Matrix group chat message" in msg.channel_prompt
+
+    @pytest.mark.asyncio
+    async def test_coordinator_can_suppress_hermes_reply(self):
+        adapter = _make_adapter(
+            extra={
+                "coordination_rooms": ["!room1:example.org"],
+                "coordinator_url": "http://127.0.0.1:8787",
+                "coordination_agent_id": "alina",
+            }
+        )
+        _set_dm(adapter, is_dm=False)
+        adapter.cancel_session_processing = AsyncMock()
+
+        class _Response:
+            status = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            async def json(self):
+                return {"allowedSpeakers": [{"platform": "nanoclaw", "agentId": "ag-aurora"}]}
+
+        class _Session:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            def post(self, url, json):
+                return _Response()
+
+        with patch("aiohttp.ClientSession", _Session):
+            await adapter._on_room_message(
+                _make_event(
+                    "@hermes:example.org should aurora answer?",
+                    sender="@maya:servv.net",
+                    event_id="$coord1",
+                    room_id="!room1:example.org",
+                    mention_user_ids=["@hermes:example.org"],
+                )
+            )
+
+        adapter.handle_message.assert_not_awaited()
+        adapter.cancel_session_processing.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_coordinator_can_allow_hermes_and_inject_context(self):
+        adapter = _make_adapter(
+            extra={
+                "coordination_rooms": ["!room1:example.org"],
+                "coordinator_url": "http://127.0.0.1:8787",
+                "coordination_agent_id": "alina",
+            }
+        )
+        _set_dm(adapter, is_dm=False)
+
+        class _Response:
+            status = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            async def json(self):
+                return {
+                    "allowedSpeakers": [{"platform": "hermes", "agentId": "alina"}],
+                    "contextText": "Maya asked Aurora to compare options.",
+                }
+
+        class _Session:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            def post(self, url, json):
+                return _Response()
+
+        with patch("aiohttp.ClientSession", _Session):
+            await adapter._on_room_message(
+                _make_event(
+                    "@hermes:example.org what is the decision?",
+                    sender="@maya:servv.net",
+                    event_id="$coord2",
+                    room_id="!room1:example.org",
+                    mention_user_ids=["@hermes:example.org"],
+                )
+            )
+
+        adapter.handle_message.assert_awaited_once()
+        msg = adapter.handle_message.await_args.args[0]
+        assert msg.text.startswith("Recent Matrix room context:\nMaya asked Aurora")
+        assert "Newest message:" in msg.text
+
+    @pytest.mark.asyncio
+    async def test_coordinator_unavailable_preserves_plain_text_mention(self):
+        adapter = _make_adapter(
+            extra={
+                "coordination_rooms": ["!room1:example.org"],
+                "coordinator_url": "http://127.0.0.1:8787",
+            }
+        )
+        _set_dm(adapter, is_dm=False)
+
+        with patch("aiohttp.ClientSession", side_effect=RuntimeError("down")):
+            await adapter._on_room_message(
+                _make_event(
+                    "@hermes:example.org answer even if coordinator is down",
+                    sender="@maya:servv.net",
+                    event_id="$coord-down",
+                    room_id="!room1:example.org",
+                )
+            )
+
+        adapter.handle_message.assert_awaited_once()
+        msg = adapter.handle_message.await_args.args[0]
+        assert msg.text == "answer even if coordinator is down"
+
 
 # ---------------------------------------------------------------------------
 # Require-mention gating in _on_room_message
@@ -509,6 +714,33 @@ class TestMatrixConfigBridge:
             "maya": "@maya.full:servv.net",
             "aurora": "@aurora.full:servv.net",
         }
+
+    def test_yaml_bridge_sets_observe_rooms(self, monkeypatch, tmp_path):
+        """Matrix YAML observe_rooms should bridge to env var."""
+        monkeypatch.delenv("MATRIX_OBSERVE_ROOMS", raising=False)
+
+        from gateway.config import load_gateway_config
+
+        import os
+        import yaml
+
+        hermes_home = tmp_path / "hermes-home"
+        hermes_home.mkdir()
+        config_file = hermes_home / "config.yaml"
+        config_file.write_text(
+            yaml.dump(
+                {
+                    "matrix": {
+                        "observe_rooms": ["!room1:example.org", "!room2:example.org"],
+                    }
+                }
+            )
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        load_gateway_config()
+
+        assert os.getenv("MATRIX_OBSERVE_ROOMS") == "!room1:example.org,!room2:example.org"
 
     def test_env_vars_take_precedence_over_yaml(self, monkeypatch):
         """Env vars should not be overwritten by YAML values."""

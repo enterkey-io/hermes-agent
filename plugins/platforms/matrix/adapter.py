@@ -22,6 +22,16 @@ Environment variables:
     MATRIX_REQUIRE_MENTION      Require @mention in rooms (default: true)
     MATRIX_FREE_RESPONSE_ROOMS  Comma-separated room IDs exempt from mention requirement
                                 (alias of matrix.free_response_rooms)
+    MATRIX_OBSERVE_ROOMS        Comma-separated Matrix room IDs to persist as
+                                shared observed room context
+    MATRIX_COORDINATION_ROOMS   Comma-separated Matrix room IDs governed by a
+                                turn coordinator
+    MATRIX_COORDINATOR_URL      Coordinator API base URL
+    MATRIX_COORDINATION_AGENT_ID
+                              Hermes agent ID used in coordinator decisions
+    MATRIX_COORDINATION_DISPLAY_NAME
+                              Hermes display name used in coordinator decisions
+    MATRIX_COORDINATION_PEERS   JSON peer participant list for coordinator decisions
     MATRIX_ALLOWED_ROOMS    Comma-separated room IDs; if set, bot ONLY responds
                             in these rooms (whitelist, DMs exempt; alias of
                             matrix.allowed_rooms)
@@ -53,6 +63,7 @@ from __future__ import annotations
 
 import asyncio
 import array
+import dataclasses
 import inspect
 import json
 import logging
@@ -63,8 +74,9 @@ import shutil
 import subprocess
 import sys
 import time
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
+from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
 from html import escape as _html_escape
 from html.parser import HTMLParser
@@ -608,6 +620,7 @@ _OUTBOUND_MENTION_RE = re.compile(
     r"(?<![\w/])(@[0-9A-Za-z._=/-]+:[0-9A-Za-z.-]+(?::\d+)?)"
 )
 _OUTBOUND_ALIAS_MENTION_RE = re.compile(r"(?<![\w/])@([0-9A-Za-z._=-]+)")
+_MATRIX_WAS_MENTIONED_KEY = "_hermes_matrix_was_mentioned"
 
 _E2EE_INSTALL_HINT = (
     "Install with: pip install 'mautrix[encryption]' asyncpg aiosqlite  "
@@ -1250,6 +1263,30 @@ class MatrixAdapter(BasePlatformAdapter):
             self._allowed_rooms: Set[str] = {
                 r.strip() for r in str(allowed_rooms_raw).split(",") if r.strip()
             }
+        coord_rooms_raw = config.extra.get("coordination_rooms")
+        if coord_rooms_raw is None:
+            coord_rooms_raw = os.getenv("MATRIX_COORDINATION_ROOMS", "")
+        self._coordination_rooms: Set[str] = self._parse_string_set(coord_rooms_raw)
+        self._coordinator_url: str = (
+            config.extra.get("coordinator_url")
+            or os.getenv("MATRIX_COORDINATOR_URL", "")
+        ).rstrip("/")
+        self._coordination_agent_id: str = (
+            config.extra.get("coordination_agent_id")
+            or os.getenv("MATRIX_COORDINATION_AGENT_ID", "alina")
+        )
+        self._coordination_display_name: str = (
+            config.extra.get("coordination_display_name")
+            or os.getenv("MATRIX_COORDINATION_DISPLAY_NAME", "Alina")
+        )
+        self._coordination_peers_raw: str = (
+            config.extra.get("coordination_peers")
+            or os.getenv("MATRIX_COORDINATION_PEERS", "[]")
+        )
+        observe_rooms_raw = config.extra.get("observe_rooms")
+        if observe_rooms_raw is None:
+            observe_rooms_raw = os.getenv("MATRIX_OBSERVE_ROOMS", "")
+        self._observe_rooms: Set[str] = self._parse_string_set(observe_rooms_raw)
         self._allow_room_mentions: bool = os.getenv(
             "MATRIX_ALLOW_ROOM_MENTIONS", "false"
         ).lower() in ("true", "1", "yes")
@@ -1401,6 +1438,15 @@ class MatrixAdapter(BasePlatformAdapter):
         return os.getenv(
             "MATRIX_THREAD_REQUIRE_MENTION", "false"
         ).lower() in {"true", "1", "yes", "on"}
+
+    @staticmethod
+    def _parse_string_set(raw) -> Set[str]:
+        """Parse a comma-separated string or list into a trimmed string set."""
+        if raw is None:
+            return set()
+        if isinstance(raw, list):
+            return {str(value).strip() for value in raw if str(value).strip()}
+        return {value.strip() for value in str(raw).split(",") if value.strip()}
 
     @staticmethod
     def _parse_mention_aliases(raw) -> Dict[str, str]:
@@ -3368,6 +3414,7 @@ class MatrixAdapter(BasePlatformAdapter):
             mentions_block.get("user_ids") if isinstance(mentions_block, dict) else None
         )
         is_mentioned = self._is_bot_mentioned(body, formatted_body, mention_user_ids)
+        source_content[_MATRIX_WAS_MENTIONED_KEY] = is_mentioned
 
         # Require-mention gating.
         if not is_dm:
@@ -3383,11 +3430,19 @@ class MatrixAdapter(BasePlatformAdapter):
                 )
                 return None
 
-            is_free_room = room_id in self._free_rooms
+            is_free_room = room_id in self._free_rooms or room_id in self._coordination_rooms
             in_bot_thread = bool(thread_id and thread_id in self._threads)
             is_command = body.startswith("/")
             if self._require_mention and not is_free_room and not in_bot_thread:
                 if not is_mentioned and not is_command:
+                    await self._observe_unmentioned_group_message(
+                        room_id=room_id,
+                        sender=sender,
+                        event_id=event_id,
+                        body=body,
+                        source_content=source_content,
+                        thread_id=thread_id,
+                    )
                     logger.debug(
                         "Matrix: ignoring message %s in %s — no @mention "
                         "(set MATRIX_REQUIRE_MENTION=false to disable)",
@@ -3432,6 +3487,8 @@ class MatrixAdapter(BasePlatformAdapter):
             elif self._matrix_session_scope == "thread":
                 thread_id = event_id
                 self._threads.mark(thread_id)
+            elif self._should_observe_unmentioned_group_message(room_id):
+                thread_id = None
             elif self._auto_thread:
                 thread_id = event_id
                 self._threads.mark(thread_id)
@@ -3456,6 +3513,219 @@ class MatrixAdapter(BasePlatformAdapter):
         self._background_read_receipt(room_id, event_id)
 
         return body, is_dm, chat_type, thread_id, display_name, source
+
+    def _should_observe_unmentioned_group_message(self, room_id: str) -> bool:
+        return bool(self._observe_rooms and room_id in self._observe_rooms)
+
+    def _matrix_group_observe_shared_source(self, source):
+        return dataclasses.replace(
+            source,
+            user_id=None,
+            user_name=None,
+            user_id_alt=None,
+            thread_id=None,
+            parent_chat_id=None,
+            message_id=None,
+        )
+
+    def _matrix_group_observe_attributed_text(
+        self,
+        *,
+        text: str,
+        sender: str,
+        display_name: str | None,
+    ) -> str:
+        name = display_name or sender
+        return f"[{name}|{sender}]\n{text or ''}"
+
+    def _matrix_group_observe_channel_prompt(self) -> str:
+        return (
+            "You are handling a Matrix group chat message.\n"
+            f"- Your Matrix identity: {self._user_id}\n"
+            "- Lines in history prefixed with `[display name|matrix_user_id]` are observed Matrix group context "
+            "and are not necessarily addressed to you.\n"
+            "- Treat only the current new message as a request explicitly directed at you, "
+            "and answer it directly."
+        )
+
+    async def _observe_unmentioned_group_message(
+        self,
+        *,
+        room_id: str,
+        sender: str,
+        event_id: str,
+        body: str,
+        source_content: dict,
+        thread_id: str | None,
+    ) -> None:
+        if not self._should_observe_unmentioned_group_message(room_id):
+            return
+        store = getattr(self, "_session_store", None)
+        if not store:
+            return
+        try:
+            identity = await self._resolve_room_identity(room_id)
+            display_name = await self._get_display_name(room_id, sender)
+            source = self.build_source(
+                chat_id=room_id,
+                chat_name=identity.display_name,
+                chat_type="group",
+                user_id=sender,
+                user_name=display_name,
+                thread_id=thread_id,
+                chat_topic=identity.room_topic,
+                guild_id=identity.server_name,
+                parent_chat_id=room_id if thread_id else None,
+                message_id=event_id,
+            )
+            shared_source = self._matrix_group_observe_shared_source(source)
+            session_entry = store.get_or_create_session(shared_source)
+            entry = {
+                "role": "user",
+                "content": self._matrix_group_observe_attributed_text(
+                    text=body,
+                    sender=sender,
+                    display_name=display_name,
+                ),
+                "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+                "observed": True,
+                "raw_message": self._matrix_public_source_content(source_content),
+            }
+            if event_id:
+                entry["message_id"] = str(event_id)
+            store.append_to_transcript(session_entry.session_id, entry)
+            logger.info(
+                "Matrix: group message observed (no bot trigger): room=%s from=%s",
+                room_id,
+                sender,
+            )
+        except Exception as exc:
+            logger.warning("Matrix: failed to observe group message: %s", exc, exc_info=True)
+
+    def _coordination_participants(self) -> list:
+        participants = [
+            {
+                "platform": "hermes",
+                "agentId": self._coordination_agent_id,
+                "displayName": self._coordination_display_name,
+                "matrixUserId": self._user_id,
+            }
+        ]
+        try:
+            peers = json.loads(self._coordination_peers_raw)
+            if isinstance(peers, list):
+                for peer in peers:
+                    if (
+                        isinstance(peer, dict)
+                        and isinstance(peer.get("platform"), str)
+                        and isinstance(peer.get("agentId"), str)
+                        and isinstance(peer.get("displayName"), str)
+                    ):
+                        participants.append(peer)
+        except Exception:
+            logger.warning("Matrix: invalid coordination_peers JSON; ignoring")
+        return participants
+
+    async def _coordination_allows(
+        self,
+        room_id: str,
+        sender: str,
+        event_id: str,
+        body: str,
+        source_content: dict,
+        is_mentioned: bool,
+        source: Any,
+    ) -> tuple[bool, str]:
+        if not self._coordinator_url or room_id not in self._coordination_rooms:
+            return True, body
+
+        participants = self._coordination_participants()
+        sender_peer = next(
+            (
+                peer
+                for peer in participants
+                if peer.get("matrixUserId") == sender
+            ),
+            None,
+        )
+        sender_payload = (
+            {
+                "kind": "agent",
+                "platform": sender_peer.get("platform"),
+                "agentId": sender_peer.get("agentId"),
+                "displayName": sender_peer.get("displayName"),
+                "matrixUserId": sender,
+            }
+            if sender_peer
+            else {"kind": "human", "matrixUserId": sender}
+        )
+        payload = {
+            "roomId": room_id,
+            "messageId": event_id,
+            "sender": sender_payload,
+            "text": body,
+            "isMention": is_mentioned,
+            "participants": participants,
+            "recentMessages": [],
+        }
+
+        try:
+            import aiohttp
+
+            timeout = aiohttp.ClientTimeout(total=3)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(
+                    f"{self._coordinator_url}/v1/rooms/{quote(room_id, safe='')}/events",
+                    json=payload,
+                ) as resp:
+                    if resp.status < 200 or resp.status >= 300:
+                        logger.warning(
+                            "Matrix: coordinator rejected event %s in %s with HTTP %s",
+                            event_id,
+                            room_id,
+                            resp.status,
+                        )
+                        return is_mentioned, body
+                    decision = await resp.json()
+        except Exception:
+            logger.warning(
+                "Matrix: coordinator unavailable for event %s in %s; falling back to mention-only",
+                event_id,
+                room_id,
+                exc_info=True,
+            )
+            return is_mentioned, body
+
+        allowed = decision.get("allowedSpeakers")
+        if not isinstance(allowed, list):
+            return False, body
+        should_reply = any(
+            isinstance(speaker, dict)
+            and speaker.get("platform") == "hermes"
+            and speaker.get("agentId") == self._coordination_agent_id
+            for speaker in allowed
+        )
+        if not should_reply:
+            if sender_payload.get("kind") == "human":
+                from gateway.session import build_session_key
+
+                session_key = build_session_key(
+                    source,
+                    group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
+                    thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
+                )
+                await self.cancel_session_processing(session_key)
+                logger.info(
+                    "Matrix: coordinator suppressed Hermes and cancelled active session %s for event %s in %s",
+                    session_key,
+                    event_id,
+                    room_id,
+                )
+            return False, body
+        context = decision.get("contextText")
+        if isinstance(context, str) and context.strip():
+            body = f"Recent Matrix room context:\n{context.strip()}\n\nNewest message:\n{body}"
+        return True, body
 
     async def _handle_text_message(
         self,
@@ -3514,6 +3784,32 @@ class MatrixAdapter(BasePlatformAdapter):
         # is treated as a command, matching how ``/command`` is recognized below.
         body = _normalize_matrix_bang_command(body)
 
+        formatted_body = source_content.get("formatted_body")
+        mentions_block = source_content.get("m.mentions") or {}
+        mention_user_ids = (
+            mentions_block.get("user_ids") if isinstance(mentions_block, dict) else None
+        )
+        is_mentioned = bool(
+            source_content.get(_MATRIX_WAS_MENTIONED_KEY)
+            or self._is_bot_mentioned(body, formatted_body, mention_user_ids)
+        )
+        allowed, body = await self._coordination_allows(
+            room_id,
+            sender,
+            event_id,
+            body,
+            source_content,
+            is_mentioned,
+            source,
+        )
+        if not allowed:
+            logger.debug(
+                "Matrix: coordinator suppressed event %s in %s",
+                event_id,
+                room_id,
+            )
+            return
+
         msg_type = MessageType.TEXT
         if body.startswith("/"):
             msg_type = MessageType.COMMAND
@@ -3522,7 +3818,7 @@ class MatrixAdapter(BasePlatformAdapter):
             text=body,
             message_type=msg_type,
             source=source,
-            raw_message=source_content,
+            raw_message=self._matrix_public_source_content(source_content),
             message_id=event_id,
             reply_to_message_id=reply_to,
             reply_to_text=reply_to_text,
@@ -3536,10 +3832,43 @@ class MatrixAdapter(BasePlatformAdapter):
             user_name=display_name,
         )
 
+        msg_event = self._apply_matrix_group_observe_attribution(msg_event)
         if msg_type == MessageType.TEXT and self._text_batch_delay_seconds > 0:
             self._enqueue_text_event(msg_event)
         else:
             await self.handle_message(msg_event)
+
+    def _apply_matrix_group_observe_attribution(self, event: MessageEvent) -> MessageEvent:
+        room_id = getattr(event.source, "chat_id", None)
+        if not room_id or not self._should_observe_unmentioned_group_message(str(room_id)):
+            return event
+        shared_source = self._matrix_group_observe_shared_source(event.source)
+        observe_prompt = self._matrix_group_observe_channel_prompt()
+        channel_prompt = (
+            f"{event.channel_prompt}\n\n{observe_prompt}"
+            if event.channel_prompt
+            else observe_prompt
+        )
+        return dataclasses.replace(
+            event,
+            text=self._matrix_group_observe_attributed_text(
+                text=event.text,
+                sender=event.source.user_id or "unknown",
+                display_name=event.source.user_name,
+            ),
+            source=shared_source,
+            channel_prompt=channel_prompt,
+        )
+
+    @staticmethod
+    def _matrix_public_source_content(source_content: dict) -> dict:
+        if _MATRIX_WAS_MENTIONED_KEY not in source_content:
+            return source_content
+        return {
+            key: value
+            for key, value in source_content.items()
+            if key != _MATRIX_WAS_MENTIONED_KEY
+        }
 
     async def _handle_media_message(
         self,
@@ -3755,7 +4084,7 @@ class MatrixAdapter(BasePlatformAdapter):
             text=body,
             message_type=msg_type,
             source=source,
-            raw_message=source_content,
+            raw_message=self._matrix_public_source_content(source_content),
             message_id=event_id,
             media_urls=media_urls,
             media_types=media_types,
@@ -5422,6 +5751,16 @@ def _apply_yaml_config(yaml_cfg: dict, matrix_cfg: dict) -> dict | None:
         os.environ["MATRIX_DM_MENTION_THREADS"] = str(matrix_cfg["dm_mention_threads"]).lower()
     if "max_message_length" in matrix_cfg and not os.getenv("MATRIX_MAX_MESSAGE_LENGTH"):
         os.environ["MATRIX_MAX_MESSAGE_LENGTH"] = str(matrix_cfg["max_message_length"])
+    observe_rooms = matrix_cfg.get("observe_rooms")
+    if observe_rooms is not None and not os.getenv("MATRIX_OBSERVE_ROOMS"):
+        if isinstance(observe_rooms, list):
+            observe_rooms = ",".join(str(v) for v in observe_rooms)
+        os.environ["MATRIX_OBSERVE_ROOMS"] = str(observe_rooms)
+    mention_aliases = matrix_cfg.get("mention_aliases")
+    if mention_aliases is not None and not os.getenv("MATRIX_MENTION_ALIASES"):
+        if isinstance(mention_aliases, (dict, list)):
+            mention_aliases = json.dumps(mention_aliases)
+        os.environ["MATRIX_MENTION_ALIASES"] = str(mention_aliases)
     return None
 
 
