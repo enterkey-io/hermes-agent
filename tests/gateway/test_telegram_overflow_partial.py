@@ -138,3 +138,12 @@ async def test_stream_consumer_fallback_sends_tail_after_partial_overflow():
     adapter.delete_message.assert_not_awaited()
     assert consumer.final_response_sent is True
     assert consumer.final_content_delivered is True
+
+
+def test_stream_consumer_continuation_preserves_paragraph_break():
+    """Fallback final sends must not erase leading newlines from unseen text."""
+    adapter = MagicMock()
+    consumer = GatewayStreamConsumer(adapter, "chat-1")
+    consumer._last_sent_text = "That works."
+
+    assert consumer._continuation_text("That works.\n\n*leans back*") == "\n\n*leans back*"

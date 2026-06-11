@@ -149,6 +149,7 @@ class Platform(Enum):
     SIGNAL = "signal"
     MATTERMOST = "mattermost"
     MATRIX = "matrix"
+    VOICE = "voice"
     HOMEASSISTANT = "homeassistant"
     EMAIL = "email"
     SMS = "sms"
@@ -465,6 +466,7 @@ _PLATFORM_CONNECTED_CHECKERS: dict[Platform, Callable[[PlatformConfig], bool]] =
     Platform.SIGNAL: lambda cfg: bool(cfg.extra.get("http_url")),
     Platform.EMAIL: lambda cfg: bool(cfg.extra.get("address")),
     Platform.SMS: lambda cfg: bool(os.getenv("TWILIO_ACCOUNT_SID")),
+    Platform.VOICE: lambda cfg: True,
     Platform.API_SERVER: lambda cfg: True,
     Platform.WEBHOOK: lambda cfg: True,
     Platform.MSGRAPH_WEBHOOK: lambda cfg: bool(
@@ -1246,6 +1248,11 @@ def load_gateway_config() -> GatewayConfig:
                     os.environ["MATRIX_AUTO_THREAD"] = str(matrix_cfg["auto_thread"]).lower()
                 if "dm_mention_threads" in matrix_cfg and not os.getenv("MATRIX_DM_MENTION_THREADS"):
                     os.environ["MATRIX_DM_MENTION_THREADS"] = str(matrix_cfg["dm_mention_threads"]).lower()
+                mention_aliases = matrix_cfg.get("mention_aliases")
+                if mention_aliases is not None and not os.getenv("MATRIX_MENTION_ALIASES"):
+                    if isinstance(mention_aliases, (dict, list)):
+                        mention_aliases = json.dumps(mention_aliases)
+                    os.environ["MATRIX_MENTION_ALIASES"] = str(mention_aliases)
 
             # Feishu settings → env vars (env vars take precedence)
             feishu_cfg = yaml_cfg.get("feishu", {})
