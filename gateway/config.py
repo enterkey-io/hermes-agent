@@ -1248,6 +1248,11 @@ def load_gateway_config() -> GatewayConfig:
                     os.environ["MATRIX_AUTO_THREAD"] = str(matrix_cfg["auto_thread"]).lower()
                 if "dm_mention_threads" in matrix_cfg and not os.getenv("MATRIX_DM_MENTION_THREADS"):
                     os.environ["MATRIX_DM_MENTION_THREADS"] = str(matrix_cfg["dm_mention_threads"]).lower()
+                observe_rooms = matrix_cfg.get("observe_rooms")
+                if observe_rooms is not None and not os.getenv("MATRIX_OBSERVE_ROOMS"):
+                    if isinstance(observe_rooms, list):
+                        observe_rooms = ",".join(str(v) for v in observe_rooms)
+                    os.environ["MATRIX_OBSERVE_ROOMS"] = str(observe_rooms)
                 mention_aliases = matrix_cfg.get("mention_aliases")
                 if mention_aliases is not None and not os.getenv("MATRIX_MENTION_ALIASES"):
                     if isinstance(mention_aliases, (dict, list)):
