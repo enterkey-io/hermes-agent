@@ -225,6 +225,29 @@ class TestOutboundMentions:
         assert "@code:example.org</a>" not in content["formatted_body"]
 
     @pytest.mark.asyncio
+    async def test_send_alias_mentions_are_case_insensitive(self):
+        self.adapter._mention_aliases = {"maya": "@maya.full:servv.net"}
+
+        await self.adapter.send("!room1:example.org", "Can you check this, @Maya?")
+
+        content = self._sent_content(self.mock_client)
+        assert content["m.mentions"] == {"user_ids": ["@maya.full:servv.net"]}
+        assert content["formatted_body"] == (
+            'Can you check this, <a href="https://matrix.to/#/@maya.full:servv.net">'
+            "@Maya</a>?"
+        )
+
+    @pytest.mark.asyncio
+    async def test_send_alias_mentions_ignore_code_spans(self):
+        self.adapter._mention_aliases = {"maya": "@maya.full:servv.net"}
+
+        await self.adapter.send("!room1:example.org", "Literal `@maya` is not a ping.")
+
+        content = self._sent_content(self.mock_client)
+        assert "m.mentions" not in content
+        assert "@maya</a>" not in content.get("formatted_body", "")
+
+    @pytest.mark.asyncio
     async def test_edit_message_preserves_mentions(self):
         result = await self.adapter.edit_message(
             "!room1:example.org",
@@ -795,6 +818,40 @@ class TestMatrixConfigBridge:
                 )
 
         assert os.getenv("MATRIX_DM_MENTION_THREADS") == "true"
+
+    def test_yaml_bridge_sets_mention_aliases(self, monkeypatch, tmp_path):
+        """Matrix YAML mention_aliases should bridge to env var as JSON."""
+        monkeypatch.delenv("MATRIX_MENTION_ALIASES", raising=False)
+
+        import json
+        import os
+
+        import yaml
+
+        yaml_content = {
+            "matrix": {
+                "mention_aliases": {
+                    "maya": "@maya.full:servv.net",
+                    "aurora": "@aurora.full:servv.net",
+                }
+            }
+        }
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(yaml.dump(yaml_content))
+
+        yaml_cfg = yaml.safe_load(config_file.read_text())
+        matrix_cfg = yaml_cfg.get("matrix", {})
+        if isinstance(matrix_cfg, dict):
+            mention_aliases = matrix_cfg.get("mention_aliases")
+            if mention_aliases is not None and not os.getenv("MATRIX_MENTION_ALIASES"):
+                if isinstance(mention_aliases, (dict, list)):
+                    mention_aliases = json.dumps(mention_aliases)
+                monkeypatch.setenv("MATRIX_MENTION_ALIASES", str(mention_aliases))
+
+        assert json.loads(os.getenv("MATRIX_MENTION_ALIASES")) == {
+            "maya": "@maya.full:servv.net",
+            "aurora": "@aurora.full:servv.net",
+        }
 
     def test_env_vars_take_precedence_over_yaml(self, monkeypatch):
         """Env vars should not be overwritten by YAML values."""

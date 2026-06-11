@@ -3569,6 +3569,17 @@ class TestCronDeliveryTargets:
 
         assert targets["matrix"]["home_target_set"] is True
 
+    def test_voice_home_channel_is_cron_deliverable(self, monkeypatch):
+        from cron.scheduler import cron_delivery_targets
+
+        self._patch_connected(monkeypatch, ["voice"])
+        monkeypatch.delenv("VOICE_HOME_CHANNEL", raising=False)
+
+        targets = {t["id"]: t for t in cron_delivery_targets()}
+
+        assert targets["voice"]["home_env_var"] == "VOICE_HOME_CHANNEL"
+        assert targets["voice"]["home_target_set"] is False
+
     def test_unconfigured_platforms_excluded(self, monkeypatch):
         from cron.scheduler import cron_delivery_targets
 
