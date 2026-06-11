@@ -54,6 +54,7 @@ from __future__ import annotations
 import asyncio
 import array
 import inspect
+import json
 import logging
 import mimetypes
 import os
@@ -606,6 +607,7 @@ _STARTUP_GRACE_SECONDS = 5
 _OUTBOUND_MENTION_RE = re.compile(
     r"(?<![\w/])(@[0-9A-Za-z._=/-]+:[0-9A-Za-z.-]+(?::\d+)?)"
 )
+_OUTBOUND_ALIAS_MENTION_RE = re.compile(r"(?<![\w/])@([0-9A-Za-z._=-]+)")
 
 _E2EE_INSTALL_HINT = (
     "Install with: pip install 'mautrix[encryption]' asyncpg aiosqlite  "
@@ -1251,6 +1253,10 @@ class MatrixAdapter(BasePlatformAdapter):
         self._allow_room_mentions: bool = os.getenv(
             "MATRIX_ALLOW_ROOM_MENTIONS", "false"
         ).lower() in ("true", "1", "yes")
+        self._mention_aliases: Dict[str, str] = self._parse_mention_aliases(
+            config.extra.get("mention_aliases")
+            or os.getenv("MATRIX_MENTION_ALIASES", "")
+        )
         self._auto_thread: bool = os.getenv("MATRIX_AUTO_THREAD", "true").lower() in (
             "true",
             "1",
@@ -1395,6 +1401,30 @@ class MatrixAdapter(BasePlatformAdapter):
         return os.getenv(
             "MATRIX_THREAD_REQUIRE_MENTION", "false"
         ).lower() in {"true", "1", "yes", "on"}
+
+    @staticmethod
+    def _parse_mention_aliases(raw) -> Dict[str, str]:
+        """Parse alias -> Matrix user ID mappings for outbound mentions."""
+        if not raw:
+            return {}
+        parsed = raw
+        if isinstance(raw, str):
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                logger.warning("Matrix: invalid mention_aliases JSON; ignoring")
+                return {}
+        if not isinstance(parsed, dict):
+            return {}
+        aliases: Dict[str, str] = {}
+        for alias, user_id in parsed.items():
+            if not isinstance(alias, str) or not isinstance(user_id, str):
+                continue
+            alias_key = alias.strip().lstrip("@").lower()
+            user_id = user_id.strip()
+            if alias_key and user_id.startswith("@") and ":" in user_id:
+                aliases[alias_key] = user_id
+        return aliases
 
     # ------------------------------------------------------------------
     # E2EE helpers
@@ -4823,6 +4853,13 @@ class MatrixAdapter(BasePlatformAdapter):
             if user_id not in seen:
                 seen.add(user_id)
                 mentions.append(user_id)
+        for match in _OUTBOUND_ALIAS_MENTION_RE.finditer(protected):
+            if match.end() < len(protected) and protected[match.end()] == ":":
+                continue
+            user_id = self._mention_aliases.get(match.group(1).lower())
+            if user_id and user_id not in seen:
+                seen.add(user_id)
+                mentions.append(user_id)
         return mentions
 
     def _has_outbound_room_mention(self, text: str) -> bool:
@@ -4841,11 +4878,25 @@ class MatrixAdapter(BasePlatformAdapter):
             lambda match: f"[{match.group(1)}](https://matrix.to/#/{match.group(1)})",
             protected,
         )
+        linked = self._inject_outbound_alias_mention_links(linked)
 
         for idx, original in enumerate(placeholders):
             linked = linked.replace(f"\x00MENTION_PROTECTED{idx}\x00", original)
 
         return linked
+
+    def _inject_outbound_alias_mention_links(self, text: str) -> str:
+        """Wrap configured outbound alias mentions in Matrix mention links."""
+        def replace(match: re.Match) -> str:
+            if match.end() < len(text) and text[match.end()] == ":":
+                return match.group(0)
+            alias = match.group(1)
+            user_id = self._mention_aliases.get(alias.lower())
+            if not user_id:
+                return match.group(0)
+            return f"[{match.group(0)}](https://matrix.to/#/{user_id})"
+
+        return _OUTBOUND_ALIAS_MENTION_RE.sub(replace, text)
 
     def _protect_outbound_mention_regions(self, text: str) -> tuple[str, list[str]]:
         """Protect markdown regions where outbound mentions should stay literal."""

@@ -156,6 +156,73 @@ class TestOutboundMentions:
             "@alice:example.org</a>, please check this."
         )
 
+    @pytest.mark.asyncio
+    async def test_send_dedupes_mentions_and_ignores_code_spans(self):
+        await self.adapter.send(
+            "!room1:example.org",
+            "Ping @alice:example.org and @alice:example.org, not `@code:example.org`.",
+        )
+
+        content = self._sent_content(self.mock_client)
+        assert content["m.mentions"] == {"user_ids": ["@alice:example.org"]}
+        assert "@code:example.org</a>" not in content["formatted_body"]
+
+    @pytest.mark.asyncio
+    async def test_send_alias_mentions_are_case_insensitive(self):
+        self.adapter._mention_aliases = {"maya": "@maya.full:servv.net"}
+
+        await self.adapter.send("!room1:example.org", "Can you check this, @Maya?")
+
+        content = self._sent_content(self.mock_client)
+        assert content["m.mentions"] == {"user_ids": ["@maya.full:servv.net"]}
+        assert content["formatted_body"] == (
+            'Can you check this, <a href="https://matrix.to/#/@maya.full:servv.net">'
+            "@Maya</a>?"
+        )
+
+    @pytest.mark.asyncio
+    async def test_send_alias_mentions_ignore_code_spans(self):
+        self.adapter._mention_aliases = {"maya": "@maya.full:servv.net"}
+
+        await self.adapter.send("!room1:example.org", "Literal `@maya` is not a ping.")
+
+        content = self._sent_content(self.mock_client)
+        assert "m.mentions" not in content
+        assert "@maya</a>" not in content.get("formatted_body", "")
+
+    @pytest.mark.asyncio
+    async def test_edit_message_preserves_mentions(self):
+        result = await self.adapter.edit_message(
+            "!room1:example.org",
+            "$original",
+            "Updated for @alice:example.org",
+        )
+
+        assert result.success is True
+        content = self._sent_content(self.mock_client)
+        assert content["m.mentions"] == {"user_ids": ["@alice:example.org"]}
+        assert content["m.new_content"]["m.mentions"] == {"user_ids": ["@alice:example.org"]}
+        assert content["m.new_content"]["formatted_body"] == (
+            'Updated for <a href="https://matrix.to/#/@alice:example.org">'
+            "@alice:example.org</a>"
+        )
+        assert content["formatted_body"] == (
+            '* Updated for <a href="https://matrix.to/#/@alice:example.org">'
+            "@alice:example.org</a>"
+        )
+
+    @pytest.mark.asyncio
+    async def test_send_simple_notice_adds_mentions(self):
+        result = await self.adapter._send_simple_message(
+            "!room1:example.org",
+            "Heads up @alice:example.org",
+            msgtype="m.notice",
+        )
+
+        assert result.success is True
+        content = self._sent_content(self.mock_client)
+        assert content["msgtype"] == "m.notice"
+        assert content["m.mentions"] == {"user_ids": ["@alice:example.org"]}
 
 # ---------------------------------------------------------------------------
 # Require-mention gating in _on_room_message
@@ -384,3 +451,76 @@ class TestMatrixConfigBridge:
         assert os.getenv("MATRIX_AUTO_THREAD") == "false"
 
 
+    def test_yaml_bridge_sets_dm_mention_threads(self, monkeypatch, tmp_path):
+        """Matrix YAML dm_mention_threads should bridge to env var."""
+        monkeypatch.delenv("MATRIX_DM_MENTION_THREADS", raising=False)
+
+        import os
+
+        import yaml
+
+        yaml_content = {"matrix": {"dm_mention_threads": True}}
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(yaml.dump(yaml_content))
+
+        yaml_cfg = yaml.safe_load(config_file.read_text())
+        matrix_cfg = yaml_cfg.get("matrix", {})
+        if isinstance(matrix_cfg, dict):
+            if "dm_mention_threads" in matrix_cfg and not os.getenv(
+                "MATRIX_DM_MENTION_THREADS"
+            ):
+                monkeypatch.setenv(
+                    "MATRIX_DM_MENTION_THREADS",
+                    str(matrix_cfg["dm_mention_threads"]).lower(),
+                )
+
+        assert os.getenv("MATRIX_DM_MENTION_THREADS") == "true"
+
+    def test_yaml_bridge_sets_mention_aliases(self, monkeypatch, tmp_path):
+        """Matrix YAML mention_aliases should bridge to env var as JSON."""
+        monkeypatch.delenv("MATRIX_MENTION_ALIASES", raising=False)
+
+        import json
+        import os
+
+        import yaml
+
+        yaml_content = {
+            "matrix": {
+                "mention_aliases": {
+                    "maya": "@maya.full:servv.net",
+                    "aurora": "@aurora.full:servv.net",
+                }
+            }
+        }
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(yaml.dump(yaml_content))
+
+        yaml_cfg = yaml.safe_load(config_file.read_text())
+        matrix_cfg = yaml_cfg.get("matrix", {})
+        if isinstance(matrix_cfg, dict):
+            mention_aliases = matrix_cfg.get("mention_aliases")
+            if mention_aliases is not None and not os.getenv("MATRIX_MENTION_ALIASES"):
+                if isinstance(mention_aliases, (dict, list)):
+                    mention_aliases = json.dumps(mention_aliases)
+                monkeypatch.setenv("MATRIX_MENTION_ALIASES", str(mention_aliases))
+
+        assert json.loads(os.getenv("MATRIX_MENTION_ALIASES")) == {
+            "maya": "@maya.full:servv.net",
+            "aurora": "@aurora.full:servv.net",
+        }
+
+    def test_env_vars_take_precedence_over_yaml(self, monkeypatch):
+        """Env vars should not be overwritten by YAML values."""
+        monkeypatch.setenv("MATRIX_REQUIRE_MENTION", "true")
+
+        import os
+
+        yaml_cfg = {"matrix": {"require_mention": False}}
+        matrix_cfg = yaml_cfg.get("matrix", {})
+        if "require_mention" in matrix_cfg and not os.getenv("MATRIX_REQUIRE_MENTION"):
+            monkeypatch.setenv(
+                "MATRIX_REQUIRE_MENTION", str(matrix_cfg["require_mention"]).lower()
+            )
+
+        assert os.getenv("MATRIX_REQUIRE_MENTION") == "true"

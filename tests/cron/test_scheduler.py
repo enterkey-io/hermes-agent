@@ -1604,6 +1604,49 @@ class TestCronDeliveryTargets:
         assert targets["matrix"]["home_env_var"] == "MATRIX_HOME_ROOM"
         assert targets["telegram"]["home_target_set"] is False
 
+    def test_home_channel_set_marks_target_ready(self, monkeypatch):
+        from cron.scheduler import cron_delivery_targets
+
+        self._patch_connected(monkeypatch, ["matrix"])
+        monkeypatch.setenv("MATRIX_HOME_ROOM", "!room:matrix.org")
+
+        targets = {t["id"]: t for t in cron_delivery_targets()}
+
+        assert targets["matrix"]["home_target_set"] is True
+
+    def test_voice_home_channel_is_cron_deliverable(self, monkeypatch):
+        from cron.scheduler import cron_delivery_targets
+
+        self._patch_connected(monkeypatch, ["voice"])
+        monkeypatch.delenv("VOICE_HOME_CHANNEL", raising=False)
+
+        targets = {t["id"]: t for t in cron_delivery_targets()}
+
+        assert targets["voice"]["home_env_var"] == "VOICE_HOME_CHANNEL"
+        assert targets["voice"]["home_target_set"] is False
+
+    def test_unconfigured_platforms_excluded(self, monkeypatch):
+        from cron.scheduler import cron_delivery_targets
+
+        # Only telegram is connected; matrix env var set but gateway not configured.
+        self._patch_connected(monkeypatch, ["telegram"])
+        monkeypatch.setenv("MATRIX_HOME_ROOM", "!room:matrix.org")
+
+        ids = {t["id"] for t in cron_delivery_targets()}
+
+        assert ids == {"telegram"}
+        assert "matrix" not in ids
+
+    def test_no_gateway_config_returns_empty(self, monkeypatch):
+        import gateway.config as gateway_config
+        from cron.scheduler import cron_delivery_targets
+
+        def _boom():
+            raise RuntimeError("no gateway config")
+
+        monkeypatch.setattr(gateway_config, "load_gateway_config", _boom)
+
+        assert cron_delivery_targets() == []
 
 class TestHomeTargetEnvVarRegistry:
     """Regression: ``_HOME_TARGET_ENV_VARS`` must include every gateway
@@ -1974,5 +2017,4 @@ class TestSetCronSessionTitle:
         out = _set_cron_session_title(db, "sess-1", "Nightly Synthesis")
         assert out == "Nightly Synthesis #2"
         db.get_next_title_in_lineage.assert_called_once_with("Nightly Synthesis")
-
 

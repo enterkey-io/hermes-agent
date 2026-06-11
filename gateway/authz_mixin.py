@@ -400,7 +400,7 @@ class GatewayAuthorizationMixin:
         # connection, so HA events are always authorized.
         # Webhook events are authenticated via HMAC signature validation in
         # the adapter itself — no user allowlist applies.
-        if source.platform in {Platform.HOMEASSISTANT, Platform.WEBHOOK}:
+        if source.platform in {Platform.HOMEASSISTANT, Platform.WEBHOOK, Platform.VOICE}:
             return True
 
         adapter_profile = self._adapter_profile_for_source(source)

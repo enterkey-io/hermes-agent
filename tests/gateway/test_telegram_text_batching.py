@@ -159,3 +159,14 @@ class TestTextBatching:
         assert adapter._media_group_events == {}
         assert adapter._media_group_tasks == {}
         assert adapter._polling_error_task is None
+
+
+def test_truncate_message_preserves_paragraph_break_at_chunk_boundary():
+    """Long-message splitting should not strip newlines from the next chunk."""
+    from gateway.platforms.base import BasePlatformAdapter
+
+    content = ("a" * 50) + "\n\n" + ("second paragraph " * 5)
+    chunks = BasePlatformAdapter.truncate_message(content, max_length=70)
+
+    assert len(chunks) > 1
+    assert chunks[1].startswith("\nsecond paragraph")

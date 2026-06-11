@@ -7797,6 +7797,15 @@ class TelegramAdapter(BasePlatformAdapter):
             text,
         )
 
+        # 6b) Telegram MarkdownV2 can visually blend a line that starts with
+        #     an italic action into the previous line.  Force a paragraph
+        #     break before italic placeholders that follow a single newline.
+        text = re.sub(
+            r'(?<!\n)\n(\x00PH\d+\x00)',
+            r'\n\n\1',
+            text,
+        )
+
         # 7) Convert strikethrough: ~~text~~ → ~text~ (MarkdownV2)
         text = re.sub(
             r'~~(.+?)~~',

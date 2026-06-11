@@ -92,6 +92,14 @@ class TestFormatMessageBasic:
         assert "\\." in result
         assert "\\!" in result
 
+    def test_plain_text_no_markdown(self, adapter):
+        result = adapter.format_message("Hello world")
+        assert result == "Hello world"
+
+    def test_single_newline_before_italic_action_becomes_paragraph_break(self, adapter):
+        """Action-style italic lines should not blend into the previous line."""
+        result = adapter.format_message("That works.\n*leans back*")
+        assert "That works\\.\n\n_leans back_" in result
 
 # =========================================================================
 # format_message - code blocks

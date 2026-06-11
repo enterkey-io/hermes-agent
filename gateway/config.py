@@ -286,6 +286,7 @@ class Platform(Enum):
     SIGNAL = "signal"
     MATTERMOST = "mattermost"
     MATRIX = "matrix"
+    VOICE = "voice"
     HOMEASSISTANT = "homeassistant"
     EMAIL = "email"
     SMS = "sms"
@@ -843,6 +844,9 @@ _PLATFORM_CONNECTED_CHECKERS: dict[Platform, Callable[[PlatformConfig], bool]] =
         cfg.extra.get("phone_number_id") and cfg.extra.get("access_token")
     ),
     Platform.SIGNAL: lambda cfg: bool(cfg.extra.get("http_url")),
+    Platform.EMAIL: lambda cfg: bool(cfg.extra.get("address")),
+    Platform.SMS: lambda cfg: bool(os.getenv("TWILIO_ACCOUNT_SID")),
+    Platform.VOICE: lambda cfg: True,
     Platform.API_SERVER: lambda cfg: _has_usable_api_server_key(
         cfg.extra.get("key") if cfg else None
     ),

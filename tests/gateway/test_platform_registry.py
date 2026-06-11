@@ -18,6 +18,9 @@ class TestPlatformEnumDynamic:
         assert Platform.TELEGRAM.value == "telegram"
         assert Platform("telegram") is Platform.TELEGRAM
 
+    def test_voice_platform_is_builtin(self):
+        assert Platform.VOICE.value == "voice"
+        assert Platform("voice") is Platform.VOICE
 
     def test_dynamic_member_case_normalised(self):
         """Mixed case normalised to lowercase."""

@@ -4429,7 +4429,7 @@ class BasePlatformAdapter(ABC):
             cleaned = re.sub(md_pattern, _remove_if_extracted, cleaned)
             cleaned = re.sub(html_pattern, _remove_if_extracted, cleaned)
             # Clean up leftover blank lines
-            cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+            cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip(' \t')
         
         return images, cleaned
     
@@ -4943,7 +4943,7 @@ class BasePlatformAdapter(ABC):
                 for start, end in reversed(_merge_spans(spans)):
                     del chars[start:end]
                 cleaned = "".join(chars)
-                cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+                cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip(' \t')
         
         return media, cleaned
 
@@ -7218,7 +7218,7 @@ class BasePlatformAdapter(ABC):
                         split_at = safe_split
 
             chunk_body = remaining[:split_at]
-            remaining = remaining[split_at:].lstrip()
+            remaining = remaining[split_at:].lstrip(' \t')
 
             full_chunk = prefix + chunk_body
 

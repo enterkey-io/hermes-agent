@@ -1,6 +1,8 @@
 """Tests for TTS speed configuration across providers."""
 
 import asyncio
+import sys
+import types
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -113,6 +115,81 @@ class TestOpenaiTtsLangCode:
         kwargs = create.call_args[1]
         assert kwargs["extra_body"] == {"lang_code": "es"}
         assert kwargs["speed"] == 2.0
+
+
+# ---------------------------------------------------------------------------
+# ElevenLabs TTS voice settings
+# ---------------------------------------------------------------------------
+
+class TestElevenLabsVoiceSettings:
+    def _run(self, tts_config, tmp_path, monkeypatch):
+        monkeypatch.setenv("ELEVENLABS_API_KEY", "test-key")
+
+        class FakeVoiceSettings:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        types_mod = types.ModuleType("elevenlabs.types")
+        types_mod.VoiceSettings = FakeVoiceSettings
+        monkeypatch.setitem(sys.modules, "elevenlabs.types", types_mod)
+
+        mock_client = MagicMock()
+        mock_client.text_to_speech.convert.return_value = [b"audio"]
+        mock_cls = MagicMock(return_value=mock_client)
+
+        with patch("tools.tts_tool._import_elevenlabs", return_value=mock_cls):
+            from tools.tts_tool import _generate_elevenlabs
+            _generate_elevenlabs("Hello", str(tmp_path / "out.mp3"), tts_config)
+        return mock_client.text_to_speech.convert
+
+    def test_explicit_voice_settings_are_passed(self, tmp_path, monkeypatch):
+        """Configured ElevenLabs VoiceSettings are included in convert kwargs."""
+        convert = self._run(
+            {
+                "speed": 1.2,
+                "elevenlabs": {
+                    "stability": 0.33,
+                    "similarity_boost": 0.74,
+                    "style": 0.2,
+                    "use_speaker_boost": False,
+                },
+            },
+            tmp_path,
+            monkeypatch,
+        )
+
+        settings = convert.call_args.kwargs["voice_settings"]
+        assert settings.kwargs == {
+            "stability": 0.33,
+            "similarity_boost": 0.74,
+            "speed": 1.2,
+            "style": 0.2,
+            "use_speaker_boost": False,
+        }
+
+    def test_unset_voice_settings_are_omitted(self, tmp_path, monkeypatch):
+        """None fields are not sent because they override ElevenLabs defaults."""
+        convert = self._run(
+            {
+                "elevenlabs": {
+                    "stability": 0.33,
+                    "use_speaker_boost": False,
+                },
+            },
+            tmp_path,
+            monkeypatch,
+        )
+
+        settings = convert.call_args.kwargs["voice_settings"]
+        assert settings.kwargs == {
+            "stability": 0.33,
+            "use_speaker_boost": False,
+        }
+
+    def test_no_voice_settings_when_unconfigured(self, tmp_path, monkeypatch):
+        """Default config leaves ElevenLabs API defaults untouched."""
+        convert = self._run({}, tmp_path, monkeypatch)
+        assert "voice_settings" not in convert.call_args.kwargs
 
 
 # ---------------------------------------------------------------------------
