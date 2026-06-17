@@ -17,3 +17,26 @@ def test_gateway_runner_creates_voice_adapter():
     assert adapter is not None
     assert adapter.platform is Platform.VOICE
     assert adapter._vox_url == "ws://localhost:8600/adapter/hermes"
+    assert adapter._platform_name == "hermes"
+
+
+def test_voice_adapter_uses_configured_platform_name():
+    from gateway.run import GatewayRunner
+
+    runner = object.__new__(GatewayRunner)
+    runner.config = GatewayConfig()
+
+    adapter = runner._create_adapter(
+        Platform.VOICE,
+        PlatformConfig(
+            enabled=True,
+            extra={
+                "vox_url": "ws://localhost:8600/adapter/xenia",
+                "platform_name": "xenia",
+            },
+        ),
+    )
+
+    assert adapter is not None
+    assert adapter._vox_url == "ws://localhost:8600/adapter/xenia"
+    assert adapter._platform_name == "xenia"
