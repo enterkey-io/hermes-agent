@@ -35,6 +35,7 @@ class VoiceAdapter(BasePlatformAdapter):
         self._ws_task: asyncio.Task | None = None
         extra = getattr(config, "extra", {}) or {}
         self._vox_url = extra.get("vox_url", "ws://localhost:8600/adapter/hermes")
+        self._platform_name = str(extra.get("platform_name") or "hermes").strip() or "hermes"
         self._active_calls: Dict[str, str] = {}
 
     async def connect(self) -> bool:
@@ -44,7 +45,7 @@ class VoiceAdapter(BasePlatformAdapter):
         try:
             self._ws = await websockets.connect(self._vox_url)
             logger.info("Connected to Vox at %s", self._vox_url)
-            await self._ws.send(json.dumps({"type": "ready", "platform": "hermes"}))
+            await self._ws.send(json.dumps({"type": "ready", "platform": self._platform_name}))
             self._ws_task = asyncio.create_task(self._listen())
             self._mark_connected()
             return True
@@ -74,7 +75,7 @@ class VoiceAdapter(BasePlatformAdapter):
             await asyncio.sleep(5)
             try:
                 self._ws = await websockets.connect(self._vox_url)
-                await self._ws.send(json.dumps({"type": "ready", "platform": "hermes"}))
+                await self._ws.send(json.dumps({"type": "ready", "platform": self._platform_name}))
                 self._ws_task = asyncio.create_task(self._listen())
                 self._mark_connected()
                 logger.info("Reconnected to Vox")
