@@ -126,6 +126,97 @@ def test_run_agent_prefers_session_override_over_global_runtime(monkeypatch):
     assert _CapturingAgent.last_init["reasoning_config"] == {"enabled": True, "effort": "high"}
 
 
+def test_matrix_platform_model_default_overrides_global_model(monkeypatch):
+    calls = []
+
+    def fake_runtime_resolution(*, requested_provider=None, target_model=None):
+        calls.append(
+            {
+                "requested_provider": requested_provider,
+                "target_model": target_model,
+            }
+        )
+        return {
+            "provider": requested_provider,
+            "api_key": "***",
+            "base_url": "https://ollama.com/v1",
+            "api_mode": "chat_completions",
+        }
+
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", fake_runtime_resolution)
+    runner = _make_runner()
+    source = SessionSource(
+        platform=Platform.MATRIX,
+        chat_id="!room:example.org",
+        chat_name="Matrix room",
+        chat_type="group",
+        user_id="@elliott:example.org",
+    )
+    config = {
+        "model": {
+            "default": "gpt-5.5",
+            "provider": "openai-codex",
+        },
+        "platform_models": {
+            "matrix": {
+                "default": "glm-5.2:cloud",
+                "provider": "ollama-cloud",
+            },
+        },
+    }
+
+    model, runtime = runner._resolve_session_agent_runtime(
+        source=source,
+        session_key="agent:main:matrix:group:!room:example.org:@elliott:example.org",
+        user_config=config,
+    )
+
+    assert model == "glm-5.2:cloud"
+    assert runtime["provider"] == "ollama-cloud"
+    assert calls == [
+        {
+            "requested_provider": "ollama-cloud",
+            "target_model": "glm-5.2:cloud",
+        }
+    ]
+
+
+def test_session_model_override_wins_over_platform_model(monkeypatch):
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", _explode_runtime_resolution)
+    runner = _make_runner()
+    source = SessionSource(
+        platform=Platform.MATRIX,
+        chat_id="!room:example.org",
+        chat_name="Matrix room",
+        chat_type="group",
+        user_id="@elliott:example.org",
+    )
+    session_key = "agent:main:matrix:group:!room:example.org:@elliott:example.org"
+    runner._session_model_overrides[session_key] = _codex_override()
+    config = {
+        "model": {
+            "default": "gpt-5.5",
+            "provider": "openai-codex",
+        },
+        "platform_models": {
+            "matrix": {
+                "default": "glm-5.2:cloud",
+                "provider": "ollama-cloud",
+            },
+        },
+    }
+
+    model, runtime = runner._resolve_session_agent_runtime(
+        source=source,
+        session_key=session_key,
+        user_config=config,
+    )
+
+    assert model == "gpt-5.4"
+    assert runtime["provider"] == "openai-codex"
+    assert runtime["api_mode"] == "codex_responses"
+
+
 @pytest.mark.asyncio
 async def test_background_task_prefers_session_override_over_global_runtime(monkeypatch):
     monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
@@ -186,7 +277,7 @@ fallback_providers:
     )
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
 
-    def fake_resolve_runtime_provider(*, requested=None, explicit_base_url=None, explicit_api_key=None):
+    def fake_resolve_runtime_provider(*, requested=None, explicit_base_url=None, explicit_api_key=None, target_model=None):
         if requested in {None, "", "openai-codex"}:
             from hermes_cli.auth import AuthError
             raise AuthError("No Codex credentials stored. Run `hermes auth` to authenticate.")
@@ -260,4 +351,3 @@ fallback_providers:
     assert runtime_kwargs["api_key"] == "env-secret"
     assert runtime_kwargs["base_url"] == "https://fallback.example/v1"
     assert runtime_kwargs["model"] == "fallback-model"
-
