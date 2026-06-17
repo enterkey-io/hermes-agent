@@ -2567,7 +2567,11 @@ _CONVERSATION_SCOPED_STATE: tuple = (
 _UNSET = object()
 
 
-def _resolve_runtime_agent_kwargs() -> dict:
+def _resolve_runtime_agent_kwargs(
+    *,
+    requested_provider: Optional[str] = None,
+    target_model: Optional[str] = None,
+) -> dict:
     """Resolve provider credentials for gateway-created AIAgent instances.
 
     Provider is read from ``config.yaml`` ``model.provider`` (the single
@@ -2588,7 +2592,10 @@ def _resolve_runtime_agent_kwargs() -> dict:
     from hermes_cli.auth import AuthError, is_rate_limited_auth_error
 
     try:
-        runtime = resolve_runtime_provider()
+        runtime = resolve_runtime_provider(
+            requested=requested_provider,
+            target_model=target_model,
+        )
     except AuthError as auth_exc:
         # Distinguish a transient rate-limit/quota cap (credentials are fine,
         # re-auth cannot help) from a genuine auth failure (expired/revoked
@@ -3396,6 +3403,29 @@ def _get_channel_override(
         if ov is not None:
             return ov
     return None
+
+
+def _resolve_platform_model_config(config: dict | None, platform_key: str | None) -> dict:
+    """Return the configured model/provider override for a gateway platform."""
+    if not platform_key:
+        return {}
+    cfg = config or {}
+    platform_models = cfg.get("platform_models")
+    if not isinstance(platform_models, dict):
+        return {}
+    entry = platform_models.get(platform_key)
+    if isinstance(entry, str):
+        return {"default": entry}
+    if isinstance(entry, dict):
+        model = entry.get("default") or entry.get("model")
+        provider = entry.get("provider")
+        result = {}
+        if isinstance(model, str) and model.strip():
+            result["default"] = model.strip()
+        if isinstance(provider, str) and provider.strip():
+            result["provider"] = provider.strip()
+        return result
+    return {}
 
 
 def _resolve_hermes_bin() -> Optional[list[str]]:
@@ -7051,7 +7081,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             except Exception:
                 resolved_session_key = None
 
-        model = _resolve_gateway_model(user_config)
+        effective_config = user_config if user_config is not None else _load_gateway_config()
+        model = _resolve_gateway_model(effective_config)
+        platform_provider = None
+        if source is not None:
+            try:
+                platform_key = _platform_config_key(source.platform)
+            except Exception:
+                platform_key = None
+            platform_model_cfg = _resolve_platform_model_config(effective_config, platform_key)
+            if platform_model_cfg:
+                model = platform_model_cfg.get("default") or model
+                platform_provider = platform_model_cfg.get("provider") or None
         if resolved_session_key:
             self._rehydrate_session_model_override(resolved_session_key)
         _override_state = (
@@ -7100,7 +7141,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 ][:5] or "[]",
             )
 
-        runtime_kwargs = _resolve_runtime_agent_kwargs()
+        if platform_provider:
+            runtime_kwargs = _resolve_runtime_agent_kwargs(
+                requested_provider=platform_provider,
+                target_model=model,
+            )
+        else:
+            runtime_kwargs = _resolve_runtime_agent_kwargs()
         runtime_model = runtime_kwargs.pop("model", None)
         if runtime_model:
             logger.info(
