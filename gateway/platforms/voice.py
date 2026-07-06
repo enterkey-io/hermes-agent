@@ -38,7 +38,7 @@ class VoiceAdapter(BasePlatformAdapter):
         self._platform_name = str(extra.get("platform_name") or "hermes").strip() or "hermes"
         self._active_calls: Dict[str, str] = {}
 
-    async def connect(self) -> bool:
+    async def connect(self, *, is_reconnect: bool = False) -> bool:
         if not websockets:
             logger.error("websockets package not installed")
             return False
