@@ -597,13 +597,29 @@ function badRequest(res, msg) {
   res.end(JSON.stringify({ ok: false, error: msg }));
 }
 
-function serverError(res) {
+function publicServerErrorMessage(error) {
+  const message = error && error.message ? String(error.message) : String(error || "");
+  if (message.includes("Target not allowed for this project")) {
+    return (
+      "Target not allowed for this project. For Photon shared iMessage lines, " +
+      "have the allowed user text the assigned line first, then reply to the " +
+      "inbound space."
+    );
+  }
+  if (message.includes("unable to resolve space id")) {
+    return "unable to resolve Photon space id";
+  }
+  return "internal sidecar error";
+}
+
+function serverError(res, error) {
   res.statusCode = 500;
   res.setHeader("Content-Type", "application/json");
   // Don't leak stack traces or raw exception text to the caller — even
-  // though we listen on loopback, the supervisor logs the real error
-  // and the client only needs a generic failure signal.
-  res.end(JSON.stringify({ ok: false, error: "internal sidecar error" }));
+  // though we listen on loopback, the supervisor logs the real error.
+  // Surface only hand-classified, non-secret diagnostics that materially
+  // change the operator's next step.
+  res.end(JSON.stringify({ ok: false, error: publicServerErrorMessage(error) }));
 }
 
 function ok(res, data) {
@@ -846,9 +862,9 @@ const server = http.createServer(async (req, res) => {
       "photon-sidecar: handler error: " +
         (e && e.stack ? e.stack : String(e))
     );
-    // serverError() intentionally returns a generic message — see its
-    // body for the rationale.
-    return serverError(res);
+    // serverError() intentionally returns only hand-classified messages — see
+    // its body for the rationale.
+    return serverError(res, e);
   }
 });
 
