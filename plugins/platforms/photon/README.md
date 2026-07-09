@@ -73,6 +73,28 @@ onboarding goes through one setup surface. Re-running `setup` reuses an
 existing token/project, so it's safe to run again to finish a partial setup.
 Run `hermes photon status` to see what's configured.
 
+### Shared-line first contact
+
+On shared iMessage lines, Photon may reject outbound sends with
+`Target not allowed for this project` until the registered/allowlisted user
+texts the assigned iMessage line first. This can happen even when
+`hermes photon status` shows valid project credentials, `my number`, and an
+`assigned number`.
+
+When this happens:
+
+1. Run `hermes photon status`.
+2. Treat `my number` as the registered user/operator number and
+   `assigned number` as the iMessage line the user should text.
+3. Keep `PHOTON_ALLOWED_USERS` and `PHOTON_HOME_CHANNEL` pointed at the
+   registered user number, **not** the assigned shared line.
+4. Ask the user to send any message to the assigned line.
+5. Reply to the resulting inbound space id, usually `any;-;+1...`.
+
+After the user initiates the conversation, normal gateway replies should use
+the inbound space and do not need a separate `hermes send --to photon:+...`
+bootstrap.
+
 ## Credentials
 
 Runtime SDK credentials live in `~/.hermes/.env` (the same place every other

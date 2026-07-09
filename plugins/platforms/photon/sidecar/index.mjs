@@ -806,6 +806,21 @@ function badRequest(res, msg) {
   res.end(JSON.stringify({ ok: false, error: msg }));
 }
 
+function publicServerErrorMessage(error) {
+  const message = error && error.message ? String(error.message) : String(error || "");
+  if (message.includes("Target not allowed for this project")) {
+    return (
+      "Target not allowed for this project. For Photon shared iMessage lines, " +
+      "have the allowed user text the assigned line first, then reply to the " +
+      "inbound space."
+    );
+  }
+  if (message.includes("unable to resolve space id")) {
+    return "unable to resolve Photon space id";
+  }
+  return "internal sidecar error";
+}
+
 function classifySidecarError(err) {
   const message = String(err && err.message ? err.message : err || "");
   const lowered = message.toLowerCase();
@@ -852,16 +867,16 @@ function classifySidecarError(err) {
   return { errorClass: "sidecar_internal", retryable: false };
 }
 
-function serverError(res, err) {
+function serverError(res, error) {
   res.statusCode = 500;
   res.setHeader("Content-Type", "application/json");
-  const classified = classifySidecarError(err);
+  const classified = classifySidecarError(error);
   // Don't leak stack traces or raw exception text to the caller — even
-  // though we listen on loopback, the supervisor logs the real error. The
-  // Python adapter only needs a safe class plus retryability.
+  // though we listen on loopback, the supervisor logs the real error. Surface
+  // only safe diagnostics plus the structured class and retryability.
   res.end(JSON.stringify({
     ok: false,
-    error: "internal sidecar error",
+    error: publicServerErrorMessage(error),
     error_class: classified.errorClass,
     retryable: classified.retryable,
   }));
@@ -1186,8 +1201,8 @@ const server = http.createServer(async (req, res) => {
       "photon-sidecar: handler error: " +
         (e && e.stack ? e.stack : String(e))
     );
-    // serverError() intentionally returns a generic message — see its
-    // body for the rationale.
+    // serverError() intentionally returns only hand-classified messages — see
+    // its body for the rationale.
     return serverError(res, e);
   }
 });

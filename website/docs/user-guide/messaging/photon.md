@@ -160,6 +160,19 @@ You'll see something like:
 
 Send an iMessage to your assigned number and Hermes will reply.
 
+:::tip Shared-line first contact
+With shared iMessage lines, Photon may reject outbound sends with
+`Target not allowed for this project` until the registered/allowlisted user
+texts the assigned line first. If that happens, run `hermes photon status`:
+
+- `my number` is the registered user/operator number.
+- `assigned number` is the shared iMessage line the user should text.
+
+Keep `PHOTON_ALLOWED_USERS` and `PHOTON_HOME_CHANNEL` set to `my number`,
+not the assigned line. Once the user sends the first inbound message to the
+assigned line, Hermes can reply to the inbound space normally.
+:::
+
 ## Status & troubleshooting
 
 ```bash
@@ -192,6 +205,10 @@ Common issues:
 - **`No iMessage line assigned yet`** — Spectrum is enabled but no line
   has been provisioned; re-run `hermes photon setup` or check the
   [dashboard][app].
+- **`Target not allowed for this project`** — on shared iMessage lines,
+  ask the registered user to text the assigned line first, then reply to
+  the inbound space. Verify `PHOTON_ALLOWED_USERS` and `PHOTON_HOME_CHANNEL`
+  point at `my number`, not the assigned line.
 - **Sidecar won't start** — confirm `node --version` is 18.17+ and that
   `hermes photon install-sidecar` completed without errors.
 
