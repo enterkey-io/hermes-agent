@@ -259,11 +259,14 @@ class HonchoMemoryProvider(MemoryProvider):
         self._prefetch_lock = threading.Lock()
         self._prefetch_thread: Optional[threading.Thread] = None
         self._sync_thread: Optional[threading.Thread] = None
-        self._memory_write_threads: set[threading.Thread] = set()
-        self._worker_lock = threading.Lock()
+        self._worker_threads: set[threading.Thread] = set()
+        self._worker_lock = threading.RLock()
         self._shutdown_lock = threading.Lock()
         self._shutting_down = False
         self._shutdown_complete = False
+        self._manager_shutdown = False
+        self._shutdown_wait_floor_s = 35.0
+        self._shutdown_grace_s = 5.0
 
         self._recall_mode = "hybrid"  # "context", "tools", or "hybrid"
 
@@ -303,6 +306,71 @@ class HonchoMemoryProvider(MemoryProvider):
 
         # Cron and flush contexts disable the plugin entirely.
         self._cron_skipped = False
+
+    def _start_worker(
+        self,
+        target,
+        *,
+        name: str,
+        publish_attr: str | None = None,
+    ) -> Optional[threading.Thread]:
+        """Atomically register a producer unless shutdown has started."""
+        with self._worker_lock:
+            if self._shutting_down:
+                return None
+
+            def _tracked_target() -> None:
+                try:
+                    if not self._shutting_down:
+                        target()
+                finally:
+                    with self._worker_lock:
+                        self._worker_threads.discard(threading.current_thread())
+                    if self._shutting_down:
+                        self._finalize_shutdown_if_idle()
+
+            thread = threading.Thread(target=_tracked_target, daemon=True, name=name)
+            self._worker_threads.add(thread)
+            if publish_attr:
+                setattr(self, publish_attr, thread)
+            try:
+                thread.start()
+            except Exception:
+                self._worker_threads.discard(thread)
+                if publish_attr and getattr(self, publish_attr, None) is thread:
+                    setattr(self, publish_attr, None)
+                raise
+            return thread
+
+    def _stop_unpublished_manager(self, manager) -> None:
+        """Tear down a manager that lost the race with provider shutdown."""
+        try:
+            manager.shutdown()
+        except Exception as exc:
+            logger.debug("Honcho unpublished manager shutdown failed: %s", exc)
+
+    def _finalize_shutdown_if_idle(self) -> bool:
+        """Stop the manager once no registered producer can publish work."""
+        with self._shutdown_lock:
+            with self._worker_lock:
+                self._worker_threads = {
+                    thread for thread in self._worker_threads if thread.is_alive()
+                }
+                if self._worker_threads:
+                    return False
+
+            if self._manager is not None and not self._manager_shutdown:
+                try:
+                    drained = self._manager.shutdown()
+                except Exception as exc:
+                    logger.debug("Honcho manager shutdown failed: %s", exc)
+                    return False
+                if drained is False:
+                    return False
+                self._manager_shutdown = True
+
+            self._shutdown_complete = True
+            return True
 
     @property
     def name(self) -> str:
@@ -472,14 +540,13 @@ class HonchoMemoryProvider(MemoryProvider):
                     self._manager = None
                     logger.warning("Honcho background session init failed: %s", e)
 
-            self._init_thread = threading.Thread(
-                target=_run,
-                daemon=True,
+            init_thread = self._start_worker(
+                _run,
                 name="honcho-session-init",
+                publish_attr="_init_thread",
             )
-            self._init_thread.start()
-            if wait_timeout > 0:
-                self._init_thread.join(timeout=wait_timeout)
+            if init_thread and wait_timeout > 0:
+                init_thread.join(timeout=wait_timeout)
 
     def _do_session_init(self, cfg, session_id: str, **kwargs) -> None:
         """Shared session initialization logic for both eager and lazy paths."""
@@ -487,7 +554,7 @@ class HonchoMemoryProvider(MemoryProvider):
         from plugins.memory.honcho.session import HonchoSessionManager
 
         client = get_honcho_client(cfg)
-        self._manager = HonchoSessionManager(
+        manager = HonchoSessionManager(
             honcho=client,
             config=cfg,
             context_tokens=cfg.context_tokens,
@@ -503,7 +570,10 @@ class HonchoMemoryProvider(MemoryProvider):
         # synchronous setup has finished; background startup sets _manager before
         # get_or_create()/migration/prewarm are complete, and lifecycle hooks must
         # not treat that partially initialized state as usable.
-        session = self._manager.get_or_create(self._session_key)
+        session = manager.get_or_create(self._session_key)
+        if self._shutting_down:
+            self._stop_unpublished_manager(manager)
+            return
 
         # Skip under per-session strategy: every Hermes run creates a fresh
         # Honcho session by design, so uploading MEMORY.md/USER.md/SOUL.md to
@@ -513,7 +583,7 @@ class HonchoMemoryProvider(MemoryProvider):
             if not session.messages and cfg.session_strategy != "per-session":
                 from hermes_constants import get_hermes_home
                 mem_dir = str(get_hermes_home() / "memories")
-                self._manager.migrate_memory_files(self._session_key, mem_dir)
+                manager.migrate_memory_files(self._session_key, mem_dir)
                 logger.debug("Honcho memory file migration attempted for new session: %s", self._session_key)
             elif cfg.session_strategy == "per-session":
                 logger.debug(
@@ -522,6 +592,22 @@ class HonchoMemoryProvider(MemoryProvider):
                 )
         except Exception as e:
             logger.debug("Honcho memory file migration skipped: %s", e)
+
+        if self._shutting_down:
+            self._stop_unpublished_manager(manager)
+            return
+
+        with self._worker_lock:
+            if self._shutting_down:
+                publish_manager = False
+            else:
+                self._manager = manager
+                self._session_initialized = True
+                publish_manager = True
+
+        if not publish_manager:
+            self._stop_unpublished_manager(manager)
+            return
 
         # Query-aware base retrieval starts with the first substantive message.
         # Generic dialectic prewarm is incompatible with latest-message rewriting.
@@ -533,6 +619,8 @@ class HonchoMemoryProvider(MemoryProvider):
                 )
 
                 def _prewarm_dialectic() -> None:
+                    if self._shutting_down:
+                        return
                     try:
                         r = self._run_dialectic_depth(
                             _prewarm_query, use_query_rewrite=False
@@ -541,7 +629,7 @@ class HonchoMemoryProvider(MemoryProvider):
                         logger.debug("Honcho dialectic prewarm failed: %s", exc)
                         self._note_dialectic_failure(exc)
                         return
-                    if r and r.strip():
+                    if r and r.strip() and not self._shutting_down:
                         with self._prefetch_lock:
                             self._prefetch_result = r
                             self._prefetch_result_fired_at = 0
@@ -551,20 +639,20 @@ class HonchoMemoryProvider(MemoryProvider):
                         self._dialectic_empty_streak += 1
 
                 self._prefetch_thread_started_at = time.monotonic()
-                prewarm_thread = threading.Thread(
-                    target=_prewarm_dialectic,
-                    daemon=True,
+                prewarm_thread = self._start_worker(
+                    _prewarm_dialectic,
                     name="honcho-prewarm-dialectic",
+                    publish_attr="_prefetch_thread",
                 )
-                prewarm_thread.start()
-                self._prefetch_thread = prewarm_thread
-                logger.debug("Honcho dialectic prewarm started for session: %s", self._session_key)
+                if prewarm_thread:
+                    logger.debug(
+                        "Honcho dialectic prewarm started for session: %s",
+                        self._session_key,
+                    )
             else:
                 logger.debug(
                     "Honcho generic dialectic prewarm skipped: awaiting first user message"
                 )
-
-        self._session_initialized = True
 
     def _ensure_session(self) -> bool:
         """Lazily initialize the Honcho session (for tools-only mode).
@@ -665,7 +753,7 @@ class HonchoMemoryProvider(MemoryProvider):
         that doesn't change between turns (prompt-cache friendly).
         Live context (representation, card) is injected via prefetch().
         """
-        if self._cron_skipped:
+        if self._cron_skipped or self._shutting_down:
             return ""
         if not self._manager or not self._session_key:
             if not self._config:
@@ -711,7 +799,7 @@ class HonchoMemoryProvider(MemoryProvider):
         Returns empty in tools-only mode and respects the configured injection
         frequency and context budget.
         """
-        if self._cron_skipped:
+        if self._cron_skipped or self._shutting_down:
             return ""
 
         # Tools-only mode has no automatic injection.
@@ -841,13 +929,15 @@ class HonchoMemoryProvider(MemoryProvider):
                 _fired_at = self._turn_count
 
                 def _run_first_turn() -> None:
+                    if self._shutting_down:
+                        return
                     try:
                         r = self._run_dialectic_depth(query)
                     except Exception as exc:
                         logger.debug("Honcho first-turn dialectic failed: %s", exc)
                         self._note_dialectic_failure(exc)
                         return
-                    if r and r.strip():
+                    if r and r.strip() and not self._shutting_down:
                         with self._prefetch_lock:
                             self._prefetch_result = r
                             self._prefetch_result_fired_at = _fired_at
@@ -858,12 +948,13 @@ class HonchoMemoryProvider(MemoryProvider):
                         self._dialectic_empty_streak += 1
 
                 self._prefetch_thread_started_at = time.monotonic()
-                first_turn_thread = threading.Thread(
-                    target=_run_first_turn, daemon=True, name="honcho-prefetch-first"
+                first_turn_thread = self._start_worker(
+                    _run_first_turn,
+                    name="honcho-prefetch-first",
+                    publish_attr="_prefetch_thread",
                 )
-                first_turn_thread.start()
-                self._prefetch_thread = first_turn_thread
-                self._prefetch_thread.join(timeout=_first_turn_timeout)
+                if first_turn_thread:
+                    first_turn_thread.join(timeout=_first_turn_timeout)
             if self._prefetch_thread and self._prefetch_thread.is_alive():
                 logger.debug(
                     "Honcho first-turn dialectic still running after %.1fs — "
@@ -998,13 +1089,15 @@ class HonchoMemoryProvider(MemoryProvider):
         _fired_at = self._turn_count
 
         def _run():
+            if self._shutting_down:
+                return
             try:
                 result = self._run_dialectic_depth(query)
             except Exception as e:
                 logger.debug("Honcho prefetch failed: %s", e)
                 self._note_dialectic_failure(e)
                 return
-            if result and result.strip():
+            if result and result.strip() and not self._shutting_down:
                 with self._prefetch_lock:
                     self._prefetch_result = result
                     self._prefetch_result_fired_at = _fired_at
@@ -1014,11 +1107,11 @@ class HonchoMemoryProvider(MemoryProvider):
                 self._dialectic_empty_streak += 1
 
         self._prefetch_thread_started_at = time.monotonic()
-        prefetch_thread = threading.Thread(
-            target=_run, daemon=True, name="honcho-prefetch"
+        self._start_worker(
+            _run,
+            name="honcho-prefetch",
+            publish_attr="_prefetch_thread",
         )
-        prefetch_thread.start()
-        self._prefetch_thread = prefetch_thread
 
     # ----- Dialectic depth: multi-pass .chat() with cold/warm prompts -----
 
@@ -1409,6 +1502,8 @@ class HonchoMemoryProvider(MemoryProvider):
         clean_assistant_content = sanitize_context(assistant_content or "").strip()
 
         def _sync():
+            if self._shutting_down:
+                return
             try:
                 session = self._manager.get_or_create(self._session_key)
                 for chunk in self._chunk_message(clean_user_content, msg_limit):
@@ -1421,10 +1516,11 @@ class HonchoMemoryProvider(MemoryProvider):
 
         if self._sync_thread and self._sync_thread.is_alive():
             self._sync_thread.join(timeout=5.0)
-        self._sync_thread = threading.Thread(
-            target=_sync, daemon=True, name="honcho-sync"
+        self._start_worker(
+            _sync,
+            name="honcho-sync",
+            publish_attr="_sync_thread",
         )
-        self._sync_thread.start()
 
     def on_memory_write(
         self,
@@ -1451,24 +1547,14 @@ class HonchoMemoryProvider(MemoryProvider):
             return
 
         def _write():
+            if self._shutting_down:
+                return
             try:
                 self._manager.create_conclusion(self._session_key, content)
             except Exception as e:
                 logger.debug("Honcho memory mirror failed: %s", e)
-            finally:
-                with self._worker_lock:
-                    self._memory_write_threads.discard(threading.current_thread())
 
-        t = threading.Thread(target=_write, daemon=True, name="honcho-memwrite")
-        with self._worker_lock:
-            if self._shutting_down:
-                return
-            self._memory_write_threads.add(t)
-            try:
-                t.start()
-            except Exception:
-                self._memory_write_threads.discard(t)
-                raise
+        self._start_worker(_write, name="honcho-memwrite")
 
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
         """Flush all pending messages to Honcho on session end."""
@@ -1624,50 +1710,35 @@ class HonchoMemoryProvider(MemoryProvider):
 
     def shutdown(self) -> None:
         """Stop Honcho producers and the manager before interpreter teardown."""
-        with self._shutdown_lock:
+        with self._worker_lock:
             if self._shutdown_complete:
                 return
-            with self._worker_lock:
-                self._shutting_down = True
-
-            timeout = 35.0
-            if self._config and self._config.timeout:
-                timeout = max(timeout, float(self._config.timeout) + 5.0)
-
-            init_thread = self._init_thread
-            if (
-                init_thread
-                and init_thread is not threading.current_thread()
-                and init_thread.is_alive()
-            ):
-                init_thread.join(timeout=timeout)
-
-            with self._worker_lock:
-                workers = set(self._memory_write_threads)
+            self._shutting_down = True
+            workers = set(self._worker_threads)
             workers.update(
                 thread
-                for thread in (self._prefetch_thread, self._sync_thread)
+                for thread in (self._init_thread, self._prefetch_thread, self._sync_thread)
                 if thread is not None
             )
-            for thread in workers:
-                if thread is threading.current_thread() or not thread.is_alive():
-                    continue
-                thread.join(timeout=timeout)
-                if thread.is_alive():
-                    logger.warning(
-                        "Honcho worker %s did not stop within %.1fs",
-                        thread.name,
-                        timeout,
-                    )
 
-            manager = self._manager
-            if manager is not None:
-                try:
-                    manager.shutdown()
-                except Exception as exc:
-                    logger.debug("Honcho manager shutdown failed: %s", exc)
+        timeout = self._shutdown_wait_floor_s
+        if self._config and self._config.timeout:
+            timeout = max(timeout, float(self._config.timeout) + self._shutdown_grace_s)
+        deadline = time.monotonic() + timeout
 
-            self._shutdown_complete = True
+        for thread in workers:
+            if thread is threading.current_thread() or not thread.is_alive():
+                continue
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+            if thread.is_alive():
+                logger.error(
+                    "Honcho worker %s did not stop within %.1fs; shutdown is incomplete",
+                    thread.name,
+                    timeout,
+                )
+
+        if not self._finalize_shutdown_if_idle():
+            logger.error("Honcho provider shutdown remains incomplete")
 
 
 # ---------------------------------------------------------------------------

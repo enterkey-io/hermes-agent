@@ -7,6 +7,7 @@ from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from plugins.memory.honcho.client import HonchoClientConfig
 from plugins.memory.honcho.session import (
     HonchoSession,
     HonchoSessionManager,
@@ -1250,6 +1251,96 @@ def test_provider_shutdown_waits_for_init_and_memory_write_workers():
     assert shutdown_returned.is_set()
     assert not init_thread.is_alive()
     assert all(not thread.is_alive() for thread in write_threads)
+    manager.shutdown.assert_called_once_with()
+
+
+def test_prefetch_does_not_start_after_shutdown_begins():
+    provider = HonchoMemoryProvider()
+    provider._manager = MagicMock()
+    provider._session_key = "shutdown-test"
+    provider._session_initialized = True
+    provider._turn_count = 1
+    provider._last_dialectic_turn = -999
+    provider._shutting_down = True
+
+    assert provider.prefetch("meaningful question") == ""
+    assert provider._prefetch_thread is None
+
+
+def test_provider_keeps_shutdown_incomplete_when_worker_outlives_budget():
+    provider = HonchoMemoryProvider()
+    provider._shutdown_wait_floor_s = 0.05
+    provider._shutdown_grace_s = 0.0
+    manager = MagicMock()
+    manager.shutdown.return_value = True
+    provider._manager = manager
+    provider._session_initialized = True
+    provider._session_key = "shutdown-test"
+
+    release = threading.Event()
+    started = threading.Event()
+
+    def blocked_worker():
+        started.set()
+        release.wait(timeout=2.0)
+
+    worker = threading.Thread(target=blocked_worker, daemon=True, name="honcho-test-worker")
+    provider._worker_threads.add(worker)
+    worker.start()
+    assert started.wait(timeout=1.0)
+
+    provider.shutdown()
+    assert not provider._shutdown_complete
+    assert manager.shutdown.call_count == 0
+
+    release.set()
+    worker.join(timeout=2.0)
+    provider.shutdown()
+    assert provider._shutdown_complete
+    manager.shutdown.assert_called_once_with()
+
+
+def test_late_session_init_self_cleans_without_publishing_manager():
+    provider = HonchoMemoryProvider()
+    provider._shutdown_wait_floor_s = 0.05
+    provider._shutdown_grace_s = 0.0
+    provider._recall_mode = "hybrid"
+    provider._lazy_init_kwargs = {}
+    provider._lazy_init_session_id = "late-init"
+    provider._session_key = "late-init"
+    provider._config = HonchoClientConfig(
+        api_key="test-key",
+        enabled=True,
+        timeout=0.05,
+    )
+
+    started = threading.Event()
+    release = threading.Event()
+    manager = MagicMock()
+    manager.shutdown.return_value = True
+
+    def blocked_get_or_create(_session_key):
+        started.set()
+        release.wait(timeout=2.0)
+        return MagicMock(messages=[])
+
+    manager.get_or_create.side_effect = blocked_get_or_create
+
+    with patch("plugins.memory.honcho.client.get_honcho_client", return_value=MagicMock()), \
+         patch("plugins.memory.honcho.session.HonchoSessionManager", return_value=manager):
+        provider._start_session_init_background()
+        assert started.wait(timeout=1.0)
+        provider.shutdown()
+        assert not provider._shutdown_complete
+        assert provider._manager is None
+
+        release.set()
+        provider._init_thread.join(timeout=2.0)
+
+    assert not provider._init_thread.is_alive()
+    assert provider._manager is None
+    assert provider._prefetch_thread is None
+    assert provider._shutdown_complete
     manager.shutdown.assert_called_once_with()
 
 

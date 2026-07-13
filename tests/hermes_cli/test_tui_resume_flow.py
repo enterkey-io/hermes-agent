@@ -165,11 +165,15 @@ def test_oneshot_wires_session_db_for_recall(monkeypatch):
 
         def run_conversation(self, prompt, **_kwargs):
             captured["prompt"] = prompt
+            if captured.get("raise_run"):
+                raise RuntimeError("run failed")
             return {"final_response": "ok", "failed": False, "partial": False}
 
         def shutdown_memory_provider(self):
             self.shutdown_calls += 1
-            captured["shutdown_calls"] = self.shutdown_calls
+            captured["shutdown_calls"] = captured.get("shutdown_calls", 0) + 1
+            if captured.get("raise_shutdown"):
+                raise RuntimeError("shutdown failed")
 
     class FakeSessionDB:
         def __new__(cls):
@@ -220,6 +224,18 @@ def test_oneshot_wires_session_db_for_recall(monkeypatch):
     assert captured["enabled_toolsets"] == ["session_search"]
     assert captured["prompt"] == "recall this"
     assert captured["shutdown_calls"] == 1
+
+    captured["raise_run"] = True
+    captured["raise_shutdown"] = True
+    with pytest.raises(RuntimeError, match="run failed"):
+        _run_agent("failure path")
+    assert captured["shutdown_calls"] == 2
+
+    captured["raise_run"] = False
+    text, result = _run_agent("cleanup failure")
+    assert text == "ok"
+    assert not result.get("failed")
+    assert captured["shutdown_calls"] == 3
 
 
 def test_launch_tui_exports_model_provider_and_toolsets(monkeypatch, main_mod):

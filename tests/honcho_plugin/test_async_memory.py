@@ -11,6 +11,7 @@ Covers:
 
 import json
 import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -316,6 +317,87 @@ class TestAsyncWriterThread:
         mgr.shutdown()
         assert mgr._async_thread is None
 
+    def test_shutdown_reports_writer_that_outlives_drain_budget(self):
+        cfg = HonchoClientConfig(
+            write_frequency="async",
+            api_key="test-key",
+            enabled=True,
+            timeout=0.05,
+        )
+        mgr = HonchoSessionManager(config=cfg)
+        mgr._honcho = MagicMock()
+        mgr._shutdown_grace_s = 0.05
+
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocked_flush(_session):
+            started.set()
+            release.wait(timeout=2.0)
+            return True
+
+        mgr._flush_session = blocked_flush
+        mgr._ensure_async_writer()
+        session = _make_session()
+        session.add_message("user", "blocked")
+        mgr._async_queue.put(session)
+        assert started.wait(timeout=1.0)
+
+        result = []
+        shutdown_thread = threading.Thread(
+            target=lambda: result.append(mgr.shutdown()),
+            daemon=True,
+        )
+        shutdown_thread.start()
+        shutdown_thread.join(timeout=0.2)
+        returned_within_budget = not shutdown_thread.is_alive()
+        release.set()
+        shutdown_thread.join(timeout=2.0)
+        mgr._async_thread.join(timeout=2.0)
+
+        assert returned_within_budget
+        assert result == [False]
+        assert not mgr._async_thread.is_alive()
+
+    def test_shutdown_waits_for_context_prefetch_worker(self, make_manager):
+        mgr = make_manager(write_frequency="turn")
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocked_prefetch(*_args, **_kwargs):
+            started.set()
+            release.wait(timeout=2.0)
+            return {"summary": "late"}
+
+        mgr.get_prefetch_context = blocked_prefetch
+        mgr.prefetch_context("session")
+        assert started.wait(timeout=1.0)
+
+        result = []
+        shutdown_thread = threading.Thread(
+            target=lambda: result.append(mgr.shutdown()),
+            daemon=True,
+        )
+        shutdown_thread.start()
+        shutdown_thread.join(timeout=0.1)
+        returned_before_prefetch_finished = not shutdown_thread.is_alive()
+        release.set()
+        shutdown_thread.join(timeout=2.0)
+
+        assert not returned_before_prefetch_finished
+        assert result == [True]
+        assert mgr.pop_context_result("session") == {}
+
+    def test_context_prefetch_is_rejected_after_shutdown(self, make_manager):
+        mgr = make_manager(write_frequency="turn")
+        mgr.shutdown()
+        called = threading.Event()
+        mgr.get_prefetch_context = lambda *_args, **_kwargs: called.set()
+
+        mgr.prefetch_context("session")
+
+        assert not called.wait(timeout=0.1)
+
 
 # ---------------------------------------------------------------------------
 # async retry on failure
@@ -455,4 +537,3 @@ class TestPrefetchCacheAccessors:
 
         assert mgr.pop_context_result("cli:test") == payload
         assert mgr.pop_context_result("cli:test") == {}
-
