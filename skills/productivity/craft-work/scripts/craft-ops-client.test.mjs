@@ -47,8 +47,6 @@ test('sends one strict newline-delimited request to a Unix socket and returns on
         version: '1',
         requestId: '7be5d5a3-bfbe-45eb-9d41-718fa5ea2bfb',
         action: 'contracts',
-        input: {},
-        dryRun: false,
       });
       connection.end('{"ok":true,"contracts":[]}\n');
     });
@@ -58,8 +56,6 @@ test('sends one strict newline-delimited request to a Unix socket and returns on
         version: '1',
         requestId: '7be5d5a3-bfbe-45eb-9d41-718fa5ea2bfb',
         action: 'contracts',
-        input: {},
-        dryRun: false,
       },
       { socketPath, timeoutMs: 1_000 },
     );
@@ -123,8 +119,6 @@ test('settles when one complete response frame arrives without waiting for EOF',
         version: '1',
         requestId: '7be5d5a3-bfbe-45eb-9d41-718fa5ea2bfb',
         action: 'contracts',
-        input: {},
-        dryRun: false,
       },
       { socketPath, timeoutMs: 100 },
     );
@@ -143,8 +137,6 @@ test('rejects a second response frame already buffered', async () => {
             version: '1',
             requestId: '7be5d5a3-bfbe-45eb-9d41-718fa5ea2bfb',
             action: 'contracts',
-            input: {},
-            dryRun: false,
           },
           { socketPath, timeoutMs: 100 },
         ),
@@ -167,8 +159,6 @@ test('rejects close without a complete response frame', async () => {
             version: '1',
             requestId: '7be5d5a3-bfbe-45eb-9d41-718fa5ea2bfb',
             action: 'contracts',
-            input: {},
-            dryRun: false,
           },
           { socketPath, timeoutMs: 100 },
         ),
@@ -205,8 +195,6 @@ test('rejects a broker response larger than the protocol limit', async () => {
             version: '1',
             requestId: '7be5d5a3-bfbe-45eb-9d41-718fa5ea2bfb',
             action: 'contracts',
-            input: {},
-            dryRun: false,
           },
           { socketPath, timeoutMs: 1_000 },
         ),

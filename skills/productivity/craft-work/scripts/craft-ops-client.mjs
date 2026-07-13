@@ -35,25 +35,28 @@ function byteLength(value) {
 
 export function validateRequest(request) {
   if (request === null || typeof request !== 'object' || Array.isArray(request)) throw usage('request must be an object');
-  for (const field of Object.keys(request)) {
-    if (!REQUEST_FIELDS.has(field)) throw usage(`unknown request field: ${field}`);
-  }
   if (request.version !== '1') throw usage('version must be "1"');
   if (typeof request.requestId !== 'string' || !UUID_PATTERN.test(request.requestId)) throw usage('requestId must be a UUID');
   if (typeof request.action !== 'string' || !ACTIONS.has(request.action)) throw usage('action is not supported');
-  if (request.input === null || typeof request.input !== 'object' || Array.isArray(request.input)) throw usage('input must be an object');
-  if (typeof request.dryRun !== 'boolean') throw usage('dryRun must be a boolean');
-  if (byteLength(request.input) > MAX_MESSAGE_BYTES) throw usage('input is larger than 4 MiB');
+
+  const allowedFields = new Set(['version', 'requestId', 'action']);
+  if (request.action === 'run') {
+    allowedFields.add('contract');
+    allowedFields.add('input');
+    allowedFields.add('dryRun');
+  }
+  if (['resume', 'reconcile', 'rollback'].includes(request.action)) allowedFields.add('runId');
+  for (const field of Object.keys(request)) {
+    if (!REQUEST_FIELDS.has(field) || !allowedFields.has(field)) throw usage(`unknown request field: ${field}`);
+  }
 
   if (request.action === 'run') {
     if (typeof request.contract !== 'string' || request.contract.trim() === '') throw usage('contract is required for run');
-    if ('runId' in request) throw usage('runId conflicts with run');
-  } else if ('contract' in request) {
-    throw usage('contract is only valid for run');
+    if (request.input === null || typeof request.input !== 'object' || Array.isArray(request.input)) throw usage('input must be an object');
+    if (typeof request.dryRun !== 'boolean') throw usage('dryRun must be a boolean');
+    if (byteLength(request.input) > MAX_MESSAGE_BYTES) throw usage('input is larger than 4 MiB');
   } else if (['resume', 'reconcile', 'rollback'].includes(request.action)) {
-    if (typeof request.runId !== 'string' || request.runId.trim() === '') throw usage('runId is required for this action');
-  } else if ('runId' in request) {
-    throw usage('runId is only valid for resume, reconcile, or rollback');
+    if (typeof request.runId !== 'string' || !UUID_PATTERN.test(request.runId)) throw usage('runId must be a UUID');
   }
 
   if (byteLength(request) > MAX_MESSAGE_BYTES) throw usage('request is larger than 4 MiB');
@@ -150,16 +153,20 @@ function parseCli(argv) {
   const [action, ...rest] = argv;
   if (!action) throw usage('action is required');
   const values = { input: {}, dryRun: false };
+  const seen = new Set();
   let socketPath = DEFAULT_SOCKET_PATH;
   let socketOverride = false;
   for (let index = 0; index < rest.length; index += 1) {
     const flag = rest[index];
     if (flag === '--dry-run') {
-      if (values.dryRun) throw usage('duplicate --dry-run');
+      if (seen.has(flag)) throw usage('duplicate --dry-run');
+      seen.add(flag);
       values.dryRun = true;
       continue;
     }
     if (!['--contract', '--run-id', '--input', '--socket'].includes(flag)) throw usage(`unknown argument: ${flag}`);
+    if (seen.has(flag)) throw usage(`duplicate ${flag}`);
+    seen.add(flag);
     const value = rest[index + 1];
     if (!value || value.startsWith('--')) throw usage(`${flag} requires a value`);
     index += 1;
@@ -181,7 +188,16 @@ function parseCli(argv) {
   if (socketOverride && socketPath !== HOST_PREFLIGHT_SOCKET_PATH) {
     throw usage(`--socket must be ${HOST_PREFLIGHT_SOCKET_PATH}`);
   }
-  return { request: validateRequest({ version: '1', requestId: crypto.randomUUID(), action, ...values }), socketPath };
+  const request = { version: '1', requestId: crypto.randomUUID(), action };
+  if (action === 'run') {
+    request.contract = values.contract;
+    request.input = values.input;
+    request.dryRun = values.dryRun;
+  } else {
+    if (seen.has('--contract') || seen.has('--input') || seen.has('--dry-run')) throw usage('run options are only valid for run');
+    if (['resume', 'reconcile', 'rollback'].includes(action)) request.runId = values.runId;
+  }
+  return { request: validateRequest(request), socketPath };
 }
 
 function exitCode(error) {
