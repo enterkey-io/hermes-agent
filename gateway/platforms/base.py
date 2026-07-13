@@ -4939,6 +4939,33 @@ class BasePlatformAdapter(ABC):
                 if resolved is not None:
                     spans.append((match.start(), resolved[1]))
             if spans:
+                spans = sorted(set(spans))
+
+                # A MEDIA-only tail has no user-visible content. Drop its
+                # complete lines, including only the separator that introduced
+                # the first directive line. This avoids leaving a newline after
+                # removal without stripping meaningful leading/trailing text or
+                # internal paragraph breaks from the message body.
+                tail_start = len(cleaned)
+                for start, end in reversed(spans):
+                    line_start = cleaned.rfind("\n", 0, start) + 1
+                    line_end = cleaned.find("\n", end)
+                    if line_end < 0:
+                        line_end = len(cleaned)
+                    if (
+                        cleaned[line_start:start].strip(" \t")
+                        or cleaned[end:line_end].strip(" \t")
+                        or cleaned[line_end:tail_start].strip(" \t\n")
+                    ):
+                        break
+                    tail_start = line_start
+
+                if tail_start < len(cleaned):
+                    if tail_start > 0 and cleaned[tail_start - 1] == "\n":
+                        tail_start -= 1
+                    spans = [(start, end) for start, end in spans if end <= tail_start]
+                    cleaned = cleaned[:tail_start]
+
                 chars = list(cleaned)
                 for start, end in reversed(_merge_spans(spans)):
                     del chars[start:end]

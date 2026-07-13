@@ -230,6 +230,40 @@ class TestExtractMedia:
         _, cleaned = BasePlatformAdapter.extract_media(content)
         assert "\n\n\n" not in cleaned
 
+    def test_media_tag_allows_optional_whitespace_after_colon(self):
+        content = "MEDIA: /path/to/audio.ogg"
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert media == [("/path/to/audio.ogg", False)]
+        assert cleaned == ""
+
+    def test_media_tag_strips_wrapping_quotes_and_backticks(self):
+        content = "MEDIA: `/path/to/file.png`\nMEDIA:\"/path/to/file2.png\"\nMEDIA:'/path/to/file3.png'"
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert media == [
+            ("/path/to/file.png", False),
+            ("/path/to/file2.png", False),
+            ("/path/to/file3.png", False),
+        ]
+        assert cleaned == ""
+
+    def test_media_only_tail_preserves_internal_paragraph_breaks(self):
+        content = "First paragraph\n\nSecond paragraph\nMEDIA:/tmp/file.png"
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert media == [("/tmp/file.png", False)]
+        assert cleaned == "First paragraph\n\nSecond paragraph"
+
+    def test_media_tag_supports_quoted_paths_with_spaces(self):
+        content = "Here\nMEDIA: '/tmp/my image.png'\nAfter"
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert media == [("/tmp/my image.png", False)]
+        assert "Here" in cleaned
+        assert "After" in cleaned
+
+    def test_media_tag_supports_unquoted_flac_paths_with_spaces(self):
+        content = "MEDIA:/tmp/Jane Doe/speech.flac"
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert media == [("/tmp/Jane Doe/speech.flac", False)]
+        assert cleaned == ""
 
     def test_duplicate_media_tags_are_deduplicated(self):
         content = "MEDIA:/tmp/test.png\nMEDIA:/tmp/test.png\nMEDIA:/tmp/other.png"
