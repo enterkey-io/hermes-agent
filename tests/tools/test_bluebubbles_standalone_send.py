@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
+from gateway import status
 from gateway.config import PlatformConfig
 from gateway.platforms.bluebubbles import BlueBubblesAdapter
 from tools.send_message_tool import _send_bluebubbles
@@ -14,8 +15,8 @@ async def test_standalone_send_uses_outbound_only_connection():
     calls = []
 
     class FakeAdapter:
-        def __init__(self, _config):
-            pass
+        def __init__(self, _config, *, persist_runtime_status=True):
+            assert persist_runtime_status is False
 
         async def connect(self, *, outbound_only=False):
             calls.append(("connect", outbound_only))
@@ -43,6 +44,33 @@ async def test_standalone_send_uses_outbound_only_connection():
         ("send", "iMessage;+;recipient", "hello"),
         ("disconnect",),
     ]
+
+
+@pytest.mark.asyncio
+async def test_standalone_send_does_not_overwrite_live_gateway_runtime_status():
+    class RecordingAdapter(BlueBubblesAdapter):
+        async def connect(self, *, outbound_only=False):
+            self._mark_connected()
+            return True
+
+        async def send(self, chat_id, message):
+            return SimpleNamespace(success=True, message_id="message-id")
+
+        async def disconnect(self):
+            self._mark_disconnected()
+
+    with (
+        patch("gateway.platforms.bluebubbles.BlueBubblesAdapter", RecordingAdapter),
+        patch.object(status, "write_runtime_status") as write_runtime_status,
+    ):
+        result = await _send_bluebubbles(
+            {"server_url": "http://example.invalid", "password": "secret"},
+            "iMessage;+;recipient",
+            "hello",
+        )
+
+    assert result["success"] is True
+    write_runtime_status.assert_not_called()
 
 
 @pytest.mark.asyncio

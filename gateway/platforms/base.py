@@ -2996,9 +2996,16 @@ class BasePlatformAdapter(ABC):
     # routing is platform-generic instead of Discord-only.
     gateway_runner = None  # type: ignore[assignment]  # set by gateway/run.py
 
-    def __init__(self, config: PlatformConfig, platform: Platform):
+    def __init__(
+        self,
+        config: PlatformConfig,
+        platform: Platform,
+        *,
+        persist_runtime_status: bool = True,
+    ):
         self.config = config
         self.platform = platform
+        self._persist_runtime_status = persist_runtime_status
         self._message_handler: Optional[MessageHandler] = None
         # Optional gateway-supplied fan-out for platform-native emoji
         # reaction events (see ``set_reaction_handler``).
@@ -3437,6 +3444,8 @@ class BasePlatformAdapter(ABC):
         surfaces the first failure per (platform, context) at warning level and
         downgrades subsequent failures to debug.
         """
+        if not getattr(self, "_persist_runtime_status", True):
+            return
         try:
             from gateway.status import write_runtime_status
             write_runtime_status(platform=self.platform.value, **kwargs)

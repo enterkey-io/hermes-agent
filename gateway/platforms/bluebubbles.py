@@ -167,8 +167,17 @@ class BlueBubblesAdapter(BasePlatformAdapter):
     MAX_MESSAGE_LENGTH = MAX_TEXT_LENGTH
     splits_long_messages = True  # send() chunks via truncate_message(MAX_MESSAGE_LENGTH)
 
-    def __init__(self, config: PlatformConfig):
-        super().__init__(config, Platform.BLUEBUBBLES)
+    def __init__(
+        self,
+        config: PlatformConfig,
+        *,
+        persist_runtime_status: bool = True,
+    ):
+        super().__init__(
+            config,
+            Platform.BLUEBUBBLES,
+            persist_runtime_status=persist_runtime_status,
+        )
         extra = config.extra or {}
         self.server_url = _normalize_server_url(
             extra.get("server_url") or os.getenv("BLUEBUBBLES_SERVER_URL", "")
