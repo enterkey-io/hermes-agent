@@ -177,6 +177,36 @@ class TestFormatMessageBoldItalic:
         # Original ** should be gone
         assert "**" not in result
 
+    def test_italic_converted(self, adapter):
+        result = adapter.format_message("This is *italic* text")
+        # MarkdownV2 italic uses _
+        assert "_italic_" in result
+
+    def test_underscore_italic_is_preserved_as_formatting(self, adapter):
+        result = adapter.format_message("This is _italic_ text")
+        assert result == "This is _italic_ text"
+
+    def test_double_underscore_bold_is_converted(self, adapter):
+        result = adapter.format_message("This is __bold__ text")
+        assert result == "This is *bold* text"
+
+    def test_identifier_underscores_are_not_treated_as_italic(self, adapter):
+        result = adapter.format_message("Use morning_brief_state.json")
+        assert result == r"Use morning\_brief\_state\.json"
+
+    def test_bold_with_special_chars(self, adapter):
+        result = adapter.format_message("**hello.world!**")
+        # Content inside bold should be escaped
+        assert "*hello\\.world\\!*" in result
+
+    def test_italic_with_special_chars(self, adapter):
+        result = adapter.format_message("*hello.world*")
+        assert "_hello\\.world_" in result
+
+    def test_bold_and_italic_in_same_line(self, adapter):
+        result = adapter.format_message("**bold** and *italic*")
+        assert "*bold*" in result
+        assert "_italic_" in result
 
     def test_reload_mcp_summary_escapes_dynamic_server_names(self, adapter):
         content = (

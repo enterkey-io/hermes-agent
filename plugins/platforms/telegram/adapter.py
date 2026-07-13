@@ -7795,11 +7795,29 @@ class TelegramAdapter(BasePlatformAdapter):
             text,
         )
 
+        # 5b) Convert the equivalent underscore form: __text__ → *text*.
+        #     Word boundaries keep identifiers such as ``cache__key`` literal.
+        text = re.sub(
+            r'(?<![\w\\])__(?=\S)([^_\n]+?)(?<=\S)__(?!\w)',
+            lambda m: _ph(f'*{_escape_mdv2(m.group(1))}*'),
+            text,
+        )
+
         # 6) Convert italic: *text* (single asterisk) → _text_ (MarkdownV2 italic)
         #    [^*\n]+ prevents matching across newlines (which would corrupt
         #    bullet lists using * markers and multi-line content).
         text = re.sub(
             r'\*([^*\n]+)\*',
+            lambda m: _ph(f'_{_escape_mdv2(m.group(1))}_'),
+            text,
+        )
+
+        # 6a) Standard Markdown also permits _text_ for emphasis. Preserve it
+        #     as a protected MarkdownV2 italic span instead of escaping the
+        #     underscores into visible punctuation. Boundaries avoid treating
+        #     snake_case identifiers and file names as formatting.
+        text = re.sub(
+            r'(?<![\w\\])_(?=\S)([^_\n]+?)(?<=\S)_(?!\w)',
             lambda m: _ph(f'_{_escape_mdv2(m.group(1))}_'),
             text,
         )
