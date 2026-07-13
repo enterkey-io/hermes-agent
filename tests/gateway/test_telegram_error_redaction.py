@@ -23,10 +23,22 @@ import pytest
 
 from gateway.config import PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter
-from plugins.platforms.telegram.adapter import TelegramAdapter
+from plugins.platforms.telegram.adapter import TelegramAdapter, _redact_telegram_error_text
 
 _SECRET_TOKEN = "123456789:AAFakeSecretTelegramBotTokenABCDEFGHIJ"
 _SECRET_URL = f"https://api.telegram.org/bot{_SECRET_TOKEN}/getMe"
+
+
+def test_rejected_suffix_only_token_is_redacted():
+    """Telegram may echo a malformed credential that lacks the bot ID prefix."""
+    malformed = "AAGCTr99a27zXPwnIxpQ_GhLgG3ONyi-378"
+
+    result = _redact_telegram_error_text(
+        f"The token `{malformed}` was rejected by the server."
+    )
+
+    assert malformed not in result
+    assert "<redacted>" in result
 
 
 def _make_bare_adapter() -> TelegramAdapter:

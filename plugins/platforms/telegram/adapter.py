@@ -33,7 +33,14 @@ def _redact_telegram_error_text(error: object) -> str:
     try:
         from agent.redact import redact_sensitive_text
 
-        return redact_sensitive_text(text, force=True)
+        safe_text = redact_sensitive_text(text, force=True)
+        # PTB echoes malformed credentials without the numeric bot-ID prefix.
+        # Those suffix-only values do not match the normal Telegram-token pattern.
+        return re.sub(
+            r"(?i)(\btoken\s+[`'\"])[^`'\"]+([`'\"]\s+was\s+rejected\b)",
+            r"\1<redacted>\2",
+            safe_text,
+        )
     except Exception:
         return "<telegram error redacted>"
 
