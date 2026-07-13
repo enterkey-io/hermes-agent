@@ -1851,7 +1851,9 @@ async def _send_matrix_via_adapter(pconfig, chat_id, message, media_files=None, 
     except ImportError:
         return {"error": "Matrix dependencies not installed. Run: pip install 'mautrix[encryption]'"}
 
-    adapter = MatrixAdapter(pconfig)
+    # This adapter belongs only to the one-shot sender. It must not replace the
+    # live gateway's PID/argv/platform state in gateway_state.json.
+    adapter = MatrixAdapter(pconfig, persist_runtime_status=False)
     try:
         connected = await adapter.connect()
         if not connected:

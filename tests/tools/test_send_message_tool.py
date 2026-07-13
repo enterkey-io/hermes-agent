@@ -574,6 +574,92 @@ class TestSendToPlatformChunking:
         finally:
             doc_path.unlink(missing_ok=True)
 
+    def test_matrix_text_only_uses_adapter_path(self):
+        """Text-only Matrix sends must go through the E2EE-capable adapter.
+
+        The raw-HTTP standalone path (registry standalone_sender_fn) sends
+        cleartext, so in an E2EE room text-only messages arrived with a red
+        padlock. All Matrix sends now route through _send_matrix_via_adapter,
+        which encrypts via the mautrix adapter (live gateway session when
+        available, encryption-aware ephemeral adapter otherwise)."""
+        from hermes_cli.plugins import discover_plugins
+        from gateway.platform_registry import platform_registry
+        discover_plugins()
+        helper = AsyncMock(return_value={"success": True, "platform": "matrix", "chat_id": "!room:ex.com", "message_id": "$txt"})
+        standalone = AsyncMock()
+        matrix_entry = platform_registry.get("matrix")
+        original_sender = matrix_entry.standalone_sender_fn
+        matrix_entry.standalone_sender_fn = standalone
+        try:
+            with patch("tools.send_message_tool._send_matrix_via_adapter", helper):
+                result = asyncio.run(
+                    _send_to_platform(
+                        Platform.MATRIX,
+                        SimpleNamespace(enabled=True, token="tok", extra={"homeserver": "https://matrix.example.com"}),
+                        "!room:ex.com",
+                        "just text, no files",
+                    )
+                )
+        finally:
+            matrix_entry.standalone_sender_fn = original_sender
+
+        assert result["success"] is True
+        helper.assert_awaited_once()
+        standalone.assert_not_awaited()
+
+    def test_send_matrix_via_adapter_sends_document(self, tmp_path):
+        file_path = tmp_path / "report.pdf"
+        file_path.write_bytes(b"%PDF-1.4 test")
+
+        calls = []
+
+        class FakeAdapter:
+            def __init__(self, _config, *, persist_runtime_status=True):
+                assert persist_runtime_status is False
+                self.connected = False
+
+            async def connect(self, *, is_reconnect: bool = False):
+                self.connected = True
+                calls.append(("connect",))
+                return True
+
+            async def send(self, chat_id, message, metadata=None):
+                calls.append(("send", chat_id, message, metadata))
+                return SimpleNamespace(success=True, message_id="$text")
+
+            async def send_document(self, chat_id, file_path, metadata=None):
+                calls.append(("send_document", chat_id, file_path, metadata))
+                return SimpleNamespace(success=True, message_id="$file")
+
+            async def disconnect(self):
+                calls.append(("disconnect",))
+
+        fake_module = SimpleNamespace(MatrixAdapter=FakeAdapter)
+
+        with patch.dict(sys.modules, {"plugins.platforms.matrix.adapter": fake_module}):
+            result = asyncio.run(
+                _send_matrix_via_adapter(
+                    SimpleNamespace(enabled=True, token="tok", extra={"homeserver": "https://matrix.example.com"}),
+                    "!room:example.com",
+                    "report attached",
+                    media_files=[(str(file_path), False)],
+                )
+            )
+
+        assert result == {
+            "success": True,
+            "platform": "matrix",
+            "chat_id": "!room:example.com",
+            "message_id": "$file",
+        }
+        assert calls == [
+            ("connect",),
+            ("send", "!room:example.com", "report attached", None),
+            ("send_document", "!room:example.com", str(file_path), None),
+            ("disconnect",),
+        ]
+
+
 class TestMatrixMediaLiveAdapterReuse:
     """Verify _send_matrix_via_adapter reuses the live gateway adapter
     when available, avoiding per-message E2EE re-init storms (#46310)."""
@@ -632,8 +718,8 @@ class TestMatrixMediaLiveAdapterReuse:
         calls = []
 
         class EphemeralAdapter:
-            def __init__(self, _config):
-                pass
+            def __init__(self, _config, *, persist_runtime_status=True):
+                assert persist_runtime_status is False
 
             async def connect(self):
                 calls.append(("connect",))
@@ -671,6 +757,47 @@ class TestMatrixMediaLiveAdapterReuse:
             ("send_document", "!room:example.com", str(doc_path)),
             ("disconnect",),
         ]
+
+    def test_live_adapter_no_matrix_adapter_falls_back(self):
+        """When the runner exists but has no Matrix adapter registered,
+        fall back to ephemeral."""
+        calls = []
+
+        class EphemeralAdapter:
+            def __init__(self, _config, *, persist_runtime_status=True):
+                assert persist_runtime_status is False
+
+            async def connect(self):
+                calls.append(("connect",))
+                return True
+
+            async def send(self, chat_id, message, metadata=None):
+                calls.append(("send",))
+                return SimpleNamespace(success=True, message_id="$txt")
+
+            async def disconnect(self):
+                calls.append(("disconnect",))
+
+        # Runner exists but adapters dict has no MATRIX key
+        fake_runner = SimpleNamespace(adapters={})
+        fake_module = SimpleNamespace(MatrixAdapter=EphemeralAdapter)
+
+        with patch(
+            "gateway.run._gateway_runner_ref",
+            return_value=fake_runner,
+        ), patch.dict(sys.modules, {"plugins.platforms.matrix.adapter": fake_module}):
+            result = asyncio.run(
+                _send_matrix_via_adapter(
+                    SimpleNamespace(enabled=True, token="tok", extra={}),
+                    "!room:example.com",
+                    "hello",
+                )
+            )
+
+        assert result["success"] is True
+        assert ("connect",) in calls
+        assert ("disconnect",) in calls
+
 
 # ---------------------------------------------------------------------------
 # HTML auto-detection in Telegram send

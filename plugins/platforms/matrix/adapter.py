@@ -1165,8 +1165,17 @@ class MatrixAdapter(BasePlatformAdapter):
     max_message_length = DEFAULT_MAX_MESSAGE_LENGTH
     _split_threshold = DEFAULT_MAX_MESSAGE_LENGTH - 100
 
-    def __init__(self, config: PlatformConfig):
-        super().__init__(config, Platform.MATRIX)
+    def __init__(
+        self,
+        config: PlatformConfig,
+        *,
+        persist_runtime_status: bool = True,
+    ):
+        super().__init__(
+            config,
+            Platform.MATRIX,
+            persist_runtime_status=persist_runtime_status,
+        )
 
         self.max_message_length = _resolve_max_message_length(config)
         # Mirror other platform adapters for tests/tooling that read MAX_MESSAGE_LENGTH.
