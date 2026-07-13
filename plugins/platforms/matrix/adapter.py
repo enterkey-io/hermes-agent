@@ -4111,6 +4111,9 @@ class MatrixAdapter(BasePlatformAdapter):
         """Auto-join rooms when invited, recording DM rooms in m.direct."""
 
         room_id = str(getattr(event, "room_id", ""))
+        if not room_id or room_id in self._joined_rooms:
+            return
+
         content = getattr(event, "content", None)
         is_direct = bool(getattr(content, "is_direct", False))
         inviter = str(getattr(event, "sender", ""))
@@ -4119,14 +4122,7 @@ class MatrixAdapter(BasePlatformAdapter):
         # federated Matrix user could invite the bot into arbitrary rooms,
         # exposing its presence and metadata. Mirrors the allow-list gate
         # used on the message/reaction paths.
-        allow_all = os.getenv("GATEWAY_ALLOW_ALL_USERS", "").lower() in {
-            "true",
-            "1",
-            "yes",
-        }
-        if not allow_all and not (
-            self._allowed_user_ids and inviter in self._allowed_user_ids
-        ):
+        if not self._invite_authorized(inviter):
             logger.warning(
                 "Matrix: rejecting invite to %s from unauthorized user %s",
                 room_id,
@@ -4210,17 +4206,80 @@ class MatrixAdapter(BasePlatformAdapter):
 
         self._invite_join_tasks[room_id] = asyncio.create_task(_join_invite())
 
+    def _invite_authorized(self, inviter: str) -> bool:
+        """Return whether an identified Matrix inviter may add this bot."""
+        if not inviter:
+            return False
+        allow_all = os.getenv("GATEWAY_ALLOW_ALL_USERS", "").lower() in {
+            "true",
+            "1",
+            "yes",
+        }
+        return allow_all or bool(
+            self._allowed_user_ids and inviter in self._allowed_user_ids
+        )
+
+    def _pending_invite_metadata(
+        self,
+        invite_data: Any,
+    ) -> Optional[tuple[str, bool]]:
+        """Extract the inviter and DM flag from a raw /sync invite state."""
+        if not isinstance(invite_data, dict) or not self._user_id:
+            return None
+        invite_state = invite_data.get("invite_state", {})
+        if not isinstance(invite_state, dict):
+            return None
+        events = invite_state.get("events", [])
+        if not isinstance(events, list):
+            return None
+
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            content = event.get("content", {})
+            if not isinstance(content, dict):
+                continue
+            if (
+                event.get("type") != "m.room.member"
+                or event.get("state_key") != self._user_id
+                or content.get("membership") != "invite"
+            ):
+                continue
+            inviter = str(event.get("sender", ""))
+            if inviter:
+                return inviter, bool(content.get("is_direct", False))
+        return None
+
     def _schedule_pending_invite_joins(self, sync_data: Dict[str, Any]) -> None:
         """Join rooms still present in rooms.invite after sync processing."""
         rooms = sync_data.get("rooms", {}) if isinstance(sync_data, dict) else {}
         invites = rooms.get("invite", {})
         if not isinstance(invites, dict):
             return
-        for room_id in invites:
+        for room_id, invite_data in invites.items():
             if room_id in self._joined_rooms:
                 continue
+            metadata = self._pending_invite_metadata(invite_data)
+            if metadata is None:
+                logger.warning(
+                    "Matrix: rejecting pending invite to %s without valid inviter metadata",
+                    room_id,
+                )
+                continue
+            inviter, is_direct = metadata
+            if not self._invite_authorized(inviter):
+                logger.warning(
+                    "Matrix: rejecting pending invite to %s from unauthorized user %s",
+                    room_id,
+                    inviter,
+                )
+                continue
             logger.info("Matrix: reconciling pending invite for %s", room_id)
-            self._schedule_invite_join(str(room_id))
+            self._schedule_invite_join(
+                str(room_id),
+                is_direct=is_direct,
+                inviter=inviter,
+            )
 
     # ------------------------------------------------------------------
     # Reactions (send, receive, processing lifecycle)

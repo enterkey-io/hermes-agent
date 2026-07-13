@@ -100,6 +100,163 @@ class TestOnInviteRecordsDM:
         adapter._join_room_by_id.assert_awaited_once()
         adapter._record_dm_room.assert_not_awaited()
 
+    @pytest.mark.asyncio
+    async def test_missing_is_direct_does_not_record(self):
+        """Invite events without is_direct attribute should not trigger recording."""
+        adapter = _make_adapter()
+        adapter._join_room_by_id = AsyncMock(return_value=True)
+        adapter._record_dm_room = AsyncMock()
+
+        event = SimpleNamespace(
+            room_id="!room:example.org",
+            sender="@alice:example.org",
+            content=SimpleNamespace(),  # no is_direct attr
+        )
+        await adapter._on_invite(event)
+        await self._drain_invite_tasks(adapter)
+
+        adapter._record_dm_room.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_join_failure_does_not_record(self):
+        adapter = _make_adapter()
+        adapter._join_room_by_id = AsyncMock(return_value=False)
+        adapter._record_dm_room = AsyncMock()
+
+        event = _make_invite_event(is_direct=True)
+        await adapter._on_invite(event)
+        await self._drain_invite_tasks(adapter)
+
+        adapter._record_dm_room.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_empty_inviter_does_not_record(self):
+        adapter = _make_adapter()
+        adapter._join_room_by_id = AsyncMock(return_value=True)
+        adapter._record_dm_room = AsyncMock()
+
+        event = SimpleNamespace(
+            room_id="!room:example.org",
+            sender="",
+            content=SimpleNamespace(is_direct=True),
+        )
+        await adapter._on_invite(event)
+        await self._drain_invite_tasks(adapter)
+
+        adapter._record_dm_room.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_already_joined_room_ignores_replayed_invite(self):
+        """Initial sync may replay invite state for a room already joined."""
+        adapter = _make_adapter()
+        adapter._joined_rooms.add("!dm_room:example.org")
+        adapter._schedule_invite_join = MagicMock()
+
+        event = _make_invite_event(sender="@alice:example.org")
+        await adapter._on_invite(event)
+
+        adapter._schedule_invite_join.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_already_joined_room_does_not_log_false_rejection(self):
+        adapter = _make_adapter()
+        adapter._joined_rooms.add("!dm_room:example.org")
+        event = _make_invite_event(sender="@hermes:example.org")
+
+        with patch("plugins.platforms.matrix.adapter.logger.warning") as warning:
+            await adapter._on_invite(event)
+
+        warning.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Pending invite reconciliation
+# ---------------------------------------------------------------------------
+
+
+def _make_pending_invite_sync(
+    *,
+    room_id="!pending:example.org",
+    inviter="@alice:example.org",
+    is_direct=True,
+):
+    """Build the raw invite-state shape returned by Matrix /sync."""
+    member_event = {
+        "type": "m.room.member",
+        "sender": inviter,
+        "state_key": "@hermes:example.org",
+        "content": {
+            "membership": "invite",
+            "is_direct": is_direct,
+        },
+    }
+    return {
+        "rooms": {
+            "invite": {
+                room_id: {
+                    "invite_state": {
+                        "events": [member_event],
+                    }
+                }
+            }
+        }
+    }
+
+
+class TestPendingInviteReconciliation:
+    """Pending /sync invites must pass the same authorization as live invites."""
+
+    def test_authorized_inviter_schedules_join_with_dm_metadata(self):
+        adapter = _make_adapter()
+        adapter._schedule_invite_join = MagicMock()
+
+        adapter._schedule_pending_invite_joins(_make_pending_invite_sync())
+
+        adapter._schedule_invite_join.assert_called_once_with(
+            "!pending:example.org",
+            is_direct=True,
+            inviter="@alice:example.org",
+        )
+
+    def test_unauthorized_inviter_is_rejected(self):
+        adapter = _make_adapter()
+        adapter._schedule_invite_join = MagicMock()
+        sync_data = _make_pending_invite_sync(inviter="@mallory:example.org")
+
+        with patch.dict("os.environ", {"GATEWAY_ALLOW_ALL_USERS": ""}):
+            adapter._schedule_pending_invite_joins(sync_data)
+
+        adapter._schedule_invite_join.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "invite_data",
+        [
+            {},
+            {"invite_state": {}},
+            {"invite_state": {"events": []}},
+            {"invite_state": {"events": [{"type": "m.room.name"}]}},
+            {
+                "invite_state": {
+                    "events": [
+                        {
+                            "type": "m.room.member",
+                            "sender": "@alice:example.org",
+                            "state_key": "@someone-else:example.org",
+                            "content": {"membership": "invite"},
+                        }
+                    ]
+                }
+            },
+        ],
+    )
+    def test_missing_or_malformed_inviter_fails_closed(self, invite_data):
+        adapter = _make_adapter()
+        adapter._schedule_invite_join = MagicMock()
+        sync_data = {"rooms": {"invite": {"!pending:example.org": invite_data}}}
+
+        adapter._schedule_pending_invite_joins(sync_data)
+
+        adapter._schedule_invite_join.assert_not_called()
 
 # ---------------------------------------------------------------------------
 # _record_dm_room
@@ -138,5 +295,4 @@ class TestRecordDMRoom:
 
         adapter._client.set_account_data.assert_not_awaited()
         assert adapter._dm_rooms.get("!room:example.org") is True
-
 

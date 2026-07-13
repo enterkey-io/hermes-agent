@@ -320,6 +320,29 @@ def _make_adapter():
     return adapter
 
 
+def _pending_invite_data(
+    *,
+    inviter="@alice:example.org",
+    is_direct=False,
+):
+    """Return the raw Matrix /sync state for an identified pending invite."""
+    return {
+        "invite_state": {
+            "events": [
+                {
+                    "type": "m.room.member",
+                    "sender": inviter,
+                    "state_key": "@bot:example.org",
+                    "content": {
+                        "membership": "invite",
+                        "is_direct": is_direct,
+                    },
+                }
+            ]
+        }
+    }
+
+
 # ---------------------------------------------------------------------------
 # Typing indicator
 # ---------------------------------------------------------------------------
@@ -982,6 +1005,68 @@ class TestMatrixAccessTokenAuth:
 
         await adapter.disconnect()
 
+    @pytest.mark.asyncio
+    async def test_connect_does_not_wait_for_stuck_pending_invite(self):
+        """A stale pending invite must not keep the Matrix platform unready."""
+        from plugins.platforms.matrix.adapter import MatrixAdapter
+
+        config = PlatformConfig(
+            enabled=True,
+            token="syt_test_access_token",
+            extra={
+                "homeserver": "https://matrix.example.org",
+                "user_id": "@bot:example.org",
+            },
+        )
+        adapter = MatrixAdapter(config)
+        adapter._allowed_user_ids = {"@alice:example.org"}
+
+        fake_mautrix_mods = _make_fake_mautrix()
+        join_started = asyncio.Event()
+
+        async def _stuck_join_room(*args, **kwargs):
+            join_started.set()
+            await asyncio.Event().wait()
+
+        mock_client = MagicMock()
+        mock_client.mxid = "@bot:example.org"
+        mock_client.device_id = None
+        mock_client.state_store = MagicMock()
+        mock_client.sync_store = MagicMock()
+        mock_client.sync_store.put_next_batch = AsyncMock()
+        mock_client.crypto = None
+        mock_client.whoami = AsyncMock(
+            return_value=MagicMock(user_id="@bot:example.org", device_id="DEV123")
+        )
+        mock_client.sync = AsyncMock(
+            return_value={
+                "rooms": {
+                    "join": {},
+                    "invite": {"!dead:example.org": _pending_invite_data()},
+                },
+                "next_batch": "s1234",
+            }
+        )
+        mock_client.join_room = AsyncMock(side_effect=_stuck_join_room)
+        mock_client.add_event_handler = MagicMock()
+        mock_client.add_dispatcher = MagicMock()
+        mock_client.handle_sync = MagicMock(return_value=[])
+        mock_client.api = MagicMock()
+        mock_client.api.token = "syt_test_access_token"
+        mock_client.api.session = MagicMock()
+        mock_client.api.session.close = AsyncMock()
+        fake_mautrix_mods["mautrix.client"].Client = MagicMock(return_value=mock_client)
+
+        with patch.dict("sys.modules", fake_mautrix_mods):
+            with patch.object(adapter, "_refresh_dm_cache", AsyncMock()):
+                with patch.object(adapter, "_sync_loop", AsyncMock(return_value=None)):
+                    assert await asyncio.wait_for(adapter.connect(), timeout=1) is True
+
+        await asyncio.wait_for(join_started.wait(), timeout=1)
+        assert "!dead:example.org" in adapter._invite_join_tasks
+
+        await adapter.disconnect()
+        assert adapter._invite_join_tasks == {}
 
 class TestDeviceKeyReVerification:
     @pytest.mark.asyncio
@@ -1267,7 +1352,81 @@ class TestMatrixDeviceIdConfig:
 
 
 class TestMatrixSyncLoop:
+    @pytest.mark.asyncio
+    async def test_sync_loop_dispatches_events_and_stores_token(self):
+        """_sync_loop should call handle_sync() and persist next_batch."""
+        adapter = _make_adapter()
+        adapter._encryption = True
+        adapter._closing = False
 
+        call_count = 0
+
+        async def _sync_once(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 1:
+                adapter._closing = True
+            return {"rooms": {"join": {"!room:example.org": {}}}, "next_batch": "s1234"}
+
+        mock_crypto = MagicMock()
+
+        mock_sync_store = MagicMock()
+        mock_sync_store.get_next_batch = AsyncMock(return_value=None)
+        mock_sync_store.put_next_batch = AsyncMock()
+
+        fake_client = MagicMock()
+        fake_client.sync = AsyncMock(side_effect=_sync_once)
+        fake_client.crypto = mock_crypto
+        fake_client.sync_store = mock_sync_store
+        fake_client.handle_sync = MagicMock(return_value=[])
+        adapter._client = fake_client
+
+        await adapter._sync_loop()
+
+        fake_client.sync.assert_awaited_once()
+        fake_client.handle_sync.assert_called_once()
+        mock_sync_store.put_next_batch.assert_awaited_once_with("s1234")
+
+    @pytest.mark.asyncio
+    async def test_sync_loop_reconciles_pending_invites(self):
+        """Pending rooms.invite entries should be joined if callbacks were missed."""
+        adapter = _make_adapter()
+        adapter._closing = False
+        adapter._allowed_user_ids = {"@alice:example.org"}
+
+        async def _sync_once(**kwargs):
+            adapter._closing = True
+            return {
+                "rooms": {
+                    "join": {"!joined:example.org": {}},
+                    "invite": {
+                        "!invited:example.org": _pending_invite_data()
+                    },
+                },
+                "next_batch": "s1234",
+            }
+
+        mock_sync_store = MagicMock()
+        mock_sync_store.get_next_batch = AsyncMock(return_value=None)
+        mock_sync_store.put_next_batch = AsyncMock()
+
+        fake_client = MagicMock()
+        fake_client.sync = AsyncMock(side_effect=_sync_once)
+        fake_client.join_room = AsyncMock()
+        fake_client.sync_store = mock_sync_store
+        fake_client.handle_sync = MagicMock(return_value=[])
+        adapter._client = fake_client
+
+        with patch.object(adapter, "_refresh_dm_cache", AsyncMock()):
+            await adapter._sync_loop()
+
+        tasks = list(adapter._invite_join_tasks.values())
+        if tasks:
+            await asyncio.gather(*tasks)
+
+        fake_client.join_room.assert_awaited_once()
+        assert "!joined:example.org" in adapter._joined_rooms
+        assert "!invited:example.org" in adapter._joined_rooms
 
     @pytest.mark.asyncio
     async def test_dispatch_sync_accepts_async_handle_sync(self):
@@ -1422,6 +1581,163 @@ class TestMatrixSyncLoop:
 
         await adapter.disconnect()
 
+    @pytest.mark.asyncio
+    async def test_room_message_after_invite_join_is_received(self):
+        """After invite reconciliation joins a room, later room messages dispatch."""
+        adapter = _make_adapter()
+        adapter._closing = False
+        adapter._user_id = "@bot:example.org"
+        adapter._startup_ts = time.time() - 10
+        adapter._require_mention = True
+        adapter._text_batch_delay_seconds = 0
+        adapter._background_read_receipt = MagicMock()
+        adapter._allowed_user_ids = {"@alice:example.org"}
+
+        captured = []
+
+        async def capture(event):
+            captured.append(event)
+
+        adapter.handle_message = capture
+
+        sync_count = 0
+
+        async def _sync(**kwargs):
+            nonlocal sync_count
+            sync_count += 1
+            if sync_count == 1:
+                return {
+                    "rooms": {
+                        "invite": {
+                            "!room:example.org": _pending_invite_data(
+                                is_direct=True
+                            )
+                        }
+                    },
+                    "next_batch": "s1",
+                }
+            adapter._closing = True
+            return {
+                "rooms": {"join": {"!room:example.org": {}}},
+                "next_batch": "s2",
+            }
+
+        event = types.SimpleNamespace(
+            sender="@alice:example.org",
+            event_id="$room1",
+            room_id="!room:example.org",
+            timestamp=int(time.time() * 1000),
+            content={
+                "msgtype": "m.text",
+                "body": "@bot:example.org hello room",
+                "m.mentions": {"user_ids": ["@bot:example.org"]},
+            },
+        )
+
+        mock_sync_store = MagicMock()
+        mock_sync_store.get_next_batch = AsyncMock(return_value=None)
+        mock_sync_store.put_next_batch = AsyncMock()
+
+        fake_client = MagicMock()
+        fake_client.sync = AsyncMock(side_effect=_sync)
+        fake_client.join_room = AsyncMock()
+        fake_client.sync_store = mock_sync_store
+        fake_client.get_account_data = AsyncMock(return_value=MagicMock(content={}))
+        fake_client.get_state_event = AsyncMock(side_effect=Exception("no state"))
+        fake_client.state_store = MagicMock()
+        fake_client.state_store.get_members = AsyncMock(return_value=["@bot:example.org", "@alice:example.org"])
+        fake_client.state_store.get_member = AsyncMock(return_value=None)
+
+        def handle_sync(sync_data):
+            if sync_data["next_batch"] == "s2":
+                return [asyncio.create_task(adapter._on_room_message(event))]
+            return []
+
+        fake_client.handle_sync = MagicMock(side_effect=handle_sync)
+        adapter._client = fake_client
+
+        await adapter._sync_loop()
+
+        fake_client.join_room.assert_awaited_once()
+        assert "!room:example.org" in adapter._joined_rooms
+        assert len(captured) == 1
+        assert captured[0].source.chat_type == "dm"
+
+    @pytest.mark.asyncio
+    async def test_seconds_timestamp_is_not_treated_as_milliseconds(self):
+        adapter = _make_adapter()
+        adapter._user_id = "@bot:example.org"
+        adapter._startup_ts = time.time() - 10
+        adapter._dm_rooms = {"!dm:example.org": True}
+        adapter._text_batch_delay_seconds = 0
+        adapter._background_read_receipt = MagicMock()
+        adapter._client = MagicMock()
+        adapter._client.get_state_event = AsyncMock(side_effect=Exception("no state"))
+        adapter._client.state_store = MagicMock()
+        adapter._client.state_store.get_members = AsyncMock(return_value=["@bot:example.org", "@alice:example.org"])
+        adapter._client.state_store.get_member = AsyncMock(return_value=None)
+
+        captured = []
+
+        async def capture(event):
+            captured.append(event)
+
+        adapter.handle_message = capture
+
+        event = types.SimpleNamespace(
+            sender="@alice:example.org",
+            event_id="$seconds",
+            room_id="!dm:example.org",
+            timestamp=time.time(),
+            content={"msgtype": "m.text", "body": "seconds ts"},
+        )
+
+        await adapter._on_room_message(event)
+
+        assert len(captured) == 1
+
+    @pytest.mark.asyncio
+    async def test_pending_invite_join_does_not_block_sync_loop(self):
+        """Dead invite joins should not make sync look like a gateway failure."""
+        adapter = _make_adapter()
+        adapter._closing = False
+        adapter._allowed_user_ids = {"@alice:example.org"}
+
+        async def _sync_once(**kwargs):
+            adapter._closing = True
+            return {
+                "rooms": {
+                    "invite": {"!dead:example.org": _pending_invite_data()},
+                },
+                "next_batch": "s1234",
+            }
+
+        join_started = asyncio.Event()
+
+        async def _stuck_join_room(*args, **kwargs):
+            join_started.set()
+            await asyncio.Event().wait()
+
+        mock_sync_store = MagicMock()
+        mock_sync_store.get_next_batch = AsyncMock(return_value=None)
+        mock_sync_store.put_next_batch = AsyncMock()
+
+        fake_client = MagicMock()
+        fake_client.sync = AsyncMock(side_effect=_sync_once)
+        fake_client.join_room = AsyncMock(side_effect=_stuck_join_room)
+        fake_client.sync_store = mock_sync_store
+        fake_client.handle_sync = MagicMock(return_value=[])
+        adapter._client = fake_client
+
+        await adapter._sync_loop()
+        await asyncio.wait_for(join_started.wait(), timeout=1)
+
+        assert "!dead:example.org" not in adapter._joined_rooms
+        assert "!dead:example.org" in adapter._invite_join_tasks
+        fake_client.join_room.assert_awaited_once()
+
+        await adapter.disconnect()
+        assert adapter._invite_join_tasks == {}
 
 class TestMatrixUploadAndSend:
 
