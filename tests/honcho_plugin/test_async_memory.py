@@ -16,7 +16,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-
 from plugins.memory.honcho.client import HonchoClientConfig
 from plugins.memory.honcho.session import (
     HonchoSession,
@@ -397,6 +396,19 @@ class TestAsyncWriterThread:
         mgr.prefetch_context("session")
 
         assert not called.wait(timeout=0.1)
+
+    @pytest.mark.parametrize("write_frequency", ["async", "turn", 2])
+    def test_save_is_rejected_after_shutdown(self, make_manager, write_frequency):
+        mgr = make_manager(write_frequency=write_frequency)
+        assert mgr.shutdown()
+        session = _make_session()
+        session.add_message("user", "too late")
+
+        with patch.object(mgr, "_flush_session") as flush:
+            mgr.save(session)
+
+        flush.assert_not_called()
+        assert mgr._turn_counter == 0
 
 
 # ---------------------------------------------------------------------------

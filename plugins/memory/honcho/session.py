@@ -736,6 +736,9 @@ class HonchoSessionManager:
           "session" — defer until flush_session() is called explicitly
           N (int)   — flush every N turns
         """
+        if self._shutdown_requested.is_set():
+            return
+
         self._turn_counter += 1
         wf = self._write_frequency
 
