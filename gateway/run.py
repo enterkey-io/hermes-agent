@@ -28,6 +28,7 @@ import asyncio
 import concurrent.futures
 import dataclasses
 import faulthandler
+import hashlib
 import inspect
 import json
 import logging
@@ -23172,13 +23173,30 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         "honcho.runtime_peer_prefix",
         "honcho.user_peer_aliases",
     )
-    _HONCHO_CACHE_BUSTING_MEMO: dict[
-        tuple[str, tuple[int, int, int, int] | None], dict[str, Any]
-    ] = {}
+    _HONCHO_CACHE_BUSTING_MEMO: dict[tuple[str, tuple[Any, ...] | None], dict[str, Any]] = {}
 
     @classmethod
     def _empty_honcho_cache_busting_config(cls) -> dict[str, Any]:
         return {key: None for key in cls._HONCHO_CACHE_BUSTING_KEYS}
+
+    @staticmethod
+    def _honcho_config_revision(path: Path) -> tuple[Any, ...] | None:
+        """Return a memo revision for honcho.json without reading it on Unix.
+
+        Windows ``st_ctime`` is file creation time, so a same-size in-place
+        rewrite that restores mtime can retain all useful stat metadata. Hash
+        the configuration file there to avoid serving stale identity
+        mappings. Unix metadata includes change time and keeps the unchanged
+        file fast path stat-only.
+        """
+        try:
+            stat = path.stat()
+            revision = (stat.st_mtime_ns, stat.st_size, stat.st_ino)
+            if sys.platform == "win32":
+                return revision + (hashlib.sha256(path.read_bytes()).digest(),)
+            return revision + (stat.st_ctime_ns,)
+        except OSError:
+            return None
 
     @classmethod
     def _extract_honcho_cache_busting_config(cls) -> dict[str, Any]:
@@ -23187,17 +23205,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             from plugins.memory.honcho.client import HonchoClientConfig, resolve_config_path
 
             path = resolve_config_path()
-            try:
-                stat = path.stat()
-                file_identity = (
-                    stat.st_mtime_ns,
-                    stat.st_ctime_ns,
-                    stat.st_size,
-                    stat.st_ino,
-                )
-            except OSError:
-                file_identity = None
-            memo_key = (str(path), file_identity)
+            memo_key = (str(path), cls._honcho_config_revision(path))
             cached = cls._HONCHO_CACHE_BUSTING_MEMO.get(memo_key)
             if cached is not None:
                 return dict(cached)

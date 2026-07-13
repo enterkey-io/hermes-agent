@@ -312,7 +312,7 @@ class TestSendMessageTool:
         )
 
 
-    def test_media_tag_outside_allowed_roots_is_not_sent(self, tmp_path, monkeypatch):
+    def test_unsafe_trailing_media_tag_is_not_sent_or_left_as_separator(self, tmp_path, monkeypatch):
         # This test exercises the strict-allowlist path; force strict mode on
         # and disable recency trust so the freshly-written tmp_path file is
         # not auto-accepted by the trust window. (Recency trust is covered

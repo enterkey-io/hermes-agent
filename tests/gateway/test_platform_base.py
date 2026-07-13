@@ -224,6 +224,18 @@ class TestExtractMedia:
         media, _ = BasePlatformAdapter.extract_media(content)
         assert len(media) == 2
 
+    def test_voice_directive_removed_from_content(self):
+        content = "[[audio_as_voice]]\nSome text\nMEDIA:/voice.ogg"
+        _, cleaned = BasePlatformAdapter.extract_media(content)
+        assert "[[audio_as_voice]]" not in cleaned
+        assert "MEDIA:" not in cleaned
+        assert "Some text" in cleaned
+
+    def test_media_with_text_before(self):
+        content = "Here is your audio:\nMEDIA:/output.ogg"
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert len(media) == 1
+        assert cleaned == "Here is your audio:"
 
     def test_cleaned_content_trims_excess_newlines(self):
         content = "Before\n\nMEDIA:/audio.ogg\n\n\n\nAfter"
@@ -251,6 +263,21 @@ class TestExtractMedia:
         media, cleaned = BasePlatformAdapter.extract_media(content)
         assert media == [("/tmp/file.png", False)]
         assert cleaned == "First paragraph\n\nSecond paragraph"
+
+    def test_media_only_crlf_tail_preserves_caption_and_paragraph_breaks(self):
+        content = "First paragraph\r\n\r\nSecond paragraph\r\nMEDIA:/tmp/file.png\r\n"
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert media == [("/tmp/file.png", False)]
+        assert cleaned == "First paragraph\r\n\r\nSecond paragraph"
+
+    def test_multiple_media_only_tail_lines_leave_no_separator_newline(self):
+        content = "Your files are attached.\nMEDIA:/tmp/first.png\nMEDIA:/tmp/second.pdf\n"
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert media == [
+            ("/tmp/first.png", False),
+            ("/tmp/second.pdf", False),
+        ]
+        assert cleaned == "Your files are attached."
 
     def test_media_tag_supports_quoted_paths_with_spaces(self):
         content = "Here\nMEDIA: '/tmp/my image.png'\nAfter"

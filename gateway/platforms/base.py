@@ -4953,9 +4953,9 @@ class BasePlatformAdapter(ABC):
                     if line_end < 0:
                         line_end = len(cleaned)
                     if (
-                        cleaned[line_start:start].strip(" \t")
-                        or cleaned[end:line_end].strip(" \t")
-                        or cleaned[line_end:tail_start].strip(" \t\n")
+                        cleaned[line_start:start].strip(" \t\r")
+                        or cleaned[end:line_end].strip(" \t\r")
+                        or cleaned[line_end:tail_start].strip(" \t\r\n")
                     ):
                         break
                     tail_start = line_start
@@ -4963,6 +4963,8 @@ class BasePlatformAdapter(ABC):
                 if tail_start < len(cleaned):
                     if tail_start > 0 and cleaned[tail_start - 1] == "\n":
                         tail_start -= 1
+                        if tail_start > 0 and cleaned[tail_start - 1] == "\r":
+                            tail_start -= 1
                     spans = [(start, end) for start, end in spans if end <= tail_start]
                     cleaned = cleaned[:tail_start]
 
