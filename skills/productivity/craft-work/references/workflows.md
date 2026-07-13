@@ -11,8 +11,10 @@
 4. Deduplicate native Craft tasks. Route software or agent execution to
    Paperclip instead of duplicating its lifecycle.
 5. Read back the complete record. Select approved reusable knowledge for
-   GBrain `shared_meetings` separately, with Craft ID/revision provenance and explicit
-   exclusion of private relationship material.
+   GBrain `shared_craft` separately, with Craft ID/revision provenance and
+   explicit exclusion of private relationship material. Use `shared_meetings`
+   only for approved meeting evidence that has not been derived from the
+   canonical Craft record; never write the same fact to both sources.
 
 ## Bookmarks And Research
 

@@ -13,7 +13,8 @@ not any agent's private memory.
 - `shared_craft`: knowledge derived from verified Craft records. Use this first
   for current work, while treating Craft itself as final authority.
 - `shared_meetings`: approved reusable meeting knowledge. Raw transcripts and
-  private interpersonal details do not belong here.
+  private interpersonal details do not belong here. Facts selected from a
+  verified Craft meeting record belong in `shared_craft`, not here.
 - `shared_federated`: historical and other approved shared sources. Treat older
   material as evidence, not current policy.
 
