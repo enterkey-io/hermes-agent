@@ -1,0 +1,4 @@
+interface:
+  display_name: "Craft Work"
+  short_description: "Use Elliott's Craft workspace safely"
+  default_prompt: "Use Craft as Elliott's human-facing work and reference system with verified, recoverable operations."

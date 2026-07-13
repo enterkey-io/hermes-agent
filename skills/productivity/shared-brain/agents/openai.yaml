@@ -1,0 +1,4 @@
+interface:
+  display_name: "Shared Brain"
+  short_description: "Search shared GBrain knowledge safely"
+  default_prompt: "Search Elliott's source-scoped shared GBrain without mixing it with private agent memory or Craft authority."
