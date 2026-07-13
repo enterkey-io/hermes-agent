@@ -28,9 +28,9 @@ Read [authority.md](references/authority.md) whenever two systems overlap.
 Use only the reviewed local broker client:
 
 ```bash
-node /home/elliott/.hermes/hermes-agent/skills/productivity/craft-work/scripts/craft-ops-client.mjs contracts
-node /home/elliott/.hermes/hermes-agent/skills/productivity/craft-work/scripts/craft-ops-client.mjs run --contract <contract> --input '<json>'
-node /home/elliott/.hermes/hermes-agent/skills/productivity/craft-work/scripts/craft-ops-client.mjs reconcile --run-id <run-id>
+node /home/elliott/.hermes/shared-skills/craft-work/scripts/craft-ops-client.mjs contracts
+node /home/elliott/.hermes/shared-skills/craft-work/scripts/craft-ops-client.mjs run --contract <contract> --input '<json>'
+node /home/elliott/.hermes/shared-skills/craft-work/scripts/craft-ops-client.mjs reconcile --run-id <run-id>
 ```
 
 Read [tooling.md](references/tooling.md) before a command. A missing/failing

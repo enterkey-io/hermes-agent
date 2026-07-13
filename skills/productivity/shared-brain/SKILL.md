@@ -26,10 +26,10 @@ between Craft, GBrain, and profile memory.
 Use only the local read-only broker client:
 
 ```bash
-node /home/elliott/.hermes/hermes-agent/skills/productivity/shared-brain/scripts/gbrain-broker-client.mjs sources --source shared_craft --params '{}'
-node /home/elliott/.hermes/hermes-agent/skills/productivity/shared-brain/scripts/gbrain-broker-client.mjs search --source shared_craft --params '{"query":"...","limit":5}'
-node /home/elliott/.hermes/hermes-agent/skills/productivity/shared-brain/scripts/gbrain-broker-client.mjs get --source shared_craft --params '{"page_ref":"..."}'
-node /home/elliott/.hermes/hermes-agent/skills/productivity/shared-brain/scripts/gbrain-broker-client.mjs graph --source shared_craft --params '{"page_ref":"...","depth":1}'
+node /home/elliott/.hermes/shared-skills/shared-brain/scripts/gbrain-broker-client.mjs sources --source shared_craft --params '{}'
+node /home/elliott/.hermes/shared-skills/shared-brain/scripts/gbrain-broker-client.mjs search --source shared_craft --params '{"query":"...","limit":5}'
+node /home/elliott/.hermes/shared-skills/shared-brain/scripts/gbrain-broker-client.mjs get --source shared_craft --params '{"page_ref":"..."}'
+node /home/elliott/.hermes/shared-skills/shared-brain/scripts/gbrain-broker-client.mjs graph --source shared_craft --params '{"page_ref":"...","depth":1}'
 ```
 
 Read [protocol.md](references/protocol.md) before using the client. Search

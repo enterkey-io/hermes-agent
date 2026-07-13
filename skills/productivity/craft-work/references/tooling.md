@@ -1,6 +1,6 @@
 # Tooling
 
-Use only `/home/elliott/.hermes/hermes-agent/skills/productivity/craft-work/scripts/craft-ops-client.mjs`.
+Use only `/home/elliott/.hermes/shared-skills/craft-work/scripts/craft-ops-client.mjs`.
 It sends one strict newline-delimited JSON request and receives one
 response over `/run/user/1000/craft-ops/craft-ops.sock`, with a 4 MiB request/response
 limit and 15-minute default timeout.
