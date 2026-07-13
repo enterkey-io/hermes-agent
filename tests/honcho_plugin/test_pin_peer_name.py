@@ -16,6 +16,7 @@ chosen ``user_peer_id`` can be asserted without touching the network.
 
 import hashlib
 import json
+import os
 from unittest.mock import MagicMock
 
 
@@ -474,6 +475,14 @@ class TestPinTransition:
             write_frequency="turn",
         )
 
+    @staticmethod
+    def _rewrite_preserving_mtime(path, config: dict) -> None:
+        """Force the metadata collision that the memo must still handle."""
+        previous_mtime_ns = path.stat().st_mtime_ns
+        path.write_text(json.dumps(config))
+        os.utime(path, ns=(path.stat().st_atime_ns, previous_mtime_ns))
+        assert path.stat().st_mtime_ns == previous_mtime_ns
+
     def test_fresh_manager_after_flip_resolves_to_runtime(self):
         pinned_mgr = HonchoSessionManager(
             honcho=MagicMock(),
@@ -529,6 +538,69 @@ class TestPinTransition:
 
         assert sig_pinned["honcho.pin_peer_name"] != sig_unpinned["honcho.pin_peer_name"]
 
+    def test_cache_busting_signature_reflects_user_peer_aliases(self, tmp_path, monkeypatch):
+        from gateway.run import GatewayRunner
+
+        cfg_path = tmp_path / "honcho.json"
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        cfg_path.write_text(json.dumps({"apiKey": "k", "peerName": "Igor"}))
+        sig_no_aliases = GatewayRunner._extract_cache_busting_config({"memory": {"provider": "honcho"}})
+
+        self._rewrite_preserving_mtime(cfg_path, {
+            "apiKey": "k",
+            "peerName": "Igor",
+            "userPeerAliases": {"7654321": "Igor"},
+        })
+        sig_with_aliases = GatewayRunner._extract_cache_busting_config({"memory": {"provider": "honcho"}})
+
+        assert sig_no_aliases["honcho.user_peer_aliases"] != sig_with_aliases["honcho.user_peer_aliases"]
+
+    def test_cache_busting_signature_reflects_runtime_peer_prefix(self, tmp_path, monkeypatch):
+        from gateway.run import GatewayRunner
+
+        cfg_path = tmp_path / "honcho.json"
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        cfg_path.write_text(json.dumps({"apiKey": "k", "peerName": "Igor"}))
+        sig_no_prefix = GatewayRunner._extract_cache_busting_config({"memory": {"provider": "honcho"}})
+
+        self._rewrite_preserving_mtime(cfg_path, {
+            "apiKey": "k",
+            "peerName": "Igor",
+            "runtimePeerPrefix": "telegram_",
+        })
+        sig_with_prefix = GatewayRunner._extract_cache_busting_config({"memory": {"provider": "honcho"}})
+
+        assert sig_no_prefix["honcho.runtime_peer_prefix"] != sig_with_prefix["honcho.runtime_peer_prefix"]
+
+    def test_cache_busting_signature_reflects_ai_peer(self, tmp_path, monkeypatch):
+        """Editing ``aiPeer`` mid-flight must invalidate the cached agent.
+
+        ``HonchoSessionManager`` freezes ``cfg.ai_peer`` at construction —
+        without busting here, assistant writes keep landing on the old
+        peer until an unrelated cache eviction.
+        """
+        from gateway.run import GatewayRunner
+
+        cfg_path = tmp_path / "honcho.json"
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        cfg_path.write_text(json.dumps({
+            "apiKey": "k",
+            "peerName": "Igor",
+            "aiPeer": "hermes",
+        }))
+        sig_before = GatewayRunner._extract_cache_busting_config({"memory": {"provider": "honcho"}})
+
+        self._rewrite_preserving_mtime(cfg_path, {
+            "apiKey": "k",
+            "peerName": "Igor",
+            "aiPeer": "hermetika",
+        })
+        sig_after = GatewayRunner._extract_cache_busting_config({"memory": {"provider": "honcho"}})
+
+        assert sig_before["honcho.ai_peer"] != sig_after["honcho.ai_peer"]
 
 class TestProfilePeerUniqueness:
     """Each Hermes profile can pin to its own unique peerName.
@@ -571,4 +643,3 @@ class TestProfilePeerUniqueness:
             "Profiles pinned to distinct peer names must not collapse to "
             "the same Honcho peer — otherwise profile isolation is fictional."
         )
-
