@@ -37,4 +37,3 @@ async def test_standalone_matrix_send_does_not_overwrite_live_gateway_status():
 
     assert result["success"] is True
     write_runtime_status.assert_not_called()
-
