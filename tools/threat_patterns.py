@@ -74,7 +74,7 @@ _PATTERNS: List[Tuple[str, str, str]] = [
     # ── Role-play / identity hijack (context + strict; common attack
     #    surface in scraped web content and poisoned context files) ──
     (rf'you\s+are\s+{_FILLER}now\s+(?:a|an|the)\s+', "role_hijack", "context"),
-    (rf'pretend\s+{_FILLER}(you\s+are|to\s+be)\s+', "role_pretend", "context"),
+    (rf"(?<!not )(?<!never )(?<!don't )(?<!doesn't )pretend\s+{_FILLER}(you\s+are|to\s+be)\s+", "role_pretend", "context"),
     (rf'output\s+{_FILLER}(system|initial)\s+prompt', "leak_system_prompt", "context"),
     (rf'(respond|answer|reply)\s+without\s+{_FILLER}(restrictions|limitations|filters|safety)', "remove_filters", "context"),
     (rf'you\s+have\s+been\s+{_FILLER}(updated|upgraded|patched)\s+to', "fake_update", "context"),
