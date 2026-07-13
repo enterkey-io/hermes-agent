@@ -1,5 +1,6 @@
 """Tests for plugins/memory/honcho/session.py — HonchoSession and helpers."""
 
+import threading
 import time
 
 from datetime import datetime
@@ -1190,6 +1191,66 @@ class TestDialecticLifecycleSmoke:
         # ---- session end: flush messages ----
         provider.on_session_end([])
         mgr.flush_all.assert_called()
+
+
+def test_provider_shutdown_waits_for_init_and_memory_write_workers():
+    """Provider teardown must finish every Honcho producer before exit."""
+    provider = HonchoMemoryProvider()
+    manager = MagicMock()
+    provider._manager = manager
+    provider._session_initialized = True
+    provider._session_key = "shutdown-test"
+
+    release_init = threading.Event()
+    init_started = threading.Event()
+
+    def _blocked_init():
+        init_started.set()
+        release_init.wait(timeout=2.0)
+
+    init_thread = threading.Thread(
+        target=_blocked_init,
+        daemon=True,
+        name="honcho-session-init-test",
+    )
+    provider._init_thread = init_thread
+    init_thread.start()
+    assert init_started.wait(timeout=1.0)
+
+    release_write = threading.Event()
+    write_started = threading.Event()
+    write_threads = []
+
+    def _blocked_write(*_args, **_kwargs):
+        write_threads.append(threading.current_thread())
+        write_started.set()
+        release_write.wait(timeout=2.0)
+
+    manager.create_conclusion.side_effect = _blocked_write
+    provider.on_memory_write("add", "user", "remember this")
+    assert write_started.wait(timeout=1.0)
+
+    shutdown_returned = threading.Event()
+    shutdown_thread = threading.Thread(
+        target=lambda: (provider.shutdown(), shutdown_returned.set()),
+        daemon=True,
+        name="honcho-shutdown-test",
+    )
+    shutdown_thread.start()
+
+    returned_before_workers_finished = shutdown_returned.wait(timeout=0.1)
+    release_init.set()
+    release_write.set()
+    shutdown_thread.join(timeout=2.0)
+    init_thread.join(timeout=1.0)
+    for thread in write_threads:
+        thread.join(timeout=1.0)
+
+    assert not returned_before_workers_finished
+    assert shutdown_returned.is_set()
+    assert not init_thread.is_alive()
+    assert all(not thread.is_alive() for thread in write_threads)
+    manager.shutdown.assert_called_once_with()
 
 
 class TestReasoningHeuristic:

@@ -161,10 +161,15 @@ def test_oneshot_wires_session_db_for_recall(monkeypatch):
             self.suppress_status_output = False
             self.stream_delta_callback = object()
             self.tool_gen_callback = object()
+            self.shutdown_calls = 0
 
         def run_conversation(self, prompt, **_kwargs):
             captured["prompt"] = prompt
             return {"final_response": "ok", "failed": False, "partial": False}
+
+        def shutdown_memory_provider(self):
+            self.shutdown_calls += 1
+            captured["shutdown_calls"] = self.shutdown_calls
 
     class FakeSessionDB:
         def __new__(cls):
@@ -214,6 +219,7 @@ def test_oneshot_wires_session_db_for_recall(monkeypatch):
     assert captured["session_db"] is sentinel_db
     assert captured["enabled_toolsets"] == ["session_search"]
     assert captured["prompt"] == "recall this"
+    assert captured["shutdown_calls"] == 1
 
 
 def test_launch_tui_exports_model_provider_and_toolsets(monkeypatch, main_mod):

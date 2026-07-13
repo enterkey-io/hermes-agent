@@ -259,6 +259,11 @@ class HonchoMemoryProvider(MemoryProvider):
         self._prefetch_lock = threading.Lock()
         self._prefetch_thread: Optional[threading.Thread] = None
         self._sync_thread: Optional[threading.Thread] = None
+        self._memory_write_threads: set[threading.Thread] = set()
+        self._worker_lock = threading.Lock()
+        self._shutdown_lock = threading.Lock()
+        self._shutting_down = False
+        self._shutdown_complete = False
 
         self._recall_mode = "hybrid"  # "context", "tools", or "hybrid"
 
@@ -431,13 +436,13 @@ class HonchoMemoryProvider(MemoryProvider):
         assembly. ``wait_timeout`` lets fast/mock initializations finish before
         returning while still failing open for slow backends.
         """
-        if self._cron_skipped or self._session_initialized:
+        if self._cron_skipped or self._session_initialized or self._shutting_down:
             return
         if not self._config or self._lazy_init_kwargs is None:
             return
 
         with self._init_lock:
-            if self._cron_skipped or self._session_initialized:
+            if self._cron_skipped or self._session_initialized or self._shutting_down:
                 return
             if self._init_thread and self._init_thread.is_alive():
                 return
@@ -942,7 +947,7 @@ class HonchoMemoryProvider(MemoryProvider):
 
         Context and dialectic refreshes have independent cadence controls.
         """
-        if self._cron_skipped:
+        if self._cron_skipped or self._shutting_down:
             return
         # Tools-only mode has no automatic prefetch.
         if self._recall_mode == "tools":
@@ -1391,7 +1396,7 @@ class HonchoMemoryProvider(MemoryProvider):
         Messages exceeding the Honcho API limit (default 25k chars) are
         split into multiple messages with continuation markers.
         """
-        if self._cron_skipped:
+        if self._cron_skipped or self._shutting_down:
             return
         if self._recall_mode == "tools" and not self._session_ready():
             return
@@ -1437,7 +1442,7 @@ class HonchoMemoryProvider(MemoryProvider):
         """
         if action != "add" or target != "user" or not content:
             return
-        if self._cron_skipped:
+        if self._cron_skipped or self._shutting_down:
             return
         if self._recall_mode == "tools" and not self._session_ready():
             return
@@ -1450,9 +1455,20 @@ class HonchoMemoryProvider(MemoryProvider):
                 self._manager.create_conclusion(self._session_key, content)
             except Exception as e:
                 logger.debug("Honcho memory mirror failed: %s", e)
+            finally:
+                with self._worker_lock:
+                    self._memory_write_threads.discard(threading.current_thread())
 
         t = threading.Thread(target=_write, daemon=True, name="honcho-memwrite")
-        t.start()
+        with self._worker_lock:
+            if self._shutting_down:
+                return
+            self._memory_write_threads.add(t)
+            try:
+                t.start()
+            except Exception:
+                self._memory_write_threads.discard(t)
+                raise
 
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
         """Flush all pending messages to Honcho on session end."""
@@ -1607,15 +1623,51 @@ class HonchoMemoryProvider(MemoryProvider):
             return tool_error(f"Honcho {tool_name} failed: {e}")
 
     def shutdown(self) -> None:
-        for t in (self._prefetch_thread, self._sync_thread):
-            if t and t.is_alive():
-                t.join(timeout=5.0)
-        # Flush any remaining messages
-        if self._manager and not (self._init_thread and self._init_thread.is_alive() and not self._session_initialized):
-            try:
-                self._manager.flush_all()
-            except Exception:
-                pass
+        """Stop Honcho producers and the manager before interpreter teardown."""
+        with self._shutdown_lock:
+            if self._shutdown_complete:
+                return
+            with self._worker_lock:
+                self._shutting_down = True
+
+            timeout = 35.0
+            if self._config and self._config.timeout:
+                timeout = max(timeout, float(self._config.timeout) + 5.0)
+
+            init_thread = self._init_thread
+            if (
+                init_thread
+                and init_thread is not threading.current_thread()
+                and init_thread.is_alive()
+            ):
+                init_thread.join(timeout=timeout)
+
+            with self._worker_lock:
+                workers = set(self._memory_write_threads)
+            workers.update(
+                thread
+                for thread in (self._prefetch_thread, self._sync_thread)
+                if thread is not None
+            )
+            for thread in workers:
+                if thread is threading.current_thread() or not thread.is_alive():
+                    continue
+                thread.join(timeout=timeout)
+                if thread.is_alive():
+                    logger.warning(
+                        "Honcho worker %s did not stop within %.1fs",
+                        thread.name,
+                        timeout,
+                    )
+
+            manager = self._manager
+            if manager is not None:
+                try:
+                    manager.shutdown()
+                except Exception as exc:
+                    logger.debug("Honcho manager shutdown failed: %s", exc)
+
+            self._shutdown_complete = True
 
 
 # ---------------------------------------------------------------------------
