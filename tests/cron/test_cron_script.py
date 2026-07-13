@@ -266,7 +266,7 @@ class TestBuildJobPromptWithScript:
         assert "new PR: #123 fix typo" in prompt
         assert "Report any notable changes." in prompt
 
-    def test_script_error_injected(self, cron_env):
+    def test_script_error_suppresses_agent_prompt(self, cron_env):
         from cron.scheduler import _build_job_prompt
 
         job = {
@@ -274,9 +274,7 @@ class TestBuildJobPromptWithScript:
             "script": "nonexistent_monitor.py",
         }
         prompt = _build_job_prompt(job)
-        assert "## Script Error" in prompt
-        assert "not found" in prompt.lower()
-        assert "Report status." in prompt
+        assert prompt is None
 
     def test_no_script_unchanged(self, cron_env):
         from cron.scheduler import _build_job_prompt

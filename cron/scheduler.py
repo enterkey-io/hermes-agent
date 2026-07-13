@@ -298,6 +298,7 @@ from cron.executions import create_execution, finish_execution, mark_execution_r
 # response with this marker to suppress delivery.  Output is still saved
 # locally for audit.
 SILENT_MARKER = "[SILENT]"
+OPERATOR_ONLY_SCRIPT_FAILURE = "[operator-only-script-failure] "
 
 # Canonical silence tokens recognized in cron output.  Cron's contract is
 # intentionally looser than the gateway's exact-whole-response rule: the cron
@@ -2646,13 +2647,11 @@ def _build_job_prompt(
                 # Script produced no output — nothing to report, skip AI call.
                 return None
         else:
-            prompt = (
-                "## Script Error\n"
-                "The data-collection script failed. Report this to the user.\n\n"
-                f"```\n{script_output}\n```\n\n"
-                f"{prompt}"
+            logger.error(
+                "Cron pre-run script failed; suppressing agent execution and delivery: %s",
+                script_output,
             )
-            has_injected_data = True
+            return None
 
     # Inject output from referenced cron jobs as context.
     context_from = job.get("context_from")
@@ -3432,6 +3431,25 @@ def run_job(
     if script_path:
         prerun_script = _run_job_script_with_claim_heartbeat(job, script_path)
         _ran_ok, _script_output = prerun_script
+        if not _ran_ok:
+            logger.error(
+                "Job '%s' (ID: %s): pre-run script failed; agent and delivery suppressed",
+                job_name,
+                job_id,
+            )
+            failed_doc = (
+                f"# Cron Job: {job_name}\n\n"
+                f"**Job ID:** {job_id}\n"
+                f"**Run Time:** {_hermes_now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                "**Status:** pre-run script failed (operator-only)\n\n"
+                f"{_script_output}\n"
+            )
+            return (
+                False,
+                failed_doc,
+                "",
+                OPERATOR_ONLY_SCRIPT_FAILURE + _script_output,
+            )
         if _ran_ok and not _parse_wake_gate(_script_output):
             logger.info(
                 "Job '%s' (ID: %s): wakeAgent=false, skipping agent run",
@@ -4645,7 +4663,17 @@ def run_one_job(
             blocked_config = blocked_config_silent or (
                 bool(error) and BLOCKED_CONFIG_MARKER in str(error)
             )
-            if blocked_config and not success:
+            operator_only_failure = (
+                not success
+                and str(error or "").startswith(OPERATOR_ONLY_SCRIPT_FAILURE)
+            )
+            if operator_only_failure:
+                deliver_content = ""
+                logger.error(
+                    "Job '%s': operator-only pre-run failure recorded; chat delivery suppressed",
+                    job["id"],
+                )
+            elif blocked_config and not success:
                 # Blocked-config alert: bypass the generic failure summarizer
                 # (whose auth/timeout heuristics would mislabel this as a
                 # provider runtime failure) — say plainly that config

@@ -312,6 +312,14 @@ class TestScriptOutputNotStrictScanned:
         assert self.RM_ROOT in prompt
         assert "Triage the items" in prompt
 
+    def test_failed_script_output_suppresses_prompt(self, cron_env):
+        """A failed collector is operator-only and never reaches the model."""
+        _, scheduler = cron_env
+        prompt = scheduler._build_job_prompt(
+            self._script_job(),
+            prerun_script=(False, "Traceback: refusing to run " + self.RM_ROOT),
+        )
+        assert prompt is None
 
     def test_injection_directive_in_script_output_still_blocked(self, cron_env):
         """The looser tier keeps the unambiguous injection directives — a
@@ -346,5 +354,4 @@ class TestScriptOutputNotStrictScanned:
         assert prompt is not None
         assert "\u200b" not in prompt
         assert "item oneitem two" in prompt
-
 

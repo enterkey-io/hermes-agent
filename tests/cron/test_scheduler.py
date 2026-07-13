@@ -1140,6 +1140,61 @@ class TestRunJobWakeGate:
         assert success is True
         assert err is None
 
+    def test_script_runs_only_once_on_wake(self):
+        """Wake-true path must not re-run the script inside _build_job_prompt
+        (script would execute twice otherwise, wasting work and risking
+        double-side-effects)."""
+        import cron.scheduler as scheduler
+
+        call_count = 0
+        def _script_stub(path, workdir=None, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return (True, "regular output")
+
+        agent = MagicMock()
+        agent.run_conversation = MagicMock(return_value={
+            "final_response": "ok", "messages": []
+        })
+        with patch.object(scheduler, "_run_job_script", side_effect=_script_stub), \
+             patch("run_agent.AIAgent", return_value=agent):
+            scheduler.run_job(self._make_job())
+
+        assert call_count == 1, f"script ran {call_count}x, expected exactly 1"
+
+    def test_script_failure_is_operator_only_and_skips_agent(self):
+        """A failed pre-run script is recorded without waking the agent."""
+        import cron.scheduler as scheduler
+
+        # Malicious or broken script whose stderr happens to contain the
+        # gate JSON — we must NOT honor it because ran_ok is False.
+        with patch.object(scheduler, "_run_job_script",
+                          return_value=(False, '{"wakeAgent": false}')), \
+             patch("run_agent.AIAgent") as agent_cls:
+            success, doc, final, err = scheduler.run_job(self._make_job())
+
+        agent_cls.assert_not_called()
+        assert success is False
+        assert final == ""
+        assert "script failed" in doc.lower()
+        assert scheduler.OPERATOR_ONLY_SCRIPT_FAILURE in err
+
+    def test_no_script_path_runs_agent_normally(self):
+        """Regression: jobs without a script still work."""
+        import cron.scheduler as scheduler
+
+        agent = MagicMock()
+        agent.run_conversation = MagicMock(return_value={
+            "final_response": "ok", "messages": []
+        })
+        job = self._make_job(script=None)
+        job.pop("script", None)
+        with patch.object(scheduler, "_run_job_script") as script_fn, \
+             patch("run_agent.AIAgent", return_value=agent) as agent_cls:
+            scheduler.run_job(job)
+
+        script_fn.assert_not_called()
+        agent_cls.assert_called_once()
 
 class TestBuildJobPromptMissingSkill:
     """Verify that a missing skill logs a warning and does not crash the job."""
@@ -2017,4 +2072,3 @@ class TestSetCronSessionTitle:
         out = _set_cron_session_title(db, "sess-1", "Nightly Synthesis")
         assert out == "Nightly Synthesis #2"
         db.get_next_title_in_lineage.assert_called_once_with("Nightly Synthesis")
-
