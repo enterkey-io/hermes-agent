@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import time
 import uuid
 from collections import OrderedDict
 from datetime import datetime
@@ -202,6 +203,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         self._private_api_enabled: Optional[bool] = None
         self._helper_connected: bool = False
         self._guid_cache: OrderedDict[str, str] = OrderedDict()
+        self._owns_webhook_registration = False
 
     # ------------------------------------------------------------------
     # API helpers
@@ -261,13 +263,17 @@ class BlueBubblesAdapter(BasePlatformAdapter):
     # Lifecycle
     # ------------------------------------------------------------------
 
-    async def connect(self, *, is_reconnect: bool = False) -> bool:
+    async def connect(
+        self,
+        *,
+        is_reconnect: bool = False,
+        outbound_only: bool = False,
+    ) -> bool:
         if not self.server_url or not self.password:
             logger.error(
                 "[bluebubbles] BLUEBUBBLES_SERVER_URL and BLUEBUBBLES_PASSWORD are required"
             )
             return False
-        from aiohttp import web
 
         # Tighter keepalive so idle CLOSE_WAIT drains promptly (#18451).
         from gateway.platforms._http_client_limits import platform_httpx_limits
@@ -293,6 +299,13 @@ class BlueBubblesAdapter(BasePlatformAdapter):
                 self.client = None
             return False
 
+        if outbound_only:
+            self._mark_connected()
+            logger.info("[bluebubbles] outbound-only transport connected")
+            return True
+
+        from aiohttp import web
+
         # Explicit body cap: BlueBubbles webhook events are small JSON (or
         # form-encoded) payloads. client_max_size makes aiohttp enforce the
         # cap on every read path — including chunked requests that carry no
@@ -317,13 +330,14 @@ class BlueBubblesAdapter(BasePlatformAdapter):
 
         # Register webhook with BlueBubbles server
         # This is required for the server to know where to send events
-        await self._register_webhook()
+        self._owns_webhook_registration = await self._register_webhook()
 
         return True
 
     async def disconnect(self) -> None:
-        # Unregister webhook before cleaning up
-        await self._unregister_webhook()
+        if self._owns_webhook_registration:
+            await self._unregister_webhook()
+            self._owns_webhook_registration = False
 
         if self.client:
             await self.client.aclose()
@@ -573,6 +587,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
                 payload["method"] = "private-api"
                 payload["selectedMessageGuid"] = reply_to
                 payload["partIndex"] = 0
+            sent_after_ms = int(time.time() * 1000) - 2_000
             try:
                 res = await self._api_post("/api/v1/message/text", payload)
                 data = res.get("data") or {}
@@ -580,9 +595,78 @@ class BlueBubblesAdapter(BasePlatformAdapter):
                 last = SendResult(
                     success=True, message_id=str(msg_id), raw_response=res
                 )
+            except httpx.TimeoutException:
+                msg_id = await self._find_recent_outbound_message(
+                    guid,
+                    chunk,
+                    sent_after_ms=sent_after_ms,
+                )
+                if msg_id:
+                    last = SendResult(
+                        success=True,
+                        message_id=msg_id,
+                        raw_response={"reconciled_after_timeout": True},
+                    )
+                    continue
+                return SendResult(
+                    success=False,
+                    error="BlueBubbles send timed out; delivery is unconfirmed",
+                )
             except Exception as exc:
                 return SendResult(success=False, error=str(exc))
         return last
+
+    async def _find_recent_outbound_message(
+        self,
+        chat_guid: str,
+        text: str,
+        *,
+        sent_after_ms: int,
+    ) -> Optional[str]:
+        """Confirm a timed-out send without issuing a duplicate retry."""
+        try:
+            response = await self._api_post(
+                "/api/v1/message/query",
+                {"limit": 100, "offset": 0, "sort": "DESC", "with": ["chats"]},
+            )
+        except Exception:
+            return None
+
+        for message in response.get("data", []) or []:
+            if not isinstance(message, dict):
+                continue
+            if message.get("text") != text or message.get("isFromMe") is not True:
+                continue
+            try:
+                created_ms = int(message.get("dateCreated"))
+            except (TypeError, ValueError):
+                continue
+            if created_ms < sent_after_ms:
+                continue
+            chats = message.get("chats") or []
+            if not any(
+                isinstance(chat, dict)
+                and self._chat_targets_match(chat_guid, str(chat.get("guid") or ""))
+                for chat in chats
+            ):
+                continue
+            message_id = message.get("guid") or message.get("messageGuid")
+            if message_id:
+                return str(message_id)
+        return None
+
+    @staticmethod
+    def _chat_targets_match(requested: str, resolved: str) -> bool:
+        if requested == resolved:
+            return True
+        requested_parts = requested.split(";")
+        resolved_parts = resolved.split(";")
+        return (
+            len(requested_parts) == 3
+            and len(resolved_parts) == 3
+            and requested_parts[1:] == resolved_parts[1:]
+            and "any" in {requested_parts[0], resolved_parts[0]}
+        )
 
     # ------------------------------------------------------------------
     # Media sending (outbound)
