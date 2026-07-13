@@ -400,6 +400,17 @@ class TestResolveSessionNameGatewayKey:
         assert result == "agent-main-telegram-dm-8439114563"
         assert ":" not in result
 
+    def test_gateway_key_is_profile_scoped_when_enabled(self):
+        """Profile isolation must also apply to stable gateway sessions."""
+        config = HonchoClientConfig(
+            peer_name="elliott-grace",
+            session_peer_prefix=True,
+        )
+        result = config.resolve_session_name(
+            gateway_session_key="agent:main:telegram:dm:8439114563",
+        )
+        assert result == "elliott-grace-agent-main-telegram-dm-8439114563"
+
 
 class TestResolveSessionNameLengthLimit:
     """Regression tests for Honcho's 100-char session ID limit (issue #13868).

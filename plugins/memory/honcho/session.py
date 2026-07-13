@@ -1226,6 +1226,8 @@ class HonchoSessionManager:
 
         for filename, upload_name, description, target_peer_id, target_kind in files:
             filepath = memory_path / filename
+            if filename == "SOUL.md" and not filepath.exists():
+                filepath = memory_path.parent / filename
             if not filepath.exists():
                 continue
             content = filepath.read_text(encoding="utf-8").strip()
@@ -1417,11 +1419,11 @@ class HonchoSessionManager:
             logger.debug("Session context fetch failed: %s", e)
             return {}
 
-    def _resolve_peer_id(self, session: HonchoSession, peer: str | None) -> str:
+    def _resolve_peer_id(self, session: HonchoSession, peer: str | None) -> str | None:
         """Resolve a peer alias or explicit peer ID to a concrete Honcho peer ID.
 
-        Always returns a non-empty string: either a known peer ID or a
-        sanitized version of the caller-supplied alias/ID.
+        Isolated profiles accept only ``user`` and ``ai``. Legacy profiles may
+        continue using explicit peer IDs for backward compatibility.
         """
         candidate = (peer or "user").strip()
         if not candidate:
@@ -1433,15 +1435,21 @@ class HonchoSessionManager:
         if normalized == self._sanitize_id("ai"):
             return session.assistant_peer_id
 
+        if self._config and self._config.isolate_peer_tools:
+            return None
+
         return normalized
 
     def _resolve_observer_target(
         self,
         session: HonchoSession,
         peer: str | None,
-    ) -> tuple[str, str | None]:
+    ) -> tuple[str | None, str | None]:
         """Resolve observer and target peer IDs for context/search/profile queries."""
         target_peer_id = self._resolve_peer_id(session, peer)
+
+        if target_peer_id is None:
+            return None, None
 
         if target_peer_id == session.assistant_peer_id:
             return session.assistant_peer_id, session.assistant_peer_id

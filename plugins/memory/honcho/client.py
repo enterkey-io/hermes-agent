@@ -454,6 +454,9 @@ class HonchoClientConfig:
     # Session resolution
     session_strategy: str = "per-directory"
     session_peer_prefix: bool = False
+    # Restrict model-facing peer tools to this profile's user/AI pair. Legacy
+    # configs default false; profile provisioning enables it explicitly.
+    isolate_peer_tools: bool = False
     sessions: dict[str, str] = field(default_factory=dict)
     # Raw global config for anything else consumers need
     raw: dict[str, Any] = field(default_factory=dict)
@@ -730,6 +733,11 @@ class HonchoClientConfig:
             ),
             session_strategy=session_strategy,
             session_peer_prefix=session_peer_prefix,
+            isolate_peer_tools=_resolve_bool(
+                host_block.get("isolatePeerTools"),
+                raw.get("isolatePeerTools"),
+                default=False,
+            ),
             sessions=raw.get("sessions", {}),
             raw=raw,
             explicitly_configured=_explicitly_configured,
@@ -814,6 +822,9 @@ class HonchoClientConfig:
         if gateway_session_key:
             sanitized = re.sub(r'[^a-zA-Z0-9_-]+', '-', gateway_session_key).strip('-')
             if sanitized:
+                if self.session_peer_prefix and self.peer_name:
+                    sanitized = f"{self.peer_name}-{sanitized}"
+                    gateway_session_key = f"{self.peer_name}-{gateway_session_key}"
                 return self._enforce_session_id_limit(sanitized, gateway_session_key)
 
         # per-session: the run's session_id IS the identity — resolve before the

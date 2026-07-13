@@ -53,7 +53,7 @@ PROFILE_SCHEMA = {
         "properties": {
             "peer": {
                 "type": "string",
-                "description": "Peer to query. Built-in aliases: 'user' (default), 'ai'. Or pass any peer ID from this workspace.",
+                "description": "Peer to query: 'user' (default) or 'ai'.",
             },
             "card": {
                 "type": "array",
@@ -91,7 +91,7 @@ SEARCH_SCHEMA = {
             },
             "peer": {
                 "type": "string",
-                "description": "Whose history to search. Built-in aliases: 'user' (default), 'ai'. Or pass any peer ID from this workspace. Spans every session that peer took part in.",
+                "description": "Whose history to search: 'user' (default) or 'ai'. Spans every session that relationship peer took part in.",
             },
         },
         "required": ["query"],
@@ -108,7 +108,8 @@ REASONING_SCHEMA = {
         "most expensive call (seconds + tokens). Reach for it for nuanced or "
         "open-ended questions ('how does this person prefer to receive feedback?', "
         "'what's their relationship to project X?') where you want Honcho to do the "
-        "synthesis. For a specific fact that was stated, prefer honcho_search "
+        "synthesis within this profile's user or AI relationship memory. For a "
+        "specific fact that was stated, prefer honcho_search "
         "(cheap, raw excerpts, you synthesize). For standing profile facts, prefer "
         "honcho_profile / honcho_context (no LLM). "
         "Pass reasoning_level to control depth: minimal (fast/cheap), low (default), "
@@ -150,7 +151,7 @@ REASONING_SCHEMA = {
             },
             "peer": {
                 "type": "string",
-                "description": "Peer to query. Built-in aliases: 'user' (default), 'ai'. Or pass any peer ID from this workspace.",
+                "description": "Peer to query: 'user' (default) or 'ai'.",
             },
         },
         "required": ["query"],
@@ -174,7 +175,7 @@ CONTEXT_SCHEMA = {
         "properties": {
             "peer": {
                 "type": "string",
-                "description": "Peer to query. Built-in aliases: 'user' (default), 'ai'. Or pass any peer ID from this workspace.",
+                "description": "Peer to query: 'user' (default) or 'ai'.",
             },
         },
         "required": [],
@@ -219,7 +220,7 @@ CONCLUDE_SCHEMA = {
             },
             "peer": {
                 "type": "string",
-                "description": "The peer the conclusion is ABOUT. Built-in aliases: 'user' (default), 'ai'. Or pass any peer ID from this workspace.",
+                "description": "The relationship peer the conclusion is about: 'user' (default) or 'ai'.",
             },
         },
         "required": [],
@@ -1602,6 +1603,16 @@ class HonchoMemoryProvider(MemoryProvider):
 
         if not self._manager or not self._session_key:
             return tool_error("Honcho is not active for this session.")
+
+        requested_peer = str(args.get("peer", "user") or "user").strip().lower()
+        if (
+            self._config
+            and self._config.isolate_peer_tools
+            and requested_peer not in {"user", "ai"}
+        ):
+            return tool_error(
+                "This profile's Honcho memory is isolated. Peer must be 'user' or 'ai'."
+            )
 
         try:
             if tool_name == "honcho_profile":

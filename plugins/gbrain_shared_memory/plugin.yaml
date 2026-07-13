@@ -1,0 +1,7 @@
+name: gbrain-shared-memory
+version: 1.0.0
+description: "Shared GBrain recall and durable ambient owner-fact capture for Hermes profiles."
+author: "Elliott local"
+hooks:
+  - pre_llm_call
+  - post_llm_call

@@ -219,6 +219,13 @@ class TestCmdStatus:
 
 
 class TestCloneHonchoForProfile:
+    def test_profile_name_is_derived_from_canonical_or_legacy_host(self):
+        from plugins.memory.honcho.cli import _profile_name_from_host
+
+        assert _profile_name_from_host("hermes_grace") == "grace"
+        assert _profile_name_from_host("hermes.grace") == "grace"
+        assert _profile_name_from_host("hermes") == "hermes"
+
     """Identity-key carryover during profile cloning.
 
     The host-scoped identity-mapping keys (``userPeerAliases``,
@@ -255,7 +262,33 @@ class TestCloneHonchoForProfile:
         ok = honcho_cli.clone_honcho_for_profile("coder")
         assert ok is True
         new_block = written["cfg"]["hosts"]["hermes_coder"]
-        assert new_block["userPeerAliases"] == {"7654321": "eri", "discord-491827364": "eri"}
+        assert new_block["userPeerAliases"] == {
+            "7654321": "eri-coder",
+            "discord-491827364": "eri-coder",
+        }
+
+    def test_profile_clone_isolates_relationship_and_sessions(self, monkeypatch, tmp_path):
+        cfg = {
+            "apiKey": "***",
+            "hosts": {
+                "hermes": {
+                    "workspace": "hermes",
+                    "peerName": "elliott",
+                    "aiPeer": "hermes",
+                },
+            },
+        }
+        honcho_cli, written = self._setup_clone_env(monkeypatch, tmp_path, cfg)
+
+        ok = honcho_cli.clone_honcho_for_profile("coder")
+
+        assert ok is True
+        new_block = written["cfg"]["hosts"]["hermes_coder"]
+        assert new_block["workspace"] == "hermes"
+        assert new_block["peerName"] == "elliott-coder"
+        assert new_block["aiPeer"] == "coder"
+        assert new_block["sessionPeerPrefix"] is True
+        assert new_block["isolatePeerTools"] is True
 
     def test_runtime_peer_prefix_carries_into_cloned_profile(self, monkeypatch, tmp_path):
         cfg = {

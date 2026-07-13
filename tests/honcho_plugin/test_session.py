@@ -1467,3 +1467,61 @@ class TestGetSessionContextFallback:
         assert peer_id == "user-peer"
         assert target == "user-peer"
 
+    def test_fallback_uses_ai_peer_for_ai(self):
+        """On cache miss, peer='ai' fetches assistant peer context, not user."""
+        mgr = self._make_manager_with_session()
+        fetch_calls = []
+
+        def _fake_fetch(peer_id, search_query=None, *, target=None):
+            fetch_calls.append((peer_id, target))
+            return {"representation": "ai rep", "card": []}
+
+        mgr._fetch_peer_context = _fake_fetch
+
+        mgr.get_session_context("test", peer="ai")
+
+        assert len(fetch_calls) == 1
+        peer_id, target = fetch_calls[0]
+        assert peer_id == "ai-peer", f"expected ai-peer, got {peer_id}"
+        assert target == "ai-peer"
+
+
+class TestPeerToolIsolation:
+    """Isolated profiles may address only their own user/AI relationship pair."""
+
+    def _manager(self, isolated: bool):
+        from plugins.memory.honcho.client import HonchoClientConfig
+        from plugins.memory.honcho.session import HonchoSessionManager
+
+        cfg = HonchoClientConfig(
+            api_key="test-key",
+            enabled=True,
+            isolate_peer_tools=isolated,
+        )
+        mgr = HonchoSessionManager.__new__(HonchoSessionManager)
+        mgr._config = cfg
+        session = HonchoSession(
+            key="test",
+            honcho_session_id="sid",
+            user_peer_id="elliott-alina",
+            assistant_peer_id="alina",
+        )
+        return mgr, session
+
+    def test_isolated_profile_resolves_builtin_aliases(self):
+        mgr, session = self._manager(isolated=True)
+
+        assert mgr._resolve_peer_id(session, "user") == "elliott-alina"
+        assert mgr._resolve_peer_id(session, "ai") == "alina"
+
+    def test_isolated_profile_rejects_explicit_peer_ids(self):
+        mgr, session = self._manager(isolated=True)
+
+        assert mgr._resolve_peer_id(session, "elliott") is None
+        assert mgr._resolve_peer_id(session, "elliott-grace") is None
+        assert mgr._resolve_peer_id(session, "grace") is None
+
+    def test_legacy_profile_preserves_explicit_peer_behavior(self):
+        mgr, session = self._manager(isolated=False)
+
+        assert mgr._resolve_peer_id(session, "elliott-grace") == "elliott-grace"

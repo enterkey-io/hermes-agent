@@ -7,12 +7,31 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
 from hermes_constants import get_hermes_home
 from plugins.memory.honcho.client import _host_block, profile_host_key, resolve_active_host, resolve_config_path, HOST
 from hermes_cli.config import cfg_get
+
+
+def _profile_peer_name(base_peer: str | None, profile_name: str) -> str:
+    """Return a valid, stable user peer dedicated to one Hermes profile."""
+    base = (base_peer or "user").strip()
+    profile = profile_name.strip()
+    suffix = f"-{profile}"
+    candidate = base if base.endswith(suffix) else f"{base}{suffix}"
+    return re.sub(r"[^a-zA-Z0-9_-]+", "-", candidate).strip("-")
+
+
+def _profile_name_from_host(host: str) -> str:
+    """Extract a profile name from canonical underscore or legacy dot hosts."""
+    for separator in ("_", "."):
+        prefix = f"{HOST}{separator}"
+        if host.startswith(prefix):
+            return host[len(prefix):]
+    return host
 
 
 def clone_honcho_for_profile(profile_name: str) -> bool:
@@ -56,17 +75,26 @@ def clone_honcho_for_profile(profile_name: str) -> bool:
     if "pinUserPeer" not in new_block and default_block.get("pinPeerName") is not None:
         new_block["pinUserPeer"] = default_block["pinPeerName"]
 
-    # Inherit peer name from default
+    # Relationship memory is profile-specific even when all profiles share a
+    # Honcho server/workspace. Rewrite aliases that targeted the default user
+    # peer so the same platform identities land on the new profile pair.
     peer_name = default_block.get("peerName") or cfg.get("peerName")
-    if peer_name:
-        new_block["peerName"] = peer_name
+    profile_peer = _profile_peer_name(peer_name, profile_name)
+    new_block["peerName"] = profile_peer
+    aliases = new_block.get("userPeerAliases")
+    if isinstance(aliases, dict) and peer_name:
+        new_block["userPeerAliases"] = {
+            runtime_id: profile_peer if target == peer_name else target
+            for runtime_id, target in aliases.items()
+        }
 
-    # AI peer is profile-specific; workspace is shared so all profiles
-    # see the same user context, sessions, and project history.
+    # The service/workspace is shared operationally; peers and sessions are not.
     # Use the bare profile name as the peer identity (not the host key)
     # because Honcho's peer ID pattern is ^[a-zA-Z0-9_-]+$ (no dots).
     new_block["aiPeer"] = profile_name
     new_block["workspace"] = default_block.get("workspace") or cfg.get("workspace") or HOST
+    new_block["sessionPeerPrefix"] = True
+    new_block["isolatePeerTools"] = True
     new_block["enabled"] = default_block.get("enabled", True)
 
     cfg.setdefault("hosts", {})[new_host] = new_block
@@ -121,13 +149,14 @@ def cmd_enable(args) -> None:
             val = default_block.get(key)
             if val is not None and key not in block:
                 block[key] = val
-        peer_name = default_block.get("peerName") or cfg.get("peerName")
-        if peer_name and "peerName" not in block:
-            block["peerName"] = peer_name
         # Use bare profile name as AI peer, not the host key
-        ai_peer = host.split(".", 1)[1] if "." in host else host
+        ai_peer = _profile_name_from_host(host)
+        peer_name = default_block.get("peerName") or cfg.get("peerName")
+        block.setdefault("peerName", _profile_peer_name(peer_name, ai_peer))
         block.setdefault("aiPeer", ai_peer)
         block.setdefault("workspace", default_block.get("workspace") or cfg.get("workspace") or HOST)
+        block.setdefault("sessionPeerPrefix", True)
+        block.setdefault("isolatePeerTools", True)
 
     _write_config(cfg)
     print(f"  {label}Honcho enabled.")

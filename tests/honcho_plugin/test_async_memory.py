@@ -529,6 +529,34 @@ class TestMemoryFileMigrationTargets:
         assert peer_by_upload_name["user_profile.md"] is user_peer
         assert peer_by_upload_name["agent_soul.md"] is ai_peer
 
+    def test_soul_upload_uses_profile_root_layout(self, make_manager, tmp_path):
+        """Hermes stores SOUL.md beside memories/, not inside it."""
+        memory_dir = tmp_path / "memories"
+        memory_dir.mkdir()
+        (tmp_path / "SOUL.md").write_text("profile identity", encoding="utf-8")
+
+        mgr = make_manager(write_frequency="turn")
+        session = _make_session(
+            key="cli:test-root-soul",
+            user_peer_id="elliott-grace",
+            assistant_peer_id="grace",
+            honcho_session_id="cli-test-root-soul",
+        )
+        mgr._cache[session.key] = session
+        user_peer = MagicMock(name="user-peer")
+        ai_peer = MagicMock(name="ai-peer")
+        mgr._peers_cache[session.user_peer_id] = user_peer
+        mgr._peers_cache[session.assistant_peer_id] = ai_peer
+        honcho_session = MagicMock()
+        mgr._sessions_cache[session.honcho_session_id] = honcho_session
+
+        uploaded = mgr.migrate_memory_files(session.key, str(memory_dir))
+
+        assert uploaded is True
+        upload = honcho_session.upload_file.call_args
+        assert upload.kwargs["file"][0] == "agent_soul.md"
+        assert upload.kwargs["peer"] is ai_peer
+
 
 # ---------------------------------------------------------------------------
 # HonchoClientConfig dataclass defaults for new fields
