@@ -36,7 +36,8 @@ class VoiceAdapter(BasePlatformAdapter):
         extra = getattr(config, "extra", {}) or {}
         self._vox_url = extra.get("vox_url", "ws://localhost:8600/adapter/hermes")
         self._platform_name = str(extra.get("platform_name") or "hermes").strip() or "hermes"
-        self._active_calls: Dict[str, str] = {}
+        self._active_calls: Dict[str, Dict[str, Any]] = {}
+        self._rejected_calls: set[str] = set()
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         if not websockets:
@@ -89,22 +90,78 @@ class VoiceAdapter(BasePlatformAdapter):
         if msg_type == "call_start":
             call_id = str(msg["callId"])
             agent = str(msg.get("agent", "default"))
-            self._active_calls[call_id] = agent
-            logger.info("Voice call started: %s (agent: %s)", call_id, agent)
+            source = str(msg.get("source") or "voice").lower()
+            direction = str(msg.get("direction") or "inbound").lower()
+            is_elliott = msg.get("isElliott") is True
+
+            # Phone Bridge is owner-only for inbound calls. Enforce the same
+            # boundary here so a bridge regression cannot present an unknown
+            # caller to Hermes as Elliott.
+            if source == "phone" and direction != "outbound" and not is_elliott:
+                self._active_calls.pop(call_id, None)
+                self._rejected_calls.add(call_id)
+                logger.warning(
+                    "Rejected unverified inbound phone call: %s (agent: %s)",
+                    call_id,
+                    agent,
+                )
+                await self._send_to_vox({"type": "hangup", "callId": call_id})
+                return
+
+            self._rejected_calls.discard(call_id)
+            caller_name = str(msg.get("callerName") or "").strip()[:120]
+            self._active_calls[call_id] = {
+                "agent": agent,
+                "source": source,
+                "direction": direction,
+                "is_elliott": is_elliott,
+                "caller_name": caller_name,
+                "context_sent": False,
+            }
+            logger.info(
+                "Voice call started: %s (agent: %s, source: %s, direction: %s, owner: %s)",
+                call_id,
+                agent,
+                source,
+                direction,
+                is_elliott,
+            )
             return
 
         if msg_type == "text":
             call_id = str(msg.get("callId", ""))
+            if call_id in self._rejected_calls:
+                logger.warning("Dropped transcript for rejected phone call: %s", call_id)
+                return
             content = str(msg.get("content", ""))
             if not content.strip():
                 return
+
+            call = self._active_calls.get(call_id) or {}
+            user_id = "elliott"
+            if call.get("source") == "phone":
+                is_elliott = bool(call.get("is_elliott"))
+                user_id = "elliott" if is_elliott else "phone-outbound"
+                if not call.get("context_sent"):
+                    direction = str(call.get("direction") or "inbound")
+                    direction_label = "outgoing" if direction == "outbound" else "incoming"
+                    direction_preposition = "to" if direction == "outbound" else "from"
+                    caller_name = str(call.get("caller_name") or "").strip()
+                    party = "Elliott" if is_elliott else caller_name or "the other party"
+                    content = (
+                        f"[Phone call context: {direction_label} FaceTime Audio call "
+                        f"{direction_preposition} {party}. This is live speech, so respond naturally and "
+                        "without markdown. To end the call, put [HANGUP] at the end of "
+                        f"your response.]\n\n{content}"
+                    )
+                    call["context_sent"] = True
 
             event = MessageEvent(
                 text=content,
                 message_type=MessageType.TEXT,
                 source=SessionSource(
                     platform=Platform.VOICE,
-                    user_id="elliott",
+                    user_id=user_id,
                     chat_id=f"voice:{call_id}",
                 ),
                 message_id=f"voice-{call_id}-{id(msg)}",
@@ -123,6 +180,7 @@ class VoiceAdapter(BasePlatformAdapter):
         if msg_type == "call_end":
             call_id = str(msg.get("callId", ""))
             self._active_calls.pop(call_id, None)
+            self._rejected_calls.discard(call_id)
             logger.info("Voice call ended: %s", call_id)
 
     async def disconnect(self) -> None:
@@ -155,12 +213,14 @@ class VoiceAdapter(BasePlatformAdapter):
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         call_id = chat_id.replace("voice:", "")
-        agent = self._active_calls.get(call_id, "unknown")
+        call = self._active_calls.get(call_id) or {}
         return {
             "name": f"Voice call {call_id}",
             "type": "dm",
             "chat_id": chat_id,
-            "agent": agent,
+            "agent": call.get("agent", "unknown"),
+            "source": call.get("source", "voice"),
+            "direction": call.get("direction"),
         }
 
     async def _send_to_vox(self, msg: dict[str, Any]) -> None:
