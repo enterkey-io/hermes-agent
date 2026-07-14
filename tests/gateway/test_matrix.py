@@ -2907,6 +2907,16 @@ class TestMatrixProxyConfig:
             return MatrixAdapter(cfg)
 
 
+    def test_homeserver_no_proxy_bypasses_generic_proxy(self, monkeypatch):
+        adapter = self._make_adapter(
+            monkeypatch,
+            proxy_env={
+                "HTTPS_PROXY": "http://onecli:10255",
+                "NO_PROXY": "matrix.example.org",
+            },
+        )
+        assert adapter._proxy_url is None
+
     def test_matrix_proxy_takes_priority(self, monkeypatch):
         adapter = self._make_adapter(monkeypatch,
                                      proxy_env={"MATRIX_PROXY": "socks5://special:1080",

@@ -1384,7 +1384,11 @@ class MatrixAdapter(BasePlatformAdapter):
         self._reaction_redaction_tasks: Set[asyncio.Task] = set()
 
         # Proxy support — resolve once at init, reuse for all HTTP traffic.
-        self._proxy_url: str | None = resolve_proxy_url(platform_env_var="MATRIX_PROXY")
+        homeserver_host = urlsplit(self._homeserver).hostname
+        self._proxy_url: str | None = resolve_proxy_url(
+            platform_env_var="MATRIX_PROXY",
+            target_hosts=homeserver_host,
+        )
         if self._proxy_url:
             logger.info("Matrix: proxy configured — %s", self._proxy_url)
         try:
