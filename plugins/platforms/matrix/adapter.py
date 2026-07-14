@@ -856,6 +856,55 @@ def _get_matrix_recovery_key_output_target() -> tuple[Optional[Path], str]:
     return path, ""
 
 
+async def _generate_matrix_recovery_key_with_password_uia(
+    olm: Any,
+    *,
+    user_id: str,
+    password: str,
+) -> str:
+    """Generate a recovery key and satisfy Synapse password UIA if required."""
+    if not password:
+        return await olm.generate_recovery_key()
+
+    from mautrix.errors import MatrixUnknownRequestError
+
+    client = olm.client
+    original_upload = client.upload_cross_signing_keys
+
+    async def upload_with_password_uia(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return await original_upload(*args, **kwargs)
+        except MatrixUnknownRequestError as exc:
+            if exc.http_status != 401 or kwargs.get("auth"):
+                raise
+            try:
+                challenge = json.loads(exc.text or "{}")
+            except (TypeError, json.JSONDecodeError):
+                raise
+            session = challenge.get("session")
+            stages = {
+                stage
+                for flow in challenge.get("flows", [])
+                for stage in flow.get("stages", [])
+            }
+            if not session or "m.login.password" not in stages:
+                raise
+            retry_kwargs = dict(kwargs)
+            retry_kwargs["auth"] = {
+                "type": "m.login.password",
+                "identifier": {"type": "m.id.user", "user": user_id},
+                "password": password,
+                "session": session,
+            }
+            return await original_upload(*args, **retry_kwargs)
+
+    client.upload_cross_signing_keys = upload_with_password_uia
+    try:
+        return await olm.generate_recovery_key()
+    finally:
+        client.upload_cross_signing_keys = original_upload
+
+
 def _handle_generated_matrix_recovery_key(mxid: str, recovery_key: str) -> None:
     """Handle a freshly generated Matrix recovery key without logging it."""
     try:
@@ -2076,7 +2125,13 @@ class MatrixAdapter(BasePlatformAdapter):
                                 )
                             else:
                                 try:
-                                    new_recovery_key = await olm.generate_recovery_key()
+                                    new_recovery_key = (
+                                        await _generate_matrix_recovery_key_with_password_uia(
+                                            olm,
+                                            user_id=str(client.mxid),
+                                            password=self._password,
+                                        )
+                                    )
                                     _handle_generated_matrix_recovery_key(
                                         str(client.mxid),
                                         new_recovery_key,

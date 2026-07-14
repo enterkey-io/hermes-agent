@@ -1796,6 +1796,49 @@ class TestMatrixUploadAndSend:
 
 
 class TestMatrixDiagnostics:
+    @pytest.mark.asyncio
+    async def test_recovery_key_bootstrap_retries_synapse_password_uia(self):
+        from mautrix.errors import MatrixUnknownRequestError
+        from plugins.platforms.matrix.adapter import (
+            _generate_matrix_recovery_key_with_password_uia,
+        )
+
+        client = MagicMock()
+        client.upload_cross_signing_keys = AsyncMock(
+            side_effect=[
+                MatrixUnknownRequestError(
+                    http_status=401,
+                    text='{"session":"uia-session","flows":[{"stages":["m.login.password"]}]}',
+                ),
+                None,
+            ]
+        )
+        olm = MagicMock()
+        olm.client = client
+
+        async def generate_recovery_key():
+            await olm.client.upload_cross_signing_keys(keys={"master": "key"})
+            return "generated-recovery-key"
+
+        olm.generate_recovery_key = generate_recovery_key
+
+        result = await _generate_matrix_recovery_key_with_password_uia(
+            olm,
+            user_id="@bot:example.org",
+            password="matrix-password",
+        )
+
+        assert result == "generated-recovery-key"
+        assert client.upload_cross_signing_keys.await_count == 2
+        retry = client.upload_cross_signing_keys.await_args_list[1]
+        assert retry.kwargs["keys"] == {"master": "key"}
+        assert retry.kwargs["auth"] == {
+            "type": "m.login.password",
+            "identifier": {"type": "m.id.user", "user": "@bot:example.org"},
+            "password": "matrix-password",
+            "session": "uia-session",
+        }
+
     def test_diagnostics_redacts_credentials_and_reports_status(self, monkeypatch):
         import plugins.platforms.matrix.adapter as matrix_mod
 
