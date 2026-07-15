@@ -181,6 +181,34 @@ def test_matrix_platform_model_default_overrides_global_model(monkeypatch):
     ]
 
 
+def test_voice_platform_reasoning_effort_overrides_global_reasoning():
+    runner = _make_runner()
+    source = SessionSource(
+        platform=Platform.VOICE,
+        chat_id="voice:vox-grace",
+        chat_name="Voice call",
+        chat_type="dm",
+        user_id="elliott",
+    )
+    config = {
+        "agent": {"reasoning_effort": "medium"},
+        "platform_models": {
+            "voice": {
+                "default": "gpt-5.4-mini",
+                "provider": "openai-codex",
+                "reasoning_effort": "low",
+            },
+        },
+    }
+
+    reasoning = runner._resolve_session_reasoning_config(
+        source=source,
+        user_config=config,
+    )
+
+    assert reasoning == {"enabled": True, "effort": "low"}
+
+
 def test_session_model_override_wins_over_platform_model(monkeypatch):
     monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", _explode_runtime_resolution)
     runner = _make_runner()

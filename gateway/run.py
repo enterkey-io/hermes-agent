@@ -3425,6 +3425,8 @@ def _resolve_platform_model_config(config: dict | None, platform_key: str | None
             result["default"] = model.strip()
         if isinstance(provider, str) and provider.strip():
             result["provider"] = provider.strip()
+        if "reasoning_effort" in entry:
+            result["reasoning_effort"] = entry.get("reasoning_effort")
         return result
     return {}
 
@@ -4653,6 +4655,7 @@ class TurnRunner:
             source=ctx.source,
             session_key=ctx.session_key,
             model=model,
+            user_config=ctx.user_config,
         )
         self._runner._reasoning_config = reasoning_config
         self._runner._service_tier = self._runner._resolve_session_service_tier(
@@ -8407,15 +8410,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         source: Optional[SessionSource] = None,
         session_key: Optional[str] = None,
         model: str = "",
+        user_config: Optional[dict] = None,
     ) -> dict | None:
-        """Resolve reasoning effort for a session, honoring session overrides.
+        """Resolve reasoning effort for a session and gateway platform.
 
         Priority: session-scoped ``/reasoning --session`` override >
-        per-model override (``agent.reasoning_overrides``) > global
-        ``agent.reasoning_effort``. ``model`` should be the session's
-        *effective* model (session ``/model`` override included) so
-        per-model overrides track what the session actually runs — when
-        empty, the config's ``model.default`` is used.
+        platform override > per-model override
+        (``agent.reasoning_overrides``) > global ``agent.reasoning_effort``.
+        ``model`` should be the session's effective model so per-model
+        overrides track what the session actually runs.
         """
         resolved_session_key = session_key
         if not resolved_session_key and source is not None:
@@ -8428,6 +8431,33 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             _r_state = self._peek_session_state(resolved_session_key)
             if _r_state is not None and _r_state.conversation.reasoning_override is not None:
                 return _r_state.conversation.reasoning_override
+        if source is not None:
+            from hermes_constants import parse_reasoning_effort
+
+            effective_config = (
+                user_config
+                if user_config is not None
+                else _load_gateway_runtime_config()
+            )
+            try:
+                platform_key = _platform_config_key(source.platform)
+            except Exception:
+                platform_key = None
+            platform_model_cfg = _resolve_platform_model_config(
+                effective_config,
+                platform_key,
+            )
+            if "reasoning_effort" in platform_model_cfg:
+                effort = platform_model_cfg.get("reasoning_effort")
+                parsed = parse_reasoning_effort(effort)
+                if parsed is not None:
+                    return parsed
+                if effort and str(effort).strip():
+                    logger.warning(
+                        "Unknown platform reasoning_effort '%s' for %s; using profile default",
+                        effort,
+                        platform_key,
+                    )
         return self._load_reasoning_config(model)
 
     def _set_session_reasoning_override(
@@ -20146,7 +20176,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             pr = self._provider_routing
             max_iterations = _current_max_iterations()
             reasoning_config = self._resolve_session_reasoning_config(
-                source=source, model=model
+                source=source,
+                model=model,
+                user_config=user_config,
             )
             self._reasoning_config = reasoning_config
             self._service_tier = self._resolve_session_service_tier(source=source)
