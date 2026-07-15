@@ -2592,17 +2592,20 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 try:
                     apply_database_pragmas(self._conn, db_label="state.db")
                     cursor = self._conn.cursor()
-                    self._fts_enabled = (
-                        self._fts_table_probe(cursor, "messages_fts") is True
-                    )
-                    if self._fts_enabled:
-                        self._trigram_available = (
-                            self._fts_table_probe(
-                                cursor,
-                                "messages_fts_trigram",
-                            )
-                            is True
+                    try:
+                        self._fts_enabled = (
+                            self._fts_table_probe(cursor, "messages_fts") is True
                         )
+                        if self._fts_enabled:
+                            self._trigram_available = (
+                                self._fts_table_probe(
+                                    cursor,
+                                    "messages_fts_trigram",
+                                )
+                                is True
+                            )
+                    finally:
+                        cursor.close()
                 except BaseException:
                     conn, self._conn = self._conn, None
                     try:
