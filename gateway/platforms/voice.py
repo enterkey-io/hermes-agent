@@ -89,6 +89,7 @@ class VoiceAdapter(BasePlatformAdapter):
 
         if msg_type == "call_start":
             call_id = str(msg["callId"])
+            session_id = str(msg.get("sessionId") or call_id).strip()[:160] or call_id
             agent = str(msg.get("agent", "default"))
             source = str(msg.get("source") or "voice").lower()
             direction = str(msg.get("direction") or "inbound").lower()
@@ -112,6 +113,7 @@ class VoiceAdapter(BasePlatformAdapter):
             caller_name = str(msg.get("callerName") or "").strip()[:120]
             self._active_calls[call_id] = {
                 "agent": agent,
+                "session_id": session_id,
                 "source": source,
                 "direction": direction,
                 "is_elliott": is_elliott,
@@ -162,7 +164,7 @@ class VoiceAdapter(BasePlatformAdapter):
                 source=SessionSource(
                     platform=Platform.VOICE,
                     user_id=user_id,
-                    chat_id=f"voice:{call_id}",
+                    chat_id=f"voice:{call.get('session_id') or call_id}",
                 ),
                 message_id=f"voice-{call_id}-{id(msg)}",
             )

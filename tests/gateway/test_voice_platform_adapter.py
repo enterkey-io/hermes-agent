@@ -224,6 +224,49 @@ async def test_regular_voice_transcript_remains_plain_text(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_transport_call_id_can_use_a_stable_session_id(monkeypatch):
+    adapter = _make_voice_adapter()
+    events = []
+    sent = []
+
+    async def handle_message(event):
+        events.append(event)
+        return "I remember."
+
+    async def send_to_vox(message):
+        sent.append(message)
+
+    adapter.set_message_handler(handle_message)
+    monkeypatch.setattr(adapter, "_send_to_vox", send_to_vox)
+
+    await adapter._handle_vox_message(
+        {
+            "type": "call_start",
+            "callId": "elevenagents-kenzie-turn-1",
+            "sessionId": "vox-kenzie-1",
+            "agent": "kenzie",
+            "source": "voice",
+        }
+    )
+    await adapter._handle_vox_message(
+        {
+            "type": "text",
+            "callId": "elevenagents-kenzie-turn-1",
+            "content": "Do you remember?",
+        }
+    )
+
+    assert events[0].source.chat_id == "voice:vox-kenzie-1"
+    assert sent == [
+        {
+            "type": "text",
+            "content": "I remember.",
+            "callId": "elevenagents-kenzie-turn-1",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_outbound_phone_call_labels_the_recipient(monkeypatch):
     adapter = _make_voice_adapter()
     events = []
