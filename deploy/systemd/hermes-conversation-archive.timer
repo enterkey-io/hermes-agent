@@ -1,0 +1,12 @@
+[Unit]
+Description=Nightly Hermes visible conversation archive
+
+[Timer]
+OnCalendar=*-*-* 02:35:00 America/Chicago
+RandomizedDelaySec=10min
+AccuracySec=1min
+Persistent=true
+Unit=hermes-conversation-archive.service
+
+[Install]
+WantedBy=timers.target

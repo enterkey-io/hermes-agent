@@ -1,0 +1,20 @@
+[Unit]
+Description=Export human-visible Hermes conversations to daily Markdown
+ConditionPathIsDirectory=%h/.hermes/profiles
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/.hermes/hermes-agent
+ExecStart=%h/.hermes/hermes-agent/venv/bin/python %h/.hermes/hermes-agent/scripts/export_visible_conversations.py
+UMask=0077
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=15min
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+StandardOutput=journal
+StandardError=journal
