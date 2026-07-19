@@ -6,6 +6,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from gateway.config import PlatformConfig
+from gateway.platforms.voice import VoiceAdapter
 from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
 
 
@@ -119,6 +121,98 @@ class TestFinalizeCapabilityGate:
         # Finalize edit must go through even on identical content.
         picky.edit_message.assert_called_once()
         assert picky.edit_message.call_args[1]["finalize"] is True
+
+
+class TestVoiceAdapterIntegration:
+    @staticmethod
+    async def _start_voice_adapter(monkeypatch, send_to_vox):
+        adapter = VoiceAdapter(
+            PlatformConfig(
+                enabled=True,
+                extra={
+                    "vox_url": "ws://localhost:8600/adapter/kenzie",
+                    "platform_name": "kenzie",
+                },
+            )
+        )
+        monkeypatch.setattr(adapter, "_send_to_vox", send_to_vox)
+        await adapter._handle_vox_message(
+            {
+                "type": "call_start",
+                "callId": "speech-consumer",
+                "sessionId": "vox-kenzie-consumer",
+                "agent": "kenzie",
+                "source": "voice",
+            }
+        )
+        return adapter
+
+    @pytest.mark.asyncio
+    async def test_complete_before_preview_retries_final_on_same_stream(
+        self,
+        monkeypatch,
+    ):
+        attempts = []
+        final_attempts = 0
+
+        async def send_to_vox(message):
+            nonlocal final_attempts
+            attempts.append(message)
+            if message.get("isFinal") is True:
+                final_attempts += 1
+                if final_attempts == 1:
+                    raise OSError("temporary final frame failure")
+
+        adapter = await self._start_voice_adapter(monkeypatch, send_to_vox)
+        consumer = GatewayStreamConsumer(
+            adapter,
+            "voice:vox-kenzie-consumer",
+            StreamConsumerConfig(
+                edit_interval=0.01,
+                buffer_threshold=5,
+                cursor=" <VOICE>",
+            ),
+        )
+        consumer.on_delta("Complete response")
+        consumer.finish()
+
+        await consumer.run()
+
+        assert [
+            frame["content"]
+            for frame in attempts
+            if frame.get("isFinal") is False
+        ] == ["Complete response"]
+        assert final_attempts == 2
+        assert sum(frame.get("isFinal") is True for frame in attempts) == 2
+        assert consumer.final_response_sent is True
+        assert adapter._streams == {}
+
+    @pytest.mark.asyncio
+    async def test_configured_cursor_reaches_voice_adapter_without_affecting_base_metadata(
+        self,
+        monkeypatch,
+    ):
+        sent = []
+
+        async def send_to_vox(message):
+            sent.append(message)
+
+        adapter = await self._start_voice_adapter(monkeypatch, send_to_vox)
+        base_metadata = {"origin": "voice-test"}
+        consumer = GatewayStreamConsumer(
+            adapter,
+            "voice:vox-kenzie-consumer",
+            StreamConsumerConfig(cursor=" <VOICE>"),
+            metadata=base_metadata,
+        )
+
+        assert await consumer._send_or_edit("Hell <VOICE>") is True
+        assert await consumer._send_or_edit("Hello <VOICE>") is True
+        assert await consumer._send_or_edit("Hello", finalize=True) is True
+
+        assert [frame["content"] for frame in sent] == ["Hell", "o", ""]
+        assert base_metadata == {"origin": "voice-test"}
 
 
 class TestEditMessageFinalizeSignature:

@@ -28,7 +28,6 @@ _ACTIVE_TRANSPORT_CALL: ContextVar[tuple[int, str] | None] = ContextVar(
     "voice_active_transport_call",
     default=None,
 )
-_STREAM_CURSOR = " \u2589"
 
 
 class VoiceAdapter(BasePlatformAdapter):
@@ -222,21 +221,38 @@ class VoiceAdapter(BasePlatformAdapter):
         metadata=None,
     ) -> SendResult:
         call_id = self._resolve_call_id(chat_id, reply_to=reply_to)
-        message_id = self._next_message_id(call_id or "inactive")
+        is_stream = (
+            isinstance(metadata, dict) and metadata.get("expect_edits") is True
+        )
+        message_id = self._next_message_id(
+            call_id or "inactive",
+            stream=is_stream,
+        )
         if call_id is None:
             return SendResult(success=True, message_id=message_id)
 
-        if isinstance(metadata, dict) and metadata.get("expect_edits") is True:
+        if is_stream:
+            cursor = metadata.get("stream_cursor")
+            if not isinstance(cursor, str):
+                cursor = ""
             stream = {
                 "call_id": call_id,
-                "last_content": self._clean_stream_content(content),
+                "cursor": cursor,
+                "last_content": self._clean_stream_content(content, cursor),
                 "final_sent": False,
+                "lock": asyncio.Lock(),
             }
             self._streams[message_id] = stream
             if stream["last_content"]:
                 await self._send_stream_frame(call_id, stream["last_content"], is_final=False)
             if metadata.get("notify") is True:
-                await self._finalize_stream(stream)
+                try:
+                    await self._finalize_stream(message_id, stream)
+                except Exception as exc:
+                    logger.warning(
+                        "Voice stream final frame failed; preserving retry state: %s",
+                        exc,
+                    )
             return SendResult(success=True, message_id=message_id)
 
         await self._send_to_vox({"type": "text", "content": content, "callId": call_id})
@@ -252,32 +268,36 @@ class VoiceAdapter(BasePlatformAdapter):
     ) -> SendResult:
         stream = self._streams.get(message_id)
         if stream is None:
+            if str(message_id).startswith("voice-stream-"):
+                return SendResult(success=True, message_id=message_id)
             call_id = self._resolve_call_id(chat_id)
             if call_id is not None:
                 await self._send_to_vox(
                     {"type": "text", "content": content, "callId": call_id}
                 )
             return SendResult(success=True, message_id=message_id)
-        if stream["final_sent"]:
-            return SendResult(success=True, message_id=message_id)
+        async with stream["lock"]:
+            if stream["final_sent"]:
+                return SendResult(success=True, message_id=message_id)
 
-        call_id = stream["call_id"]
-        if not self._call_is_current(call_id, chat_id):
-            stream["final_sent"] = True
-            return SendResult(success=True, message_id=message_id)
+            call_id = stream["call_id"]
+            if not self._call_is_current(call_id, chat_id):
+                stream["final_sent"] = True
+                self._streams.pop(message_id, None)
+                return SendResult(success=True, message_id=message_id)
 
-        current = self._clean_stream_content(content)
-        suffix, safe = self._safe_stream_suffix(stream["last_content"], current)
-        if not safe:
-            await self._finalize_stream(stream)
-            return SendResult(success=True, message_id=message_id)
+            current = self._clean_stream_content(content, stream["cursor"])
+            suffix, safe = self._safe_stream_suffix(stream["last_content"], current)
+            if not safe:
+                await self._finalize_stream_locked(message_id, stream)
+                return SendResult(success=True, message_id=message_id)
 
-        if suffix:
-            await self._send_stream_frame(call_id, suffix, is_final=False)
-        if not stream["last_content"].startswith(current):
-            stream["last_content"] = current
-        if finalize:
-            await self._finalize_stream(stream)
+            if suffix:
+                await self._send_stream_frame(call_id, suffix, is_final=False)
+            if not stream["last_content"].startswith(current):
+                stream["last_content"] = current
+            if finalize:
+                await self._finalize_stream_locked(message_id, stream)
         return SendResult(success=True, message_id=message_id)
 
     async def send_typing(self, chat_id: str, is_typing: bool = True) -> None:
@@ -304,18 +324,27 @@ class VoiceAdapter(BasePlatformAdapter):
             self._session_calls.pop(session_id, None)
         for message_id in call.get("message_ids", ()):
             self._message_calls.pop(message_id, None)
+        for message_id, stream in tuple(self._streams.items()):
+            if stream["call_id"] == call_id:
+                self._streams.pop(message_id, None)
 
     def _resolve_call_id(self, chat_id: str, *, reply_to=None) -> str | None:
         session_id = str(chat_id).removeprefix("voice:")
-        call_id = self._message_calls.get(str(reply_to)) if reply_to else None
-        if call_id is None:
-            active_context = _ACTIVE_TRANSPORT_CALL.get()
-            if active_context and active_context[0] == id(self):
-                call_id = active_context[1]
-        if call_id is None:
-            call_id = self._session_calls.get(session_id)
-        if call_id and self._call_is_current(call_id, chat_id):
-            return call_id
+        if reply_to:
+            anchored_call_id = self._message_calls.get(str(reply_to))
+            if anchored_call_id and self._call_is_current(anchored_call_id, chat_id):
+                return anchored_call_id
+            return None
+
+        active_context = _ACTIVE_TRANSPORT_CALL.get()
+        if active_context and active_context[0] == id(self):
+            context_call_id = active_context[1]
+            if self._call_is_current(context_call_id, chat_id):
+                return context_call_id
+
+        session_call_id = self._session_calls.get(session_id)
+        if session_call_id and self._call_is_current(session_call_id, chat_id):
+            return session_call_id
         return None
 
     def _call_is_current(self, call_id: str, chat_id: str) -> bool:
@@ -329,14 +358,15 @@ class VoiceAdapter(BasePlatformAdapter):
             and self._session_calls.get(session_id) == call_id
         )
 
-    def _next_message_id(self, call_id: str) -> str:
+    def _next_message_id(self, call_id: str, *, stream: bool = False) -> str:
         self._message_sequence += 1
-        return f"voice-{call_id}-response-{self._message_sequence}"
+        kind = "stream" if stream else "response"
+        return f"voice-{kind}-{call_id}-{self._message_sequence}"
 
     @staticmethod
-    def _clean_stream_content(content: str) -> str:
+    def _clean_stream_content(content: str, cursor: str) -> str:
         text = str(content or "")
-        return text[:-len(_STREAM_CURSOR)] if text.endswith(_STREAM_CURSOR) else text
+        return text[:-len(cursor)] if cursor and text.endswith(cursor) else text
 
     @staticmethod
     def _safe_stream_suffix(previous: str, current: str) -> tuple[str, bool]:
@@ -372,11 +402,25 @@ class VoiceAdapter(BasePlatformAdapter):
             }
         )
 
-    async def _finalize_stream(self, stream: dict[str, Any]) -> None:
+    async def _finalize_stream(
+        self,
+        message_id: str,
+        stream: dict[str, Any],
+    ) -> None:
+        async with stream["lock"]:
+            await self._finalize_stream_locked(message_id, stream)
+
+    async def _finalize_stream_locked(
+        self,
+        message_id: str,
+        stream: dict[str, Any],
+    ) -> None:
         if stream["final_sent"]:
             return
         await self._send_stream_frame(stream["call_id"], "", is_final=True)
         stream["final_sent"] = True
+        if self._streams.get(message_id) is stream:
+            self._streams.pop(message_id, None)
 
     async def _send_to_vox(self, msg: dict[str, Any]) -> None:
         if self._ws and not getattr(self._ws, "closed", False):

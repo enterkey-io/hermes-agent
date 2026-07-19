@@ -343,6 +343,7 @@ class GatewayStreamConsumer:
             meta["reply_to_message_id"] = self._initial_reply_to_id
         if expect_edits:
             meta["expect_edits"] = True
+            meta["stream_cursor"] = self.cfg.cursor
         if final:
             meta["notify"] = True
         return meta or None

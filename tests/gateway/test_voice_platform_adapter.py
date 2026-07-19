@@ -298,7 +298,7 @@ async def test_streaming_response_emits_appended_deltas_and_one_final(monkeypatc
     result = await adapter.send(
         "voice:vox-kenzie-1",
         "Fin \u2589",
-        metadata={"expect_edits": True},
+        metadata={"expect_edits": True, "stream_cursor": " \u2589"},
     )
     await adapter.edit_message(
         "voice:vox-kenzie-1",
@@ -404,6 +404,190 @@ async def test_stream_finalization_retries_after_transport_failure(monkeypatch):
 
     assert final_attempts == 2
     assert sum(frame["isFinal"] is True for frame in sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_unanchored_send_falls_back_from_stale_context_to_replacement_call(
+    monkeypatch,
+):
+    from gateway.platforms.voice import _ACTIVE_TRANSPORT_CALL
+
+    adapter = _make_voice_adapter()
+    sent = []
+
+    async def send_to_vox(message):
+        sent.append(message)
+
+    monkeypatch.setattr(adapter, "_send_to_vox", send_to_vox)
+    await adapter._handle_vox_message(
+        {
+            "type": "call_start",
+            "callId": "speech-old",
+            "sessionId": "vox-kenzie-replaced",
+            "agent": "kenzie",
+            "source": "voice",
+        }
+    )
+
+    token = _ACTIVE_TRANSPORT_CALL.set((id(adapter), "speech-old"))
+    try:
+        await adapter._handle_vox_message(
+            {
+                "type": "call_start",
+                "callId": "speech-new",
+                "sessionId": "vox-kenzie-replaced",
+                "agent": "kenzie",
+                "source": "voice",
+            }
+        )
+        await adapter.send("voice:vox-kenzie-replaced", "Current response")
+    finally:
+        _ACTIVE_TRANSPORT_CALL.reset(token)
+
+    assert sent == [
+        {
+            "type": "text",
+            "content": "Current response",
+            "callId": "speech-new",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_stream_finalizers_emit_exactly_one_final(monkeypatch):
+    adapter = _make_voice_adapter()
+    final_started = asyncio.Event()
+    release_final = asyncio.Event()
+    sent = []
+
+    async def send_to_vox(message):
+        sent.append(message)
+        if message.get("isFinal") is True:
+            final_started.set()
+            await release_final.wait()
+
+    monkeypatch.setattr(adapter, "_send_to_vox", send_to_vox)
+    await adapter._handle_vox_message(
+        {
+            "type": "call_start",
+            "callId": "speech-concurrent",
+            "sessionId": "vox-kenzie-concurrent",
+            "agent": "kenzie",
+            "source": "voice",
+        }
+    )
+    result = await adapter.send(
+        "voice:vox-kenzie-concurrent",
+        "Complete answer",
+        metadata={"expect_edits": True, "stream_cursor": ""},
+    )
+
+    first = asyncio.create_task(
+        adapter.edit_message(
+            "voice:vox-kenzie-concurrent",
+            result.message_id,
+            "Complete answer",
+            finalize=True,
+        )
+    )
+    await asyncio.wait_for(final_started.wait(), timeout=1)
+    second = asyncio.create_task(
+        adapter.edit_message(
+            "voice:vox-kenzie-concurrent",
+            result.message_id,
+            "Complete answer",
+            finalize=True,
+        )
+    )
+    await asyncio.sleep(0)
+    release_final.set()
+    await asyncio.gather(first, second)
+
+    assert sum(frame.get("isFinal") is True for frame in sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_non_default_stream_cursor_is_removed_from_spoken_deltas(monkeypatch):
+    adapter = _make_voice_adapter()
+    sent = []
+
+    async def send_to_vox(message):
+        sent.append(message)
+
+    monkeypatch.setattr(adapter, "_send_to_vox", send_to_vox)
+    await adapter._handle_vox_message(
+        {
+            "type": "call_start",
+            "callId": "speech-cursor",
+            "sessionId": "vox-kenzie-cursor",
+            "agent": "kenzie",
+            "source": "voice",
+        }
+    )
+    result = await adapter.send(
+        "voice:vox-kenzie-cursor",
+        "Hel <WAIT>",
+        metadata={"expect_edits": True, "stream_cursor": " <WAIT>"},
+    )
+    await adapter.edit_message(
+        "voice:vox-kenzie-cursor",
+        result.message_id,
+        "Hello <WAIT>",
+    )
+    await adapter.edit_message(
+        "voice:vox-kenzie-cursor",
+        result.message_id,
+        "Hello",
+        finalize=True,
+    )
+
+    assert [frame["content"] for frame in sent] == ["Hel", "lo", ""]
+
+
+@pytest.mark.asyncio
+async def test_completed_and_deactivated_streams_do_not_accumulate(monkeypatch):
+    adapter = _make_voice_adapter()
+
+    async def send_to_vox(_message):
+        return None
+
+    monkeypatch.setattr(adapter, "_send_to_vox", send_to_vox)
+    await adapter._handle_vox_message(
+        {
+            "type": "call_start",
+            "callId": "speech-cleanup",
+            "sessionId": "vox-kenzie-cleanup",
+            "agent": "kenzie",
+            "source": "voice",
+        }
+    )
+
+    for index in range(5):
+        result = await adapter.send(
+            "voice:vox-kenzie-cleanup",
+            f"Answer {index}",
+            metadata={"expect_edits": True, "stream_cursor": ""},
+        )
+        await adapter.edit_message(
+            "voice:vox-kenzie-cleanup",
+            result.message_id,
+            f"Answer {index}",
+            finalize=True,
+        )
+        assert adapter._streams == {}
+
+    await adapter.send(
+        "voice:vox-kenzie-cleanup",
+        "Pending answer",
+        metadata={"expect_edits": True, "stream_cursor": ""},
+    )
+    assert len(adapter._streams) == 1
+
+    await adapter._handle_vox_message(
+        {"type": "call_end", "callId": "speech-cleanup"}
+    )
+
+    assert adapter._streams == {}
 
 
 @pytest.mark.asyncio
