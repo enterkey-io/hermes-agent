@@ -7,6 +7,7 @@ from inspect import Parameter, signature
 import pytest
 
 from gateway.config import GatewayConfig, Platform, PlatformConfig
+from gateway.session import build_session_key
 
 
 def test_gateway_runner_creates_voice_adapter():
@@ -728,6 +729,148 @@ async def test_listener_processes_call_end_while_generation_is_running(monkeypat
     release_handler.set()
     await _drain_background_tasks(adapter)
     assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_current_call_end_cancels_and_drains_stable_session_task():
+    adapter = _make_voice_adapter()
+    handler_started = asyncio.Event()
+    handler_cancelled = asyncio.Event()
+    release_handler = asyncio.Event()
+    events = []
+    task = None
+
+    async def handle_message(event):
+        events.append(event)
+        handler_started.set()
+        try:
+            await release_handler.wait()
+        except asyncio.CancelledError:
+            handler_cancelled.set()
+            raise
+
+    adapter.set_message_handler(handle_message)
+    await adapter._handle_vox_message(
+        {
+            "type": "call_start",
+            "callId": "speech-current-end",
+            "sessionId": "vox-kenzie-current-end",
+            "agent": "kenzie",
+            "source": "voice",
+        }
+    )
+    await adapter._handle_vox_message(
+        {
+            "type": "text",
+            "callId": "speech-current-end",
+            "content": "Please keep working",
+        }
+    )
+    await asyncio.wait_for(handler_started.wait(), timeout=1)
+
+    session_key = build_session_key(
+        events[0].source,
+        group_sessions_per_user=adapter.config.extra.get(
+            "group_sessions_per_user", True
+        ),
+        thread_sessions_per_user=adapter.config.extra.get(
+            "thread_sessions_per_user", False
+        ),
+    )
+    task = adapter._session_tasks[session_key]
+
+    try:
+        assert adapter._active_calls["speech-current-end"]["session_key"] == session_key
+
+        await adapter._handle_vox_message(
+            {"type": "call_end", "callId": "speech-current-end"}
+        )
+        await asyncio.sleep(0)
+
+        assert handler_cancelled.is_set()
+        assert task.done()
+        assert session_key not in adapter._session_tasks
+        assert task not in adapter._background_tasks
+    finally:
+        release_handler.set()
+        if task is not None and not task.done():
+            task.cancel()
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_superseded_call_end_does_not_cancel_replacement_session_task():
+    adapter = _make_voice_adapter()
+    handler_started = asyncio.Event()
+    handler_cancelled = asyncio.Event()
+    release_handler = asyncio.Event()
+    events = []
+    task = None
+
+    async def handle_message(event):
+        events.append(event)
+        handler_started.set()
+        try:
+            await release_handler.wait()
+        except asyncio.CancelledError:
+            handler_cancelled.set()
+            raise
+
+    adapter.set_message_handler(handle_message)
+    await adapter._handle_vox_message(
+        {
+            "type": "call_start",
+            "callId": "speech-superseded",
+            "sessionId": "vox-kenzie-shared",
+            "agent": "kenzie",
+            "source": "voice",
+        }
+    )
+    await adapter._handle_vox_message(
+        {
+            "type": "call_start",
+            "callId": "speech-replacement",
+            "sessionId": "vox-kenzie-shared",
+            "agent": "kenzie",
+            "source": "voice",
+        }
+    )
+    await adapter._handle_vox_message(
+        {
+            "type": "text",
+            "callId": "speech-replacement",
+            "content": "Replacement request",
+        }
+    )
+    await asyncio.wait_for(handler_started.wait(), timeout=1)
+
+    session_key = build_session_key(
+        events[0].source,
+        group_sessions_per_user=adapter.config.extra.get(
+            "group_sessions_per_user", True
+        ),
+        thread_sessions_per_user=adapter.config.extra.get(
+            "thread_sessions_per_user", False
+        ),
+    )
+    task = adapter._session_tasks[session_key]
+
+    try:
+        await adapter._handle_vox_message(
+            {"type": "call_end", "callId": "speech-superseded"}
+        )
+        await asyncio.sleep(0)
+
+        assert handler_cancelled.is_set() is False
+        assert task.done() is False
+        assert adapter._session_tasks[session_key] is task
+        assert "speech-replacement" in adapter._active_calls
+        assert adapter._session_calls["vox-kenzie-shared"] == "speech-replacement"
+    finally:
+        release_handler.set()
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

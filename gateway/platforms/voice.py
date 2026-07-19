@@ -20,7 +20,7 @@ from gateway.platforms.base import (
     MessageType,
     SendResult,
 )
-from gateway.session import SessionSource
+from gateway.session import SessionSource, build_session_key
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +125,11 @@ class VoiceAdapter(BasePlatformAdapter):
             if previous_call_id and previous_call_id != call_id:
                 self._deactivate_call(previous_call_id)
             caller_name = str(msg.get("callerName") or "").strip()[:120]
+            session_source = SessionSource(
+                platform=Platform.VOICE,
+                chat_type="dm",
+                chat_id=f"voice:{session_id}",
+            )
             self._active_calls[call_id] = {
                 "agent": agent,
                 "session_id": session_id,
@@ -134,6 +139,7 @@ class VoiceAdapter(BasePlatformAdapter):
                 "caller_name": caller_name,
                 "context_sent": False,
                 "message_ids": set(),
+                "session_key": self._session_key_for_source(session_source),
             }
             self._session_calls[session_id] = call_id
             logger.info(
@@ -188,6 +194,7 @@ class VoiceAdapter(BasePlatformAdapter):
                 ),
                 message_id=message_id,
             )
+            call["session_key"] = self._session_key_for_source(event.source)
             call["message_ids"].add(message_id)
             self._message_calls[message_id] = call_id
 
@@ -200,7 +207,15 @@ class VoiceAdapter(BasePlatformAdapter):
 
         if msg_type == "call_end":
             call_id = str(msg.get("callId", ""))
+            call = self._active_calls.get(call_id)
+            session_key = None
+            if call:
+                session_id = str(call.get("session_id") or call_id)
+                if self._session_calls.get(session_id) == call_id:
+                    session_key = call.get("session_key")
             self._deactivate_call(call_id)
+            if session_key:
+                await self.cancel_session_processing(str(session_key))
             self._rejected_calls.discard(call_id)
             logger.info("Voice call ended: %s", call_id)
 
@@ -327,6 +342,17 @@ class VoiceAdapter(BasePlatformAdapter):
         for message_id, stream in tuple(self._streams.items()):
             if stream["call_id"] == call_id:
                 self._streams.pop(message_id, None)
+
+    def _session_key_for_source(self, source: SessionSource) -> str:
+        return build_session_key(
+            source,
+            group_sessions_per_user=self.config.extra.get(
+                "group_sessions_per_user", True
+            ),
+            thread_sessions_per_user=self.config.extra.get(
+                "thread_sessions_per_user", False
+            ),
+        )
 
     def _resolve_call_id(self, chat_id: str, *, reply_to=None) -> str | None:
         session_id = str(chat_id).removeprefix("voice:")
