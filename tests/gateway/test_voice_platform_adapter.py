@@ -1,5 +1,7 @@
 """Tests for the Vox voice gateway platform adapter."""
 
+import asyncio
+import json
 from inspect import Parameter, signature
 
 import pytest
@@ -76,6 +78,11 @@ def _make_voice_adapter():
     )
 
 
+async def _drain_background_tasks(adapter):
+    while adapter._background_tasks:
+        await asyncio.gather(*tuple(adapter._background_tasks))
+
+
 @pytest.mark.asyncio
 async def test_phone_transcript_carries_verified_owner_context_once(monkeypatch):
     adapter = _make_voice_adapter()
@@ -111,6 +118,7 @@ async def test_phone_transcript_carries_verified_owner_context_once(monkeypatch)
     await adapter._handle_vox_message(
         {"type": "text", "callId": "vox-grace", "content": "Good."}
     )
+    await _drain_background_tasks(adapter)
 
     assert len(events) == 2
     assert events[0].source.user_id == "elliott"
@@ -217,6 +225,7 @@ async def test_regular_voice_transcript_remains_plain_text(monkeypatch):
     await adapter._handle_vox_message(
         {"type": "text", "callId": "vox-grace", "content": "Hello."}
     )
+    await _drain_background_tasks(adapter)
 
     assert len(events) == 1
     assert events[0].source.user_id == "elliott"
@@ -255,6 +264,7 @@ async def test_transport_call_id_can_use_a_stable_session_id(monkeypatch):
             "content": "Do you remember?",
         }
     )
+    await _drain_background_tasks(adapter)
 
     assert events[0].source.chat_id == "voice:vox-kenzie-1"
     assert sent == [
@@ -264,6 +274,276 @@ async def test_transport_call_id_can_use_a_stable_session_id(monkeypatch):
             "callId": "elevenagents-kenzie-turn-1",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_streaming_response_emits_appended_deltas_and_one_final(monkeypatch):
+    adapter = _make_voice_adapter()
+    sent = []
+
+    async def send_to_vox(message):
+        sent.append(message)
+
+    monkeypatch.setattr(adapter, "_send_to_vox", send_to_vox)
+    await adapter._handle_vox_message(
+        {
+            "type": "call_start",
+            "callId": "speech-1",
+            "sessionId": "vox-kenzie-1",
+            "agent": "kenzie",
+            "source": "voice",
+        }
+    )
+
+    result = await adapter.send(
+        "voice:vox-kenzie-1",
+        "Fin \u2589",
+        metadata={"expect_edits": True},
+    )
+    await adapter.edit_message(
+        "voice:vox-kenzie-1",
+        result.message_id,
+        "Finished \u2589",
+        finalize=False,
+    )
+    await adapter.edit_message(
+        "voice:vox-kenzie-1",
+        result.message_id,
+        "Finished answer \u2589",
+        finalize=False,
+    )
+    await adapter.edit_message(
+        "voice:vox-kenzie-1",
+        result.message_id,
+        "Finished answer",
+        finalize=True,
+    )
+    await adapter.edit_message(
+        "voice:vox-kenzie-1",
+        result.message_id,
+        "Finished answer",
+        finalize=True,
+    )
+
+    assert sent == [
+        {
+            "type": "text",
+            "content": "Fin",
+            "callId": "speech-1",
+            "stream": True,
+            "isFinal": False,
+        },
+        {
+            "type": "text",
+            "content": "ished",
+            "callId": "speech-1",
+            "stream": True,
+            "isFinal": False,
+        },
+        {
+            "type": "text",
+            "content": " answer",
+            "callId": "speech-1",
+            "stream": True,
+            "isFinal": False,
+        },
+        {
+            "type": "text",
+            "content": "",
+            "callId": "speech-1",
+            "stream": True,
+            "isFinal": True,
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stream_finalization_retries_after_transport_failure(monkeypatch):
+    adapter = _make_voice_adapter()
+    sent = []
+    final_attempts = 0
+
+    async def send_to_vox(message):
+        nonlocal final_attempts
+        if message.get("isFinal") is True:
+            final_attempts += 1
+            if final_attempts == 1:
+                raise OSError("temporary transport failure")
+        sent.append(message)
+
+    monkeypatch.setattr(adapter, "_send_to_vox", send_to_vox)
+    await adapter._handle_vox_message(
+        {
+            "type": "call_start",
+            "callId": "speech-retry",
+            "sessionId": "vox-kenzie-retry",
+            "agent": "kenzie",
+            "source": "voice",
+        }
+    )
+
+    result = await adapter.send(
+        "voice:vox-kenzie-retry",
+        "Complete answer",
+        metadata={"expect_edits": True},
+    )
+    with pytest.raises(OSError, match="temporary transport failure"):
+        await adapter.edit_message(
+            "voice:vox-kenzie-retry",
+            result.message_id,
+            "Complete answer",
+            finalize=True,
+        )
+
+    await adapter.edit_message(
+        "voice:vox-kenzie-retry",
+        result.message_id,
+        "Complete answer",
+        finalize=True,
+    )
+
+    assert final_attempts == 2
+    assert sum(frame["isFinal"] is True for frame in sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_non_extension_edit_uses_safe_suffix_then_closes_stream(monkeypatch):
+    adapter = _make_voice_adapter()
+    sent = []
+
+    async def send_to_vox(message):
+        sent.append(message)
+
+    monkeypatch.setattr(adapter, "_send_to_vox", send_to_vox)
+    await adapter._handle_vox_message(
+        {
+            "type": "call_start",
+            "callId": "speech-edit",
+            "sessionId": "vox-kenzie-edit",
+            "agent": "kenzie",
+            "source": "voice",
+        }
+    )
+
+    result = await adapter.send(
+        "voice:vox-kenzie-edit",
+        "Original phrase",
+        metadata={"expect_edits": True},
+    )
+    await adapter.edit_message(
+        "voice:vox-kenzie-edit",
+        result.message_id,
+        "Preface: Original phrase plus suffix",
+        finalize=False,
+    )
+    await adapter.edit_message(
+        "voice:vox-kenzie-edit",
+        result.message_id,
+        "Completely rewritten response",
+        finalize=False,
+    )
+    await adapter.edit_message(
+        "voice:vox-kenzie-edit",
+        result.message_id,
+        "Completely rewritten response with more text",
+        finalize=True,
+    )
+
+    assert [frame["content"] for frame in sent] == [
+        "Original phrase",
+        " plus suffix",
+        "",
+    ]
+    assert sent[-1]["isFinal"] is True
+    assert sum(frame["isFinal"] is True for frame in sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_non_streaming_response_keeps_legacy_text_shape(monkeypatch):
+    adapter = _make_voice_adapter()
+    sent = []
+
+    async def send_to_vox(message):
+        sent.append(message)
+
+    monkeypatch.setattr(adapter, "_send_to_vox", send_to_vox)
+    await adapter._handle_vox_message(
+        {
+            "type": "call_start",
+            "callId": "speech-plain",
+            "sessionId": "vox-kenzie-plain",
+            "agent": "kenzie",
+            "source": "voice",
+        }
+    )
+
+    await adapter.send("voice:vox-kenzie-plain", "Complete answer")
+    await adapter.edit_message(
+        "voice:vox-kenzie-plain",
+        "legacy-message-id",
+        "Corrected answer",
+    )
+
+    assert sent == [
+        {
+            "type": "text",
+            "content": "Complete answer",
+            "callId": "speech-plain",
+        },
+        {
+            "type": "text",
+            "content": "Corrected answer",
+            "callId": "speech-plain",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_listener_processes_call_end_while_generation_is_running(monkeypatch):
+    adapter = _make_voice_adapter()
+    handler_started = asyncio.Event()
+    release_handler = asyncio.Event()
+    sent = []
+
+    async def handle_message(_event):
+        handler_started.set()
+        await release_handler.wait()
+        return "Late answer"
+
+    async def send_to_vox(message):
+        sent.append(message)
+
+    class ScriptedWebSocket:
+        async def __aiter__(self):
+            yield json.dumps(
+                {
+                    "type": "call_start",
+                    "callId": "speech-ended",
+                    "sessionId": "vox-kenzie-ended",
+                    "agent": "kenzie",
+                    "source": "voice",
+                }
+            )
+            yield json.dumps(
+                {
+                    "type": "text",
+                    "callId": "speech-ended",
+                    "content": "Still there?",
+                }
+            )
+            await asyncio.wait_for(handler_started.wait(), timeout=1)
+            yield json.dumps({"type": "call_end", "callId": "speech-ended"})
+
+    adapter.set_message_handler(handle_message)
+    adapter._ws = ScriptedWebSocket()
+    monkeypatch.setattr(adapter, "_send_to_vox", send_to_vox)
+
+    await asyncio.wait_for(adapter._listen(), timeout=1)
+
+    assert "speech-ended" not in adapter._active_calls
+    release_handler.set()
+    await _drain_background_tasks(adapter)
+    assert sent == []
 
 
 @pytest.mark.asyncio
@@ -291,6 +571,7 @@ async def test_outbound_phone_call_labels_the_recipient(monkeypatch):
     await adapter._handle_vox_message(
         {"type": "text", "callId": "vox-grace", "content": "Hello?"}
     )
+    await _drain_background_tasks(adapter)
 
     assert len(events) == 1
     assert events[0].source.user_id == "phone-outbound"

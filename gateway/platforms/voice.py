@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 import json
 import logging
 from typing import Any, Dict
@@ -23,11 +24,18 @@ from gateway.session import SessionSource
 
 logger = logging.getLogger(__name__)
 
+_ACTIVE_TRANSPORT_CALL: ContextVar[tuple[int, str] | None] = ContextVar(
+    "voice_active_transport_call",
+    default=None,
+)
+_STREAM_CURSOR = " \u2589"
+
 
 class VoiceAdapter(BasePlatformAdapter):
     """Bridge Vox WebSocket speech events into the Hermes gateway pipeline."""
 
     MAX_MESSAGE_LENGTH = 100_000
+    REQUIRES_EDIT_FINALIZE = True
 
     def __init__(self, config):
         super().__init__(config, Platform.VOICE)
@@ -37,6 +45,10 @@ class VoiceAdapter(BasePlatformAdapter):
         self._vox_url = extra.get("vox_url", "ws://localhost:8600/adapter/hermes")
         self._platform_name = str(extra.get("platform_name") or "hermes").strip() or "hermes"
         self._active_calls: Dict[str, Dict[str, Any]] = {}
+        self._session_calls: Dict[str, str] = {}
+        self._message_calls: Dict[str, str] = {}
+        self._streams: Dict[str, Dict[str, Any]] = {}
+        self._message_sequence = 0
         self._rejected_calls: set[str] = set()
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
@@ -110,6 +122,9 @@ class VoiceAdapter(BasePlatformAdapter):
                 return
 
             self._rejected_calls.discard(call_id)
+            previous_call_id = self._session_calls.get(session_id)
+            if previous_call_id and previous_call_id != call_id:
+                self._deactivate_call(previous_call_id)
             caller_name = str(msg.get("callerName") or "").strip()[:120]
             self._active_calls[call_id] = {
                 "agent": agent,
@@ -119,7 +134,9 @@ class VoiceAdapter(BasePlatformAdapter):
                 "is_elliott": is_elliott,
                 "caller_name": caller_name,
                 "context_sent": False,
+                "message_ids": set(),
             }
+            self._session_calls[session_id] = call_id
             logger.info(
                 "Voice call started: %s (agent: %s, source: %s, direction: %s, owner: %s)",
                 call_id,
@@ -139,7 +156,10 @@ class VoiceAdapter(BasePlatformAdapter):
             if not content.strip():
                 return
 
-            call = self._active_calls.get(call_id) or {}
+            call = self._active_calls.get(call_id)
+            if not call:
+                logger.info("Dropped transcript for inactive voice call: %s", call_id)
+                return
             user_id = "elliott"
             if call.get("source") == "phone":
                 is_elliott = bool(call.get("is_elliott"))
@@ -158,6 +178,7 @@ class VoiceAdapter(BasePlatformAdapter):
                     )
                     call["context_sent"] = True
 
+            message_id = f"voice-{call_id}-{id(msg)}"
             event = MessageEvent(
                 text=content,
                 message_type=MessageType.TEXT,
@@ -166,22 +187,21 @@ class VoiceAdapter(BasePlatformAdapter):
                     user_id=user_id,
                     chat_id=f"voice:{call.get('session_id') or call_id}",
                 ),
-                message_id=f"voice-{call_id}-{id(msg)}",
+                message_id=message_id,
             )
+            call["message_ids"].add(message_id)
+            self._message_calls[message_id] = call_id
 
-            if self._message_handler:
-                response = await self._message_handler(event)
-                if response:
-                    await self._send_to_vox({
-                        "type": "text",
-                        "content": response,
-                        "callId": call_id,
-                    })
+            token = _ACTIVE_TRANSPORT_CALL.set((id(self), call_id))
+            try:
+                await self.handle_message(event)
+            finally:
+                _ACTIVE_TRANSPORT_CALL.reset(token)
             return
 
         if msg_type == "call_end":
             call_id = str(msg.get("callId", ""))
-            self._active_calls.pop(call_id, None)
+            self._deactivate_call(call_id)
             self._rejected_calls.discard(call_id)
             logger.info("Voice call ended: %s", call_id)
 
@@ -201,20 +221,70 @@ class VoiceAdapter(BasePlatformAdapter):
         reply_to=None,
         metadata=None,
     ) -> SendResult:
-        call_id = chat_id.replace("voice:", "")
-        await self._send_to_vox({"type": "text", "content": content, "callId": call_id})
-        return SendResult(success=True, message_id=f"voice-{call_id}-{id(content)}")
+        call_id = self._resolve_call_id(chat_id, reply_to=reply_to)
+        message_id = self._next_message_id(call_id or "inactive")
+        if call_id is None:
+            return SendResult(success=True, message_id=message_id)
 
-    async def edit_message(self, chat_id: str, message_id: str, content: str) -> bool:
-        call_id = chat_id.replace("voice:", "")
+        if isinstance(metadata, dict) and metadata.get("expect_edits") is True:
+            stream = {
+                "call_id": call_id,
+                "last_content": self._clean_stream_content(content),
+                "final_sent": False,
+            }
+            self._streams[message_id] = stream
+            if stream["last_content"]:
+                await self._send_stream_frame(call_id, stream["last_content"], is_final=False)
+            if metadata.get("notify") is True:
+                await self._finalize_stream(stream)
+            return SendResult(success=True, message_id=message_id)
+
         await self._send_to_vox({"type": "text", "content": content, "callId": call_id})
-        return True
+        return SendResult(success=True, message_id=message_id)
+
+    async def edit_message(
+        self,
+        chat_id: str,
+        message_id: str,
+        content: str,
+        *,
+        finalize: bool = False,
+    ) -> SendResult:
+        stream = self._streams.get(message_id)
+        if stream is None:
+            call_id = self._resolve_call_id(chat_id)
+            if call_id is not None:
+                await self._send_to_vox(
+                    {"type": "text", "content": content, "callId": call_id}
+                )
+            return SendResult(success=True, message_id=message_id)
+        if stream["final_sent"]:
+            return SendResult(success=True, message_id=message_id)
+
+        call_id = stream["call_id"]
+        if not self._call_is_current(call_id, chat_id):
+            stream["final_sent"] = True
+            return SendResult(success=True, message_id=message_id)
+
+        current = self._clean_stream_content(content)
+        suffix, safe = self._safe_stream_suffix(stream["last_content"], current)
+        if not safe:
+            await self._finalize_stream(stream)
+            return SendResult(success=True, message_id=message_id)
+
+        if suffix:
+            await self._send_stream_frame(call_id, suffix, is_final=False)
+        if not stream["last_content"].startswith(current):
+            stream["last_content"] = current
+        if finalize:
+            await self._finalize_stream(stream)
+        return SendResult(success=True, message_id=message_id)
 
     async def send_typing(self, chat_id: str, is_typing: bool = True) -> None:
         return None
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
-        call_id = chat_id.replace("voice:", "")
+        call_id = self._resolve_call_id(chat_id)
         call = self._active_calls.get(call_id) or {}
         return {
             "name": f"Voice call {call_id}",
@@ -224,6 +294,89 @@ class VoiceAdapter(BasePlatformAdapter):
             "source": call.get("source", "voice"),
             "direction": call.get("direction"),
         }
+
+    def _deactivate_call(self, call_id: str) -> None:
+        call = self._active_calls.pop(call_id, None)
+        if not call:
+            return
+        session_id = str(call.get("session_id") or call_id)
+        if self._session_calls.get(session_id) == call_id:
+            self._session_calls.pop(session_id, None)
+        for message_id in call.get("message_ids", ()):
+            self._message_calls.pop(message_id, None)
+
+    def _resolve_call_id(self, chat_id: str, *, reply_to=None) -> str | None:
+        session_id = str(chat_id).removeprefix("voice:")
+        call_id = self._message_calls.get(str(reply_to)) if reply_to else None
+        if call_id is None:
+            active_context = _ACTIVE_TRANSPORT_CALL.get()
+            if active_context and active_context[0] == id(self):
+                call_id = active_context[1]
+        if call_id is None:
+            call_id = self._session_calls.get(session_id)
+        if call_id and self._call_is_current(call_id, chat_id):
+            return call_id
+        return None
+
+    def _call_is_current(self, call_id: str, chat_id: str) -> bool:
+        call = self._active_calls.get(call_id)
+        if not call:
+            return False
+        session_id = str(chat_id).removeprefix("voice:")
+        call_session_id = str(call.get("session_id") or call_id)
+        return (
+            call_session_id == session_id
+            and self._session_calls.get(session_id) == call_id
+        )
+
+    def _next_message_id(self, call_id: str) -> str:
+        self._message_sequence += 1
+        return f"voice-{call_id}-response-{self._message_sequence}"
+
+    @staticmethod
+    def _clean_stream_content(content: str) -> str:
+        text = str(content or "")
+        return text[:-len(_STREAM_CURSOR)] if text.endswith(_STREAM_CURSOR) else text
+
+    @staticmethod
+    def _safe_stream_suffix(previous: str, current: str) -> tuple[str, bool]:
+        if current.startswith(previous):
+            return current[len(previous):], True
+        if previous.startswith(current):
+            return "", True
+        if previous and current.count(previous) == 1:
+            start = current.index(previous) + len(previous)
+            return current[start:], True
+        return "", False
+
+    async def _send_stream_frame(
+        self,
+        call_id: str,
+        content: str,
+        *,
+        is_final: bool,
+    ) -> None:
+        call = self._active_calls.get(call_id)
+        if not call:
+            return
+        session_id = str(call.get("session_id") or call_id)
+        if self._session_calls.get(session_id) != call_id:
+            return
+        await self._send_to_vox(
+            {
+                "type": "text",
+                "content": content,
+                "callId": call_id,
+                "stream": True,
+                "isFinal": is_final,
+            }
+        )
+
+    async def _finalize_stream(self, stream: dict[str, Any]) -> None:
+        if stream["final_sent"]:
+            return
+        await self._send_stream_frame(stream["call_id"], "", is_final=True)
+        stream["final_sent"] = True
 
     async def _send_to_vox(self, msg: dict[str, Any]) -> None:
         if self._ws and not getattr(self._ws, "closed", False):
