@@ -333,6 +333,7 @@ async def test_streaming_response_emits_appended_deltas_and_one_final(monkeypatc
             "callId": "speech-1",
             "stream": True,
             "isFinal": False,
+            "streamId": result.message_id,
         },
         {
             "type": "text",
@@ -340,6 +341,7 @@ async def test_streaming_response_emits_appended_deltas_and_one_final(monkeypatc
             "callId": "speech-1",
             "stream": True,
             "isFinal": False,
+            "streamId": result.message_id,
         },
         {
             "type": "text",
@@ -347,6 +349,7 @@ async def test_streaming_response_emits_appended_deltas_and_one_final(monkeypatc
             "callId": "speech-1",
             "stream": True,
             "isFinal": False,
+            "streamId": result.message_id,
         },
         {
             "type": "text",
@@ -354,6 +357,7 @@ async def test_streaming_response_emits_appended_deltas_and_one_final(monkeypatc
             "callId": "speech-1",
             "stream": True,
             "isFinal": True,
+            "streamId": result.message_id,
         },
     ]
 

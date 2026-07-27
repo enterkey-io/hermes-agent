@@ -259,7 +259,12 @@ class VoiceAdapter(BasePlatformAdapter):
             }
             self._streams[message_id] = stream
             if stream["last_content"]:
-                await self._send_stream_frame(call_id, stream["last_content"], is_final=False)
+                await self._send_stream_frame(
+                    call_id,
+                    stream["last_content"],
+                    is_final=False,
+                    stream_id=message_id,
+                )
             if metadata.get("notify") is True:
                 try:
                     await self._finalize_stream(message_id, stream)
@@ -308,7 +313,12 @@ class VoiceAdapter(BasePlatformAdapter):
                 return SendResult(success=True, message_id=message_id)
 
             if suffix:
-                await self._send_stream_frame(call_id, suffix, is_final=False)
+                await self._send_stream_frame(
+                    call_id,
+                    suffix,
+                    is_final=False,
+                    stream_id=message_id,
+                )
             if not stream["last_content"].startswith(current):
                 stream["last_content"] = current
             if finalize:
@@ -411,6 +421,7 @@ class VoiceAdapter(BasePlatformAdapter):
         content: str,
         *,
         is_final: bool,
+        stream_id: str,
     ) -> None:
         call = self._active_calls.get(call_id)
         if not call:
@@ -425,6 +436,7 @@ class VoiceAdapter(BasePlatformAdapter):
                 "callId": call_id,
                 "stream": True,
                 "isFinal": is_final,
+                "streamId": stream_id,
             }
         )
 
@@ -443,7 +455,12 @@ class VoiceAdapter(BasePlatformAdapter):
     ) -> None:
         if stream["final_sent"]:
             return
-        await self._send_stream_frame(stream["call_id"], "", is_final=True)
+        await self._send_stream_frame(
+            stream["call_id"],
+            "",
+            is_final=True,
+            stream_id=message_id,
+        )
         stream["final_sent"] = True
         if self._streams.get(message_id) is stream:
             self._streams.pop(message_id, None)
