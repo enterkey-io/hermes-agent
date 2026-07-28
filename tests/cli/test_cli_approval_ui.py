@@ -94,6 +94,15 @@ class TestCliApprovalUi:
         assert result["value"] == "deny"
 
 
+    def test_once_only_callback_offers_only_once_and_deny(self):
+        cli = _make_cli_stub()
+        assert cli._approval_choices(
+            "finance-ops qbo invoice execute",
+            allow_session=False,
+            allow_permanent=False,
+            smart_denied=False,
+        ) == ["once", "deny"]
+
     def test_sudo_prompt_restores_existing_draft_after_response(self):
         cli = _make_cli_stub()
         cli._app.current_buffer = _FakeBuffer("draft command", cursor_position=5)
@@ -561,4 +570,3 @@ class TestClearOverlaysForInterrupt:
 
         assert not t.is_alive(), "worker thread never unblocked"
         assert result["value"] == "deny"
-

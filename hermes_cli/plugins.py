@@ -2328,6 +2328,10 @@ class _PreToolCallDirective:
     action: Optional[str] = None
     message: Optional[str] = None
     rule_key: Optional[str] = None
+    allow_session: bool = True
+    allow_permanent: bool = True
+    allow_yolo: bool = True
+    allow_cron: bool = True
 
 
 def set_thread_tool_whitelist(
@@ -2360,6 +2364,8 @@ def _get_pre_tool_call_directive_details(
         {"action": "block",   "message": "Reason the tool was blocked"}
         {"action": "approve", "message": "Why this needs human confirmation"}
         {"action": "approve", "message": "...", "rule_key": "write_file:ssh"}
+        {"action": "approve", "message": "...", "allow_session": false,
+         "allow_permanent": false, "allow_yolo": false, "allow_cron": false}
 
     from their ``pre_tool_call`` callback.
 
@@ -2416,7 +2422,22 @@ def _get_pre_tool_call_directive_details(
         rule_key = rule_key.strip() if isinstance(rule_key, str) else None
         if not rule_key:
             rule_key = None
-        return _PreToolCallDirective(action=action, message=message, rule_key=rule_key)
+        approval_flags = {}
+        if action == "approve":
+            for flag in (
+                "allow_session",
+                "allow_permanent",
+                "allow_yolo",
+                "allow_cron",
+            ):
+                value = result.get(flag, True)
+                approval_flags[flag] = value if isinstance(value, bool) else True
+        return _PreToolCallDirective(
+            action=action,
+            message=message,
+            rule_key=rule_key,
+            **approval_flags,
+        )
 
     return _PreToolCallDirective()
 
@@ -2523,6 +2544,10 @@ def resolve_pre_tool_block(
                     tool_name,
                     details.message or "",
                     rule_key=details.rule_key or tool_name,
+                    allow_session=details.allow_session,
+                    allow_permanent=details.allow_permanent,
+                    allow_yolo=details.allow_yolo,
+                    allow_cron=details.allow_cron,
                 )
             finally:
                 if approval_tokens is not None:

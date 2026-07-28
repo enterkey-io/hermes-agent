@@ -151,3 +151,94 @@ class TestRequestToolApproval:
         )
         res = request_tool_approval("terminal", "curl PUT", rule_key="ext")
         assert res == {"approved": True, "message": None}
+
+    def test_once_only_ignores_cached_and_yolo_bypasses(self, monkeypatch):
+        monkeypatch.setattr(approval, "is_approved", lambda sk, pk: True)
+        monkeypatch.setattr(approval, "is_current_session_yolo_enabled", lambda: True)
+        monkeypatch.setattr(approval, "_is_interactive_cli", lambda: True)
+        monkeypatch.setattr(approval, "_is_gateway_approval_context", lambda: False)
+        prompted = {}
+
+        def prompt(*args, **kwargs):
+            prompted.update(kwargs)
+            return "once"
+
+        monkeypatch.setattr(approval, "prompt_dangerous_approval", prompt)
+        res = request_tool_approval(
+            "terminal",
+            "real-money action",
+            allow_session=False,
+            allow_permanent=False,
+            allow_yolo=False,
+            allow_cron=False,
+        )
+
+        assert res == {"approved": True, "message": None}
+        assert prompted["allow_session"] is False
+        assert prompted["allow_permanent"] is False
+
+    @pytest.mark.parametrize("choice", ["session", "always"])
+    def test_once_only_rejects_disallowed_persistent_choice(
+        self, monkeypatch, choice
+    ):
+        monkeypatch.setattr(approval, "_is_interactive_cli", lambda: True)
+        monkeypatch.setattr(approval, "_is_gateway_approval_context", lambda: False)
+        monkeypatch.setattr(
+            approval, "prompt_dangerous_approval", lambda *a, **k: choice
+        )
+
+        res = request_tool_approval(
+            "terminal",
+            "real-money action",
+            allow_session=False,
+            allow_permanent=False,
+            allow_yolo=False,
+            allow_cron=False,
+        )
+
+        assert res["approved"] is False
+        assert "not permitted" in res["message"].lower()
+
+    def test_once_only_blocks_cron_even_when_cron_mode_approves(self, monkeypatch):
+        monkeypatch.setattr(approval, "_is_interactive_cli", lambda: False)
+        monkeypatch.setattr(approval, "_is_gateway_approval_context", lambda: False)
+        monkeypatch.setattr(approval, "_is_cron_approval_context", lambda: True)
+        monkeypatch.setattr(
+            approval, "env_var_enabled", lambda name: name == "HERMES_CRON_SESSION"
+        )
+        monkeypatch.setattr(approval, "_get_cron_approval_mode", lambda: "approve")
+
+        res = request_tool_approval(
+            "terminal",
+            "real-money action",
+            allow_session=False,
+            allow_permanent=False,
+            allow_yolo=False,
+            allow_cron=False,
+        )
+
+        assert res["approved"] is False
+        assert "cron" in res["message"].lower()
+
+    def test_once_only_gateway_request_exposes_only_once_and_deny(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(approval, "_is_interactive_cli", lambda: False)
+        monkeypatch.setattr(approval, "_is_gateway_approval_context", lambda: True)
+        submitted = {}
+        monkeypatch.setattr(
+            approval, "submit_pending", lambda sk, data: submitted.update(data)
+        )
+
+        res = request_tool_approval(
+            "terminal",
+            "real-money action",
+            allow_session=False,
+            allow_permanent=False,
+            allow_yolo=False,
+            allow_cron=False,
+        )
+
+        assert res["status"] == "approval_required"
+        assert submitted["allow_session"] is False
+        assert submitted["allow_permanent"] is False
