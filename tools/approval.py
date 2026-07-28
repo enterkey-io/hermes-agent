@@ -13,6 +13,8 @@ import contextvars
 import fnmatch
 import functools
 import hashlib
+import hmac
+import json
 import logging
 import os
 import re
@@ -22,7 +24,7 @@ import tempfile
 import threading
 import time
 import unicodedata
-from typing import Optional
+from typing import Any, Optional
 from hermes_cli.config import cfg_get
 
 from tools.interrupt import is_interrupted
@@ -49,6 +51,10 @@ _approval_turn_id: contextvars.ContextVar[str] = contextvars.ContextVar(
 )
 _approval_tool_call_id: contextvars.ContextVar[str] = contextvars.ContextVar(
     "approval_tool_call_id",
+    default="",
+)
+_tool_approval_claim: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "tool_approval_claim",
     default="",
 )
 
@@ -198,6 +204,45 @@ def reset_current_observability_context(
     turn_token, tool_token = tokens
     _approval_tool_call_id.reset(tool_token)
     _approval_turn_id.reset(turn_token)
+
+
+def _tool_approval_claim_digest(tool_name: str, args: Any) -> str:
+    """Return a stable digest binding one approval to one exact tool call."""
+    try:
+        encoded = json.dumps(
+            {"tool_name": tool_name, "args": args},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError):
+        encoded = repr((tool_name, args)).encode("utf-8", errors="replace")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def mint_tool_approval_claim(tool_name: str, args: Any) -> None:
+    """Bind a one-use in-process claim to an explicitly approved tool call.
+
+    The claim never enters model-visible arguments, process environment, or
+    durable storage. A privileged plugin tool can consume it before creating
+    its own exact-operation runtime capability.
+    """
+    _tool_approval_claim.set(_tool_approval_claim_digest(tool_name, args))
+
+
+def consume_tool_approval_claim(tool_name: str, args: Any) -> bool:
+    """Consume the current claim if it matches the exact tool call."""
+    expected = _tool_approval_claim_digest(tool_name, args)
+    current = _tool_approval_claim.get()
+    if not current or not hmac.compare_digest(current, expected):
+        return False
+    _tool_approval_claim.set("")
+    return True
+
+
+def clear_tool_approval_claim() -> None:
+    """Discard any unconsumed claim in the current execution context."""
+    _tool_approval_claim.set("")
 
 
 def get_current_session_key(default: str = "default") -> str:

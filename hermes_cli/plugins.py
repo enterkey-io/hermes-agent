@@ -2516,6 +2516,9 @@ def resolve_pre_tool_block(
     times out is fail-closed to a block; ``block`` blocks with its message;
     anything else proceeds.
     """
+    from tools.approval import clear_tool_approval_claim
+
+    clear_tool_approval_claim()
     details = _get_pre_tool_call_directive_details(
         tool_name, args, task_id=task_id, session_id=session_id,
         tool_call_id=tool_call_id, turn_id=turn_id,
@@ -2526,6 +2529,7 @@ def resolve_pre_tool_block(
     if details.action == "approve":
         try:
             from tools.approval import (
+                mint_tool_approval_claim,
                 request_tool_approval,
                 reset_current_observability_context,
                 set_current_observability_context,
@@ -2564,6 +2568,7 @@ def resolve_pre_tool_block(
                 result.get("message")
                 or f"BLOCKED: plugin approval required for {tool_name}"
             )
+        mint_tool_approval_claim(tool_name, args)
     return None
 
 

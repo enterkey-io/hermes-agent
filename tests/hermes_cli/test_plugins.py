@@ -626,6 +626,46 @@ class TestResolvePreToolBlock:
         ) is None
         assert seen == {"turn_id": "turn-1", "tool_call_id": "call-1"}
 
+    def test_approve_granted_allows(self, monkeypatch):
+        from hermes_cli.plugins import resolve_pre_tool_block
+        from tools.approval import consume_tool_approval_claim
+
+        args = {"draft_id": "honk-2026-06", "sha256": "a" * 64}
+        monkeypatch.setattr(
+            "hermes_cli.plugins.invoke_hook",
+            lambda hook_name, **kwargs: [{"action": "approve", "message": "why"}],
+        )
+        monkeypatch.setattr(
+            "tools.approval.request_tool_approval",
+            lambda *a, **k: {"approved": True, "message": None},
+        )
+        assert resolve_pre_tool_block("finance_execute_qbo_invoice", args) is None
+        assert consume_tool_approval_claim(
+            "finance_execute_qbo_invoice", args
+        )
+
+    def test_denied_approval_does_not_mint_claim(self, monkeypatch):
+        from hermes_cli.plugins import resolve_pre_tool_block
+        from tools.approval import consume_tool_approval_claim
+
+        args = {"draft_id": "honk-2026-06", "sha256": "a" * 64}
+        monkeypatch.setattr(
+            "hermes_cli.plugins.invoke_hook",
+            lambda hook_name, **kwargs: [{"action": "approve", "message": "why"}],
+        )
+        monkeypatch.setattr(
+            "tools.approval.request_tool_approval",
+            lambda *a, **k: {"approved": False, "message": "denied"},
+        )
+
+        assert (
+            resolve_pre_tool_block("finance_execute_qbo_invoice", args)
+            == "denied"
+        )
+        assert not consume_tool_approval_claim(
+            "finance_execute_qbo_invoice", args
+        )
+
     def test_approve_passes_plugin_rule_key_to_gate(self, monkeypatch):
         from hermes_cli.plugins import resolve_pre_tool_block
 

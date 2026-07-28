@@ -9,7 +9,12 @@ the gateway submit_pending path, cron_mode, and fail-closed timeouts.
 import pytest
 
 import tools.approval as approval
-from tools.approval import request_tool_approval
+from tools.approval import (
+    clear_tool_approval_claim,
+    consume_tool_approval_claim,
+    mint_tool_approval_claim,
+    request_tool_approval,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -28,7 +33,35 @@ def _isolate_approval_state(monkeypatch):
     monkeypatch.setattr(
         "tools.terminal_tool._get_approval_callback", lambda: None, raising=False
     )
+    clear_tool_approval_claim()
     yield
+    clear_tool_approval_claim()
+
+
+class TestToolApprovalClaim:
+    def test_claim_is_bound_to_exact_tool_and_args_and_consumed_once(self):
+        args = {"draft_id": "honk-2026-06", "sha256": "a" * 64}
+        mint_tool_approval_claim("finance_execute_qbo_invoice", args)
+
+        assert consume_tool_approval_claim(
+            "finance_execute_qbo_invoice", dict(args)
+        )
+        assert not consume_tool_approval_claim(
+            "finance_execute_qbo_invoice", dict(args)
+        )
+
+    def test_claim_rejects_changed_args_or_tool_without_consuming(self):
+        args = {"draft_id": "honk-2026-06", "sha256": "a" * 64}
+        mint_tool_approval_claim("finance_execute_qbo_invoice", args)
+
+        assert not consume_tool_approval_claim(
+            "finance_execute_qbo_invoice",
+            {"draft_id": "honk-2026-06", "sha256": "b" * 64},
+        )
+        assert not consume_tool_approval_claim("terminal", args)
+        assert consume_tool_approval_claim(
+            "finance_execute_qbo_invoice", args
+        )
 
 
 class TestRequestToolApproval:
