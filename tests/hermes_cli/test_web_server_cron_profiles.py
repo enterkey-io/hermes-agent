@@ -185,6 +185,14 @@ def test_profile_call_cannot_retarget_ticker_store_mid_write(
     default_job = {
         "id": "default-job",
         "name": "default job",
+        "provider": "test-provider",
+        "provider_snapshot": "test-provider",
+        "model": "test-model",
+        "model_snapshot": "test-model",
+        "reasoning_effort": "medium",
+        "reasoning_effort_snapshot": "medium",
+        "speed": "standard",
+        "speed_snapshot": "standard",
         "schedule": {"kind": "interval", "minutes": 60},
         "next_run_at": "2026-07-09T00:00:00+00:00",
     }

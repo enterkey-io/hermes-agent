@@ -19,6 +19,15 @@ def backup_env(monkeypatch, tmp_path):
     home = tmp_path / ".hermes"
     home.mkdir()
     (home / "skills").mkdir()
+    (home / "config.yaml").write_text(
+        "model:\n"
+        "  default: test-model\n"
+        "  provider: test-provider\n"
+        "agent:\n"
+        "  reasoning_effort: medium\n"
+        "  speed: standard\n",
+        encoding="utf-8",
+    )
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
 

@@ -115,6 +115,16 @@ class TestCronCreateLifecycleBlock:
         monkeypatch.setattr("cron.jobs.CRON_DIR", tmp_path / "cron")
         monkeypatch.setattr("cron.jobs.JOBS_FILE", tmp_path / "cron" / "jobs.json")
         monkeypatch.setattr("cron.jobs.OUTPUT_DIR", tmp_path / "cron" / "output")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        (tmp_path / "config.yaml").write_text(
+            "model:\n"
+            "  default: test-model\n"
+            "  provider: test-provider\n"
+            "agent:\n"
+            "  reasoning_effort: medium\n"
+            "  speed: standard\n",
+            encoding="utf-8",
+        )
 
     def test_block_hermes_gateway_restart(self, capsys):
         args = Namespace(
@@ -906,6 +916,16 @@ class TestCreateJobBlocksLifecycleCommands:
         monkeypatch.setattr("cron.jobs.CRON_DIR", tmp_path / "cron")
         monkeypatch.setattr("cron.jobs.JOBS_FILE", tmp_path / "cron" / "jobs.json")
         monkeypatch.setattr("cron.jobs.OUTPUT_DIR", tmp_path / "cron" / "output")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        (tmp_path / "config.yaml").write_text(
+            "model:\n"
+            "  default: test-model\n"
+            "  provider: test-provider\n"
+            "agent:\n"
+            "  reasoning_effort: medium\n"
+            "  speed: standard\n",
+            encoding="utf-8",
+        )
 
     def test_create_job_blocks_prompt_command(self):
         from cron.jobs import create_job

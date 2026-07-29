@@ -1260,6 +1260,13 @@ def _save_jobs_unlocked(
     """
     jobs_file = _current_cron_store().jobs_file
     ensure_dirs()
+    # Validate and normalize the complete batch before creating a temp file.
+    # This keeps the existing store byte-identical if any enabled agent job
+    # cannot resolve a complete inference contract.
+    jobs_to_persist = [
+        _ensure_persistable_inference_contract(job)
+        for job in jobs
+    ]
     # Snapshot the current owner BEFORE the atomic replace so a privileged
     # writer (root CLI in Docker) can hand ownership back to the gateway user
     # afterwards instead of locking its ticker out (#68483). When the file is
@@ -1285,6 +1292,7 @@ def _save_jobs_unlocked(
         for _attempt in range(5):
             if not replace:
                 jobs = _merge_unexpected_disk_jobs(jobs, removed_ids=removed_ids)
+            jobs = [_ensure_persistable_inference_contract(job) for job in jobs]
             fd, tmp_path = tempfile.mkstemp(
                 dir=str(jobs_file.parent), suffix=".tmp", prefix=".jobs_"
             )
@@ -1355,6 +1363,7 @@ def _save_jobs_unlocked(
         # Exhausted retries — last merge + write without another re-peek.
         if not replace:
             jobs = _merge_unexpected_disk_jobs(jobs, removed_ids=removed_ids)
+        jobs = [_ensure_persistable_inference_contract(job) for job in jobs]
         fd, tmp_path = tempfile.mkstemp(
             dir=str(jobs_file.parent), suffix=".tmp", prefix=".jobs_"
         )
@@ -1512,17 +1521,17 @@ def _resolve_complete_inference_contract(
     model_cfg = cfg.get("model")
     if normalized_model is None:
         cron_cfg = cfg.get("cron") if isinstance(cfg.get("cron"), dict) else {}
-        normalized_model = (
-            _normalize_job_optional_text(cron_cfg.get("model"))
-            or _normalize_job_optional_text(os.getenv("HERMES_MODEL"))
-            or _normalize_job_optional_text(
+        normalized_model = _normalize_job_optional_text(cron_cfg.get("model"))
+        if normalized_model is None:
+            normalized_model = _normalize_job_optional_text(
                 model_cfg if isinstance(model_cfg, str) else None
             )
-        )
         if normalized_model is None and isinstance(model_cfg, dict):
             normalized_model = _normalize_job_optional_text(
                 model_cfg.get("default") or model_cfg.get("model")
             )
+        if normalized_model is None:
+            normalized_model = _normalize_job_optional_text(os.getenv("HERMES_MODEL"))
 
     if normalized_provider is None and isinstance(model_cfg, dict):
         normalized_provider = _normalize_job_optional_text(model_cfg.get("provider"))
@@ -1615,18 +1624,39 @@ def _resolve_complete_inference_contract(
     }
 
 
-def _normalized_inference_axes(
+def _ensure_persistable_inference_contract(
     job: Dict[str, Any],
-) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], bool]:
-    """Return the stored inference-routing fields in their semantic form."""
-    return (
-        _normalize_job_optional_text(job.get("provider")),
-        _normalize_job_optional_text(job.get("model")),
-        _normalize_job_optional_text(job.get("reasoning_effort")),
-        _normalize_job_optional_text(job.get("speed")),
-        _normalize_job_optional_text(job.get("base_url"), strip_trailing_slash=True),
-        bool(job.get("no_agent")),
+    *,
+    force: bool = False,
+) -> Dict[str, Any]:
+    """Return a final job state that is safe to persist.
+
+    Every enabled agent job is resolved from its stored axes first and the
+    authoritative profile config second. ``force`` is used for creation and
+    inference-axis edits, including disabled jobs, so the complete contract is
+    recomputed atomically. No-agent jobs remain exempt unless an inference-axis
+    transition explicitly asks for canonical clearing.
+    """
+    normalized = dict(job)
+    is_no_agent = bool(normalized.get("no_agent"))
+    if is_no_agent and not force:
+        return normalized
+    if not force and not normalized.get("enabled", True):
+        return normalized
+
+    normalized.update(
+        _resolve_complete_inference_contract(
+            provider=normalized.get("provider"),
+            model=normalized.get("model"),
+            reasoning_effort=normalized.get("reasoning_effort"),
+            speed=normalized.get("speed"),
+            service_tier=normalized.get("service_tier"),
+            base_url=normalized.get("base_url"),
+            no_agent=is_no_agent,
+        )
     )
+    normalized.pop("service_tier", None)
+    return normalized
 
 
 def _validate_job_mode_invariants(
@@ -1809,16 +1839,6 @@ def create_job(
 
     label_source = (prompt_text or (normalized_skills[0] if normalized_skills else None) or (normalized_script if normalized_no_agent else None)) or "cron job"
 
-    inference_contract = _resolve_complete_inference_contract(
-        provider=normalized_provider,
-        model=normalized_model,
-        reasoning_effort=reasoning_effort,
-        speed=speed,
-        service_tier=service_tier,
-        base_url=normalized_base_url,
-        no_agent=normalized_no_agent,
-    )
-
     next_run_at = compute_next_run(parsed_schedule)
     if parsed_schedule.get("kind") == "once" and next_run_at is None:
         run_at = parsed_schedule.get("run_at") or schedule
@@ -1839,7 +1859,15 @@ def create_job(
         "prompt": prompt_text,
         "skills": normalized_skills,
         "skill": normalized_skills[0] if normalized_skills else None,
-        **inference_contract,
+        "provider": normalized_provider,
+        "model": normalized_model,
+        "reasoning_effort": reasoning_effort,
+        "speed": speed,
+        "service_tier": service_tier,
+        "provider_snapshot": None,
+        "model_snapshot": None,
+        "reasoning_effort_snapshot": None,
+        "speed_snapshot": None,
         "base_url": normalized_base_url,
         "script": normalized_script,
         "no_agent": normalized_no_agent,
@@ -1876,6 +1904,8 @@ def create_job(
     # global cron.mirror_delivery config, default off).
     if normalized_attach is not None:
         job["attach_to_session"] = normalized_attach
+
+    job = _ensure_persistable_inference_contract(job, force=True)
 
     with _jobs_lock():
         jobs = load_jobs()
@@ -1994,8 +2024,6 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
                     _mv = updates[_mon_field]
                     _mv = str(_mv).strip() if isinstance(_mv, str) else None
                     updates[_mon_field] = _mv or None
-
-            previous_inference_axes = _normalized_inference_axes(job)
             updated = _apply_skill_fields({**job, **updates})
 
             # Re-check execution-mode invariants on the MERGED record when
@@ -2024,7 +2052,7 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
                     "base_url",
                     "no_agent",
                 }.intersection(updates)
-            ) and _normalized_inference_axes(updated) != previous_inference_axes
+            )
 
             if "skills" in updates or "skill" in updates:
                 normalized_skills = _normalize_skill_list(updated.get("skill"), updated.get("skills"))
@@ -2068,17 +2096,6 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
                         )
                     updated["next_run_at"] = updated_next_run
 
-            if inference_fields_changed:
-                updated.update(_resolve_complete_inference_contract(
-                    provider=updated.get("provider"),
-                    model=updated.get("model"),
-                    reasoning_effort=updated.get("reasoning_effort"),
-                    speed=updated.get("speed"),
-                    service_tier=None,
-                    base_url=updated.get("base_url"),
-                    no_agent=updated.get("no_agent"),
-                ))
-
             if updated.get("enabled", True) and updated.get("state") != "paused" and not updated.get("next_run_at"):
                 next_run = compute_next_run(updated["schedule"])
                 if next_run is None and updated["schedule"].get("kind") == "once":
@@ -2089,6 +2106,10 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
                     )
                 updated["next_run_at"] = next_run
 
+            updated = _ensure_persistable_inference_contract(
+                updated,
+                force=inference_fields_changed,
+            )
             jobs[i] = updated
             save_jobs(jobs)
             return _normalize_job_record(jobs[i])
