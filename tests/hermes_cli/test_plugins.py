@@ -628,9 +628,7 @@ class TestResolvePreToolBlock:
 
     def test_approve_granted_allows(self, monkeypatch):
         from hermes_cli.plugins import resolve_pre_tool_block
-        from tools.approval import consume_tool_approval_claim
 
-        args = {"draft_id": "honk-2026-06", "sha256": "a" * 64}
         monkeypatch.setattr(
             "hermes_cli.plugins.invoke_hook",
             lambda hook_name, **kwargs: [{"action": "approve", "message": "why"}],
@@ -639,14 +637,10 @@ class TestResolvePreToolBlock:
             "tools.approval.request_tool_approval",
             lambda *a, **k: {"approved": True, "message": None},
         )
-        assert resolve_pre_tool_block("finance_execute_qbo_invoice", args) is None
-        assert consume_tool_approval_claim(
-            "finance_execute_qbo_invoice", args
-        )
+        assert resolve_pre_tool_block("write_file", {}) is None
 
-    def test_denied_approval_does_not_mint_claim(self, monkeypatch):
-        from hermes_cli.plugins import resolve_pre_tool_block
-        from tools.approval import consume_tool_approval_claim
+    def test_denied_approval_does_not_issue_provenance(self, monkeypatch):
+        from hermes_cli.plugins import resolve_pre_tool_call
 
         args = {"draft_id": "honk-2026-06", "sha256": "a" * 64}
         monkeypatch.setattr(
@@ -658,13 +652,15 @@ class TestResolvePreToolBlock:
             lambda *a, **k: {"approved": False, "message": "denied"},
         )
 
-        assert (
-            resolve_pre_tool_block("finance_execute_qbo_invoice", args)
-            == "denied"
+        resolution = resolve_pre_tool_call(
+            "finance_execute_qbo_invoice",
+            args,
+            session_id="session-1",
+            tool_call_id="call-1",
+            turn_id="turn-1",
         )
-        assert not consume_tool_approval_claim(
-            "finance_execute_qbo_invoice", args
-        )
+        assert resolution.block_message == "denied"
+        assert resolution.approval_provenance is None
 
     def test_approve_passes_plugin_rule_key_to_gate(self, monkeypatch):
         from hermes_cli.plugins import resolve_pre_tool_block
@@ -698,7 +694,7 @@ class TestResolvePreToolBlock:
         }
 
     def test_approve_passes_plugin_approval_capabilities_to_gate(self, monkeypatch):
-        from hermes_cli.plugins import resolve_pre_tool_block
+        from hermes_cli.plugins import resolve_pre_tool_call
 
         seen = {}
         monkeypatch.setattr(
@@ -722,7 +718,15 @@ class TestResolvePreToolBlock:
 
         monkeypatch.setattr("tools.approval.request_tool_approval", _approve)
 
-        assert resolve_pre_tool_block("terminal", {}) is None
+        resolution = resolve_pre_tool_call(
+            "terminal",
+            {},
+            session_id="session-1",
+            tool_call_id="call-1",
+            turn_id="turn-1",
+        )
+        assert resolution.block_message is None
+        assert resolution.approval_provenance is not None
         assert seen == {
             "rule_key": "finance:invoice:exact",
             "allow_session": False,

@@ -2815,7 +2815,8 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
                  pre_tool_block_checked: bool = False,
                  skip_tool_request_middleware: bool = False,
                  tool_request_middleware_trace: Optional[List[Dict[str, Any]]] = None,
-                 skip_tool_execution_middleware: bool = False) -> str:
+                 skip_tool_execution_middleware: bool = False,
+                 approval_provenance: Any = None) -> str:
     """Invoke a single tool and return the result string. No display logic.
 
     Handles both agent-level tools (todo, memory, etc.) and registry-dispatched
@@ -2848,8 +2849,8 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
     block_message: Optional[str] = None
     if not pre_tool_block_checked:
         try:
-            from hermes_cli.plugins import resolve_pre_tool_block
-            block_message = resolve_pre_tool_block(
+            from hermes_cli.plugins import resolve_pre_tool_call
+            resolution = resolve_pre_tool_call(
                 function_name,
                 function_args,
                 task_id=effective_task_id or "",
@@ -2859,6 +2860,8 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
                 api_request_id=getattr(agent, "_current_api_request_id", "") or "",
                 middleware_trace=list(_tool_middleware_trace),
             )
+            block_message = resolution.block_message
+            approval_provenance = resolution.approval_provenance
         except Exception:
             block_message = None
     if block_message is not None:
@@ -3028,6 +3031,8 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
             )
             if skip_tool_execution_middleware:
                 dispatch_kwargs["skip_tool_execution_middleware"] = True
+            if approval_provenance is not None:
+                dispatch_kwargs["approval_provenance"] = approval_provenance
             return _ra().handle_function_call(
                 function_name,
                 next_args,

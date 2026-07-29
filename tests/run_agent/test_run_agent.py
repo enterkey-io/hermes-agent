@@ -1994,8 +1994,10 @@ class TestConcurrentToolExecution:
             lambda _name, args, callback, **_kwargs: callback(args),
         )
         monkeypatch.setattr(
-            "hermes_cli.plugins.resolve_pre_tool_block",
-            lambda *_args, **_kwargs: None,
+            "hermes_cli.plugins.resolve_pre_tool_call",
+            lambda *_args, **_kwargs: SimpleNamespace(
+                block_message=None, approval_provenance=None
+            ),
         )
         monkeypatch.setattr(
             "agent.tool_executor._begin_tool_execution",
@@ -2056,8 +2058,10 @@ class TestConcurrentToolExecution:
         messages = []
 
         monkeypatch.setattr(
-            "hermes_cli.plugins.resolve_pre_tool_block",
-            lambda *args, **kwargs: "Blocked by policy",
+            "hermes_cli.plugins.resolve_pre_tool_call",
+            lambda *args, **kwargs: SimpleNamespace(
+                block_message="Blocked by policy", approval_provenance=None
+            ),
         )
         agent._checkpoint_mgr.enabled = True
         agent._checkpoint_mgr.ensure_checkpoint = MagicMock(
@@ -2146,8 +2150,10 @@ class TestConcurrentToolExecution:
         """Blocked memory tool should not reset the nudge counter."""
         agent._turns_since_memory = 5
         monkeypatch.setattr(
-            "hermes_cli.plugins.resolve_pre_tool_block",
-            lambda *args, **kwargs: "Blocked",
+            "hermes_cli.plugins.resolve_pre_tool_call",
+            lambda *args, **kwargs: SimpleNamespace(
+                block_message="Blocked", approval_provenance=None
+            ),
         )
         with patch("tools.memory_tool.memory_tool", side_effect=AssertionError("should not run")):
             result = agent._invoke_tool(
@@ -2180,8 +2186,10 @@ class TestConcurrentToolExecution:
             lambda _name, args, callback, **_kwargs: callback(args),
         )
         monkeypatch.setattr(
-            "hermes_cli.plugins.resolve_pre_tool_block",
-            lambda *_args, **_kwargs: None,
+            "hermes_cli.plugins.resolve_pre_tool_call",
+            lambda *_args, **_kwargs: SimpleNamespace(
+                block_message=None, approval_provenance=None
+            ),
         )
         monkeypatch.setattr(tool_executor, "_begin_tool_execution", lambda *_a, **_k: None)
 
@@ -2235,8 +2243,10 @@ class TestConcurrentToolExecution:
             lambda _name, args, callback, **_kwargs: callback(args),
         )
         monkeypatch.setattr(
-            "hermes_cli.plugins.resolve_pre_tool_block",
-            lambda *_args, **_kwargs: None,
+            "hermes_cli.plugins.resolve_pre_tool_call",
+            lambda *_args, **_kwargs: SimpleNamespace(
+                block_message=None, approval_provenance=None
+            ),
         )
         monkeypatch.setattr(tool_executor, "_begin_tool_execution", lambda *_a, **_k: None)
 
@@ -2300,8 +2310,10 @@ class TestAgentRuntimePostHookOwnershipSync:
 
         hook_calls = []
         monkeypatch.setattr(
-            "hermes_cli.plugins.resolve_pre_tool_block",
-            lambda *args, **kwargs: None,
+            "hermes_cli.plugins.resolve_pre_tool_call",
+            lambda *args, **kwargs: SimpleNamespace(
+                block_message=None, approval_provenance=None
+            ),
         )
         monkeypatch.setattr(
             "hermes_cli.lifecycle.invoke_hook",

@@ -1140,6 +1140,7 @@ def handle_function_call(
     tool_request_middleware_trace: Optional[List[Dict[str, Any]]] = None,
     enabled_toolsets: Optional[List[str]] = None,
     disabled_toolsets: Optional[List[str]] = None,
+    approval_provenance: Any = None,
 ) -> str:
     """
     Main function call dispatcher that routes calls to the tool registry.
@@ -1279,6 +1280,7 @@ def handle_function_call(
                 tool_request_middleware_trace=list(_tool_middleware_trace),
                 enabled_toolsets=enabled_toolsets,
                 disabled_toolsets=disabled_toolsets,
+                approval_provenance=approval_provenance,
             )
 
     _tool_original_args = dict(function_args)
@@ -1316,11 +1318,13 @@ def handle_function_call(
         # gate denied/timed-out/errored (fail-closed). Observer plugins see
         # the hook on that same pass. When skip=True, the caller already
         # fired it — do nothing here.
+        _approval_provenance = approval_provenance
         if not skip_pre_tool_call_hook:
             block_message: Optional[str] = None
             try:
-                from hermes_cli.plugins import resolve_pre_tool_block
-                block_message = resolve_pre_tool_block(
+                from hermes_cli.plugins import resolve_pre_tool_call
+
+                resolution = resolve_pre_tool_call(
                     function_name,
                     function_args,
                     task_id=task_id or "",
@@ -1330,6 +1334,8 @@ def handle_function_call(
                     api_request_id=api_request_id or "",
                     middleware_trace=list(_tool_middleware_trace),
                 )
+                block_message = resolution.block_message
+                _approval_provenance = resolution.approval_provenance
             except Exception as _hook_err:
                 logger.debug("pre_tool_call hook error: %s", _hook_err)
 
@@ -1427,19 +1433,35 @@ def handle_function_call(
                 # the parent's tool set via the process-global.
                 sandbox_enabled = enabled_tools if enabled_tools is not None else _last_resolved_tool_names
                 def _dispatch(next_args: Dict[str, Any]) -> Any:
+                    provenance_kwargs = {}
+                    if _approval_provenance is not None:
+                        provenance_kwargs = {
+                            "approval_provenance": _approval_provenance,
+                            "tool_call_id": tool_call_id or "",
+                            "turn_id": turn_id or "",
+                        }
                     return registry.dispatch(
                         function_name, next_args,
                         task_id=task_id,
                         session_id=session_id,
                         enabled_tools=sandbox_enabled,
+                        **provenance_kwargs,
                     )
             else:
                 def _dispatch(next_args: Dict[str, Any]) -> Any:
+                    provenance_kwargs = {}
+                    if _approval_provenance is not None:
+                        provenance_kwargs = {
+                            "approval_provenance": _approval_provenance,
+                            "tool_call_id": tool_call_id or "",
+                            "turn_id": turn_id or "",
+                        }
                     return registry.dispatch(
                         function_name, next_args,
                         task_id=task_id,
                         session_id=session_id,
                         user_task=user_task,
+                        **provenance_kwargs,
                     )
             if skip_tool_execution_middleware:
                 result = _dispatch(function_args)

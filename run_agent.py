@@ -7803,7 +7803,8 @@ class AIAgent:
                      pre_tool_block_checked: bool = False,
                      skip_tool_request_middleware: bool = False,
                      tool_request_middleware_trace: Optional[list[dict[str, Any]]] = None,
-                     skip_tool_execution_middleware: bool = False) -> str:
+                     skip_tool_execution_middleware: bool = False,
+                     approval_provenance: Any = None) -> str:
         """Forwarder — see ``agent.agent_runtime_helpers.invoke_tool``."""
         from agent.agent_runtime_helpers import invoke_tool
         return invoke_tool(
@@ -7817,6 +7818,7 @@ class AIAgent:
             skip_tool_request_middleware,
             tool_request_middleware_trace,
             skip_tool_execution_middleware,
+            approval_provenance,
         )
 
     @staticmethod

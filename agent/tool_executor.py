@@ -492,6 +492,7 @@ def _run_agent_tool_execution_middleware(
     middleware_trace: list[dict[str, Any]] | None = None,
     begin_execution=None,
     authorization_gate: _ConcurrentToolAuthorizationGate | None = None,
+    approval_provenance_box: list[Any] | None = None,
 ) -> _ManagedToolResult:
     """Run Relay rewrites before Hermes policy and dispatch exactly once."""
     from agent import relay_tools
@@ -541,11 +542,11 @@ def _run_agent_tool_execution_middleware(
         if block_message is None:
             block_error_type = "plugin_block"
 
-            def _resolve_pre_tool_block():
+            def _resolve_pre_tool_call():
                 try:
-                    from hermes_cli.plugins import resolve_pre_tool_block
+                    from hermes_cli.plugins import resolve_pre_tool_call
 
-                    return resolve_pre_tool_block(
+                    return resolve_pre_tool_call(
                         function_name,
                         final_args,
                         task_id=effective_task_id or "",
@@ -557,13 +558,18 @@ def _run_agent_tool_execution_middleware(
                         middleware_trace=list(state["middleware_trace"]),
                     )
                 except Exception:
-                    return None
+                    from hermes_cli.plugins import _PreToolCallResolution
 
-            block_message = (
-                _resolve_pre_tool_block()
+                    return _PreToolCallResolution()
+
+            resolution = (
+                _resolve_pre_tool_call()
                 if authorization_gate is None
-                else authorization_gate.run(_resolve_pre_tool_block)
+                else authorization_gate.run(_resolve_pre_tool_call)
             )
+            block_message = resolution.block_message
+            if approval_provenance_box is not None:
+                approval_provenance_box[:] = [resolution.approval_provenance]
 
         guardrail_decision = None
         if block_message is None:
@@ -1026,6 +1032,8 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
 
         try:
             try:
+                approval_provenance_box: list[Any] = [None]
+
                 def _execute(next_args: dict[str, Any]) -> Any:
                     return agent._invoke_tool(
                         function_name,
@@ -1037,6 +1045,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                         skip_tool_request_middleware=True,
                         skip_tool_execution_middleware=True,
                         tool_request_middleware_trace=list(middleware_trace),
+                        approval_provenance=approval_provenance_box[0],
                     )
 
                 managed = _run_agent_tool_execution_middleware(
@@ -1051,6 +1060,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                     middleware_trace=middleware_trace,
                     begin_execution=_advance_start,
                     authorization_gate=authorization_gate,
+                    approval_provenance_box=approval_provenance_box,
                 )
                 result = managed.result
                 function_args = managed.args
@@ -2021,6 +2031,8 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 spinner.start()
             _spinner_result = None
             try:
+                approval_provenance_box: list[Any] = [None]
+
                 def _execute(next_args: dict) -> Any:
                     return _ra().handle_function_call(
                         function_name,
@@ -2042,6 +2054,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                         tool_request_middleware_trace=list(middleware_trace),
                         enabled_toolsets=getattr(agent, "enabled_toolsets", None),
                         disabled_toolsets=getattr(agent, "disabled_toolsets", None),
+                        approval_provenance=approval_provenance_box[0],
                     )
 
                 (
@@ -2061,6 +2074,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                         scope_block=_ts_scope_block,
                         display_index=i,
                         middleware_trace=middleware_trace,
+                        approval_provenance_box=approval_provenance_box,
                     )
                 )
                 _spinner_result = function_result
@@ -2100,6 +2114,8 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     agent._vprint(f"  {cute_msg}")
         else:
             try:
+                approval_provenance_box: list[Any] = [None]
+
                 def _execute(next_args: dict) -> Any:
                     return _ra().handle_function_call(
                         function_name,
@@ -2121,6 +2137,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                         tool_request_middleware_trace=list(middleware_trace),
                         enabled_toolsets=getattr(agent, "enabled_toolsets", None),
                         disabled_toolsets=getattr(agent, "disabled_toolsets", None),
+                        approval_provenance=approval_provenance_box[0],
                     )
 
                 (
@@ -2140,6 +2157,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                         scope_block=_ts_scope_block,
                         display_index=i,
                         middleware_trace=middleware_trace,
+                        approval_provenance_box=approval_provenance_box,
                     )
                 )
             except KeyboardInterrupt:

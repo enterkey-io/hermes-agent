@@ -2334,6 +2334,12 @@ class _PreToolCallDirective:
     allow_cron: bool = True
 
 
+@dataclass(frozen=True)
+class _PreToolCallResolution:
+    block_message: Optional[str] = None
+    approval_provenance: Any = None
+
+
 def set_thread_tool_whitelist(
     allowed: Optional[Set[str]],
     deny_msg_fmt: str = "Tool '{tool_name}' denied: not in this thread's tool whitelist",
@@ -2492,7 +2498,7 @@ def get_pre_tool_call_block_message(
     return message if directive == "block" else None
 
 
-def resolve_pre_tool_block(
+def resolve_pre_tool_call(
     tool_name: str,
     args: Optional[Dict[str, Any]],
     task_id: str = "",
@@ -2501,14 +2507,13 @@ def resolve_pre_tool_block(
     turn_id: str = "",
     api_request_id: str = "",
     middleware_trace: Optional[List[Dict[str, Any]]] = None,
-) -> Optional[str]:
-    """Resolve the pre_tool_call directive to a final block message (or None).
+) -> _PreToolCallResolution:
+    """Resolve policy and return any exact executor-carried approval object.
 
     Single entry point for every tool-dispatch site: fetches the plugin
     directive and, for an ``approve`` escalation, invokes the human-approval
-    gate (:func:`tools.approval.request_tool_approval`). Returns the message
-    the tool result should carry when the call is blocked, or ``None`` when
-    the call may proceed.
+    gate (:func:`tools.approval.request_tool_approval`). Nonpersistent approval
+    is represented by an opaque capability bound to this exact tool call.
 
     Centralizing this keeps the security-critical fail-closed logic in ONE
     place instead of copy-pasted across the concurrent/sequential/helper
@@ -2516,20 +2521,16 @@ def resolve_pre_tool_block(
     times out is fail-closed to a block; ``block`` blocks with its message;
     anything else proceeds.
     """
-    from tools.approval import clear_tool_approval_claim
-
-    clear_tool_approval_claim()
     details = _get_pre_tool_call_directive_details(
         tool_name, args, task_id=task_id, session_id=session_id,
         tool_call_id=tool_call_id, turn_id=turn_id,
         api_request_id=api_request_id, middleware_trace=middleware_trace,
     )
     if details.action == "block":
-        return details.message
+        return _PreToolCallResolution(block_message=details.message)
     if details.action == "approve":
         try:
             from tools.approval import (
-                mint_tool_approval_claim,
                 request_tool_approval,
                 reset_current_observability_context,
                 set_current_observability_context,
@@ -2562,14 +2563,67 @@ def resolve_pre_tool_block(
         except Exception:
             # Fail-closed: if the gate itself errors, block rather than
             # silently execute an action a plugin flagged for approval.
-            return f"BLOCKED: plugin approval gate failed for {tool_name}"
-        if not result.get("approved"):
-            return str(
-                result.get("message")
-                or f"BLOCKED: plugin approval required for {tool_name}"
+            return _PreToolCallResolution(
+                block_message=f"BLOCKED: plugin approval gate failed for {tool_name}"
             )
-        mint_tool_approval_claim(tool_name, args)
-    return None
+        if not result.get("approved"):
+            return _PreToolCallResolution(
+                block_message=str(
+                    result.get("message")
+                    or f"BLOCKED: plugin approval required for {tool_name}"
+                )
+            )
+        exact_once = not any(
+            (
+                details.allow_session,
+                details.allow_permanent,
+                details.allow_yolo,
+                details.allow_cron,
+            )
+        )
+        if exact_once:
+            try:
+                from tools.approval import _issue_tool_approval_provenance
+
+                provenance = _issue_tool_approval_provenance(
+                    tool_name,
+                    args if isinstance(args, dict) else {},
+                    session_id=session_id,
+                    tool_call_id=tool_call_id,
+                    turn_id=turn_id,
+                )
+            except Exception:
+                return _PreToolCallResolution(
+                    block_message=(
+                        "BLOCKED: exact one-time approval provenance could not "
+                        f"be issued for {tool_name}"
+                    )
+                )
+            return _PreToolCallResolution(approval_provenance=provenance)
+    return _PreToolCallResolution()
+
+
+def resolve_pre_tool_block(
+    tool_name: str,
+    args: Optional[Dict[str, Any]],
+    task_id: str = "",
+    session_id: str = "",
+    tool_call_id: str = "",
+    turn_id: str = "",
+    api_request_id: str = "",
+    middleware_trace: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[str]:
+    """Backward-compatible block-only view of :func:`resolve_pre_tool_call`."""
+    return resolve_pre_tool_call(
+        tool_name,
+        args,
+        task_id=task_id,
+        session_id=session_id,
+        tool_call_id=tool_call_id,
+        turn_id=turn_id,
+        api_request_id=api_request_id,
+        middleware_trace=middleware_trace,
+    ).block_message
 
 
 def get_pre_verify_continue_message(

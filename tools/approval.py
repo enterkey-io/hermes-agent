@@ -24,6 +24,7 @@ import tempfile
 import threading
 import time
 import unicodedata
+import weakref
 from typing import Any, Optional
 from hermes_cli.config import cfg_get
 
@@ -53,10 +54,10 @@ _approval_tool_call_id: contextvars.ContextVar[str] = contextvars.ContextVar(
     "approval_tool_call_id",
     default="",
 )
-_tool_approval_claim: contextvars.ContextVar[str] = contextvars.ContextVar(
-    "tool_approval_claim",
-    default="",
-)
+
+_TOOL_APPROVAL_PROVENANCE_TTL_SECONDS = 60.0
+_TOOL_APPROVAL_PROVENANCE_KEY = object()
+_TOOL_APPROVAL_PROVENANCE_SECRET = os.urandom(32)
 
 # Interactive-CLI flag. Concurrent ACP sessions run on a shared
 # ThreadPoolExecutor (acp_adapter/server.py), so mutating the process-global
@@ -206,43 +207,164 @@ def reset_current_observability_context(
     _approval_turn_id.reset(turn_token)
 
 
-def _tool_approval_claim_digest(tool_name: str, args: Any) -> str:
-    """Return a stable digest binding one approval to one exact tool call."""
+def _canonical_tool_approval_binding(
+    tool_name: str,
+    args: Any,
+    *,
+    session_id: str,
+    tool_call_id: str,
+    turn_id: str,
+) -> bytes:
+    """Return the strict canonical identity of one executor tool call."""
+    if not all(
+        isinstance(value, str) and value
+        for value in (tool_name, session_id, tool_call_id, turn_id)
+    ):
+        raise ValueError("tool approval provenance requires exact call identity")
     try:
-        encoded = json.dumps(
-            {"tool_name": tool_name, "args": args},
+        return json.dumps(
+            {
+                "tool_name": tool_name,
+                "args": args,
+                "session_id": session_id,
+                "tool_call_id": tool_call_id,
+                "turn_id": turn_id,
+            },
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=False,
+            allow_nan=False,
         ).encode("utf-8")
-    except (TypeError, ValueError):
-        encoded = repr((tool_name, args)).encode("utf-8", errors="replace")
-    return hashlib.sha256(encoded).hexdigest()
+    except (TypeError, ValueError) as error:
+        raise ValueError("tool approval arguments are not canonical") from error
 
 
-def mint_tool_approval_claim(tool_name: str, args: Any) -> None:
-    """Bind a one-use in-process claim to an explicitly approved tool call.
+class _ToolApprovalProvenance:
+    """Opaque capability for exactly one executor-carried handler invocation."""
 
-    The claim never enters model-visible arguments, process environment, or
-    durable storage. A privileged plugin tool can consume it before creating
-    its own exact-operation runtime capability.
-    """
-    _tool_approval_claim.set(_tool_approval_claim_digest(tool_name, args))
+    __slots__ = ("__weakref__",)
+
+    def __init__(
+        self,
+        *,
+        constructor_key: object,
+    ) -> None:
+        if constructor_key is not _TOOL_APPROVAL_PROVENANCE_KEY:
+            raise TypeError("tool approval provenance is issued by Hermes")
+
+    def _consume(self, binding: bytes) -> bool:
+        with _TOOL_APPROVAL_PROVENANCE_REGISTRY_LOCK:
+            state = _TOOL_APPROVAL_PROVENANCE_REGISTRY.get(self)
+        if state is None:
+            return False
+        with state.lock:
+            expected_seal = hmac.new(
+                _TOOL_APPROVAL_PROVENANCE_SECRET,
+                state.binding,
+                hashlib.sha256,
+            ).digest()
+            if (
+                state.consumed
+                or os.getpid() != state.pid
+                or time.monotonic() > state.expires_at
+                or not hmac.compare_digest(state.seal, expected_seal)
+                or not hmac.compare_digest(state.binding, binding)
+            ):
+                return False
+            state.consumed = True
+            return True
+
+    def __copy__(self):
+        raise TypeError("tool approval provenance cannot be copied")
+
+    def __deepcopy__(self, memo):
+        raise TypeError("tool approval provenance cannot be copied")
+
+    def __reduce__(self):
+        raise TypeError("tool approval provenance cannot cross processes")
 
 
-def consume_tool_approval_claim(tool_name: str, args: Any) -> bool:
-    """Consume the current claim if it matches the exact tool call."""
-    expected = _tool_approval_claim_digest(tool_name, args)
-    current = _tool_approval_claim.get()
-    if not current or not hmac.compare_digest(current, expected):
+class _ToolApprovalProvenanceState:
+    __slots__ = (
+        "binding",
+        "consumed",
+        "expires_at",
+        "lock",
+        "pid",
+        "seal",
+    )
+
+    def __init__(self, binding: bytes, *, expires_at: float) -> None:
+        self.binding = binding
+        self.expires_at = expires_at
+        self.pid = os.getpid()
+        self.seal = hmac.new(
+            _TOOL_APPROVAL_PROVENANCE_SECRET,
+            binding,
+            hashlib.sha256,
+        ).digest()
+        self.consumed = False
+        self.lock = threading.Lock()
+
+
+_TOOL_APPROVAL_PROVENANCE_REGISTRY_LOCK = threading.Lock()
+_TOOL_APPROVAL_PROVENANCE_REGISTRY: weakref.WeakKeyDictionary[
+    _ToolApprovalProvenance,
+    _ToolApprovalProvenanceState,
+] = weakref.WeakKeyDictionary()
+
+
+def _issue_tool_approval_provenance(
+    tool_name: str,
+    args: Any,
+    *,
+    session_id: str,
+    tool_call_id: str,
+    turn_id: str,
+) -> _ToolApprovalProvenance:
+    """Issue provenance after the human gate approves exactly one call."""
+    binding = _canonical_tool_approval_binding(
+        tool_name,
+        args,
+        session_id=session_id,
+        tool_call_id=tool_call_id,
+        turn_id=turn_id,
+    )
+    provenance = _ToolApprovalProvenance(
+        constructor_key=_TOOL_APPROVAL_PROVENANCE_KEY
+    )
+    state = _ToolApprovalProvenanceState(
+        binding,
+        expires_at=time.monotonic() + _TOOL_APPROVAL_PROVENANCE_TTL_SECONDS,
+    )
+    with _TOOL_APPROVAL_PROVENANCE_REGISTRY_LOCK:
+        _TOOL_APPROVAL_PROVENANCE_REGISTRY[provenance] = state
+    return provenance
+
+
+def consume_tool_approval_provenance(
+    provenance: Any,
+    tool_name: str,
+    args: Any,
+    *,
+    session_id: str,
+    tool_call_id: str,
+    turn_id: str,
+) -> bool:
+    """Atomically consume valid provenance for this exact handler invocation."""
+    if type(provenance) is not _ToolApprovalProvenance:
         return False
-    _tool_approval_claim.set("")
-    return True
-
-
-def clear_tool_approval_claim() -> None:
-    """Discard any unconsumed claim in the current execution context."""
-    _tool_approval_claim.set("")
+    try:
+        binding = _canonical_tool_approval_binding(
+            tool_name,
+            args,
+            session_id=session_id,
+            tool_call_id=tool_call_id,
+            turn_id=turn_id,
+        )
+    except ValueError:
+        return False
+    return provenance._consume(binding)
 
 
 def get_current_session_key(default: str = "default") -> str:

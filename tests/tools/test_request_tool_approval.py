@@ -1,4 +1,4 @@
-"""Tests for tools.approval.request_tool_approval — the plugin pre_tool_call
+"""Tests for tools.approval.request_tool_approval - the plugin pre_tool_call
 ``{"action": "approve"}`` escalation into the human-approval gate.
 
 These verify that a plugin-driven approval reuses the SAME machinery as a
@@ -6,15 +6,13 @@ Tier-2 dangerous-command match: session/permanent allowlist, the CLI prompt,
 the gateway submit_pending path, cron_mode, and fail-closed timeouts.
 """
 
+import contextvars
+import multiprocessing
+
 import pytest
 
 import tools.approval as approval
-from tools.approval import (
-    clear_tool_approval_claim,
-    consume_tool_approval_claim,
-    mint_tool_approval_claim,
-    request_tool_approval,
-)
+from tools.approval import request_tool_approval
 
 
 @pytest.fixture(autouse=True)
@@ -33,35 +31,156 @@ def _isolate_approval_state(monkeypatch):
     monkeypatch.setattr(
         "tools.terminal_tool._get_approval_callback", lambda: None, raising=False
     )
-    clear_tool_approval_claim()
     yield
-    clear_tool_approval_claim()
 
 
-class TestToolApprovalClaim:
-    def test_claim_is_bound_to_exact_tool_and_args_and_consumed_once(self):
+class TestToolApprovalProvenance:
+    @staticmethod
+    def _approved_call(monkeypatch, *, tool_call_id="call-1"):
+        from hermes_cli import plugins
+
         args = {"draft_id": "honk-2026-06", "sha256": "a" * 64}
-        mint_tool_approval_claim("finance_execute_qbo_invoice", args)
-
-        assert consume_tool_approval_claim(
-            "finance_execute_qbo_invoice", dict(args)
+        resolver = getattr(plugins, "resolve_pre_tool_call", None)
+        assert callable(resolver), (
+            "approval resolution must return executor-carried provenance"
         )
-        assert not consume_tool_approval_claim(
-            "finance_execute_qbo_invoice", dict(args)
+        monkeypatch.setattr(
+            plugins,
+            "invoke_hook",
+            lambda hook_name, **kwargs: [
+                {
+                    "action": "approve",
+                    "message": "real-money action",
+                    "allow_session": False,
+                    "allow_permanent": False,
+                    "allow_yolo": False,
+                    "allow_cron": False,
+                }
+            ],
         )
-
-    def test_claim_rejects_changed_args_or_tool_without_consuming(self):
-        args = {"draft_id": "honk-2026-06", "sha256": "a" * 64}
-        mint_tool_approval_claim("finance_execute_qbo_invoice", args)
-
-        assert not consume_tool_approval_claim(
+        monkeypatch.setattr(
+            approval,
+            "request_tool_approval",
+            lambda *args, **kwargs: {"approved": True, "message": None},
+        )
+        resolution = resolver(
             "finance_execute_qbo_invoice",
-            {"draft_id": "honk-2026-06", "sha256": "b" * 64},
+            args,
+            task_id="task-1",
+            session_id="session-1",
+            tool_call_id=tool_call_id,
+            turn_id="turn-1",
         )
-        assert not consume_tool_approval_claim("terminal", args)
-        assert consume_tool_approval_claim(
-            "finance_execute_qbo_invoice", args
+        assert resolution.block_message is None
+        assert resolution.approval_provenance is not None
+        return args, resolution.approval_provenance
+
+    @staticmethod
+    def _consume(provenance, args, *, tool="finance_execute_qbo_invoice", call="call-1"):
+        consumer = getattr(approval, "consume_tool_approval_provenance", None)
+        assert callable(consumer), "core provenance consumer is required"
+        return consumer(
+            provenance,
+            tool,
+            args,
+            session_id="session-1",
+            tool_call_id=call,
+            turn_id="turn-1",
         )
+
+    def test_exact_call_consumes_once_and_rejects_replay(self, monkeypatch):
+        args, provenance = self._approved_call(monkeypatch)
+
+        assert self._consume(provenance, dict(args))
+        assert not self._consume(provenance, dict(args))
+
+    @pytest.mark.parametrize(
+        ("tool", "args_patch", "call"),
+        [
+            ("terminal", {}, "call-1"),
+            ("finance_execute_qbo_invoice", {"sha256": "b" * 64}, "call-1"),
+            ("finance_execute_qbo_invoice", {}, "call-2"),
+        ],
+    )
+    def test_wrong_tool_args_or_call_id_do_not_consume(
+        self, monkeypatch, tool, args_patch, call
+    ):
+        args, provenance = self._approved_call(monkeypatch)
+        changed = dict(args)
+        changed.update(args_patch)
+
+        assert not self._consume(provenance, changed, tool=tool, call=call)
+        assert self._consume(provenance, args)
+
+    def test_copied_contexts_share_one_consumption_state(self, monkeypatch):
+        args, provenance = self._approved_call(monkeypatch)
+        slot = contextvars.ContextVar("copied_provenance")
+        slot.set(provenance)
+        first = contextvars.copy_context()
+        second = contextvars.copy_context()
+
+        assert first.run(lambda: self._consume(slot.get(), args))
+        assert not second.run(lambda: self._consume(slot.get(), args))
+
+    def test_expired_provenance_fails_without_consuming(self, monkeypatch):
+        now = {"value": 100.0}
+        monkeypatch.setattr(approval.time, "monotonic", lambda: now["value"])
+        args, provenance = self._approved_call(monkeypatch)
+        now["value"] += 61.0
+
+        assert not self._consume(provenance, args)
+
+    def test_provenance_is_bound_to_the_issuing_process(self, monkeypatch):
+        args, provenance = self._approved_call(monkeypatch)
+        issuing_pid = approval.os.getpid()
+        monkeypatch.setattr(approval.os, "getpid", lambda: issuing_pid + 1)
+
+        assert not self._consume(provenance, args)
+
+    def test_forked_process_cannot_consume_provenance(self, monkeypatch):
+        args, provenance = self._approved_call(monkeypatch)
+        process_context = multiprocessing.get_context("fork")
+        receive_result, send_result = process_context.Pipe(duplex=False)
+
+        def consume_in_child():
+            send_result.send(self._consume(provenance, args))
+            send_result.close()
+
+        process = process_context.Process(target=consume_in_child)
+        process.start()
+        send_result.close()
+        child_result = receive_result.recv()
+        process.join(timeout=5)
+
+        assert process.exitcode == 0
+        assert child_result is False
+        assert self._consume(provenance, args)
+
+    def test_structurally_similar_object_cannot_forge_provenance(self):
+        fake = type(
+            "FakeProvenance",
+            (),
+            {
+                "tool_name": "finance_execute_qbo_invoice",
+                "args": {"draft_id": "honk-2026-06", "sha256": "a" * 64},
+                "tool_call_id": "call-1",
+                "turn_id": "turn-1",
+                "session_id": "session-1",
+            },
+        )()
+
+        assert not self._consume(fake, fake.args)
+
+    def test_reflective_state_copy_cannot_forge_provenance(self, monkeypatch):
+        args, provenance = self._approved_call(monkeypatch)
+        forged = object.__new__(type(provenance))
+        for slot in type(provenance).__slots__:
+            if slot == "__weakref__":
+                continue
+            setattr(forged, slot, getattr(provenance, slot))
+
+        assert not self._consume(forged, args)
+        assert self._consume(provenance, args)
 
 
 class TestRequestToolApproval:
