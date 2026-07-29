@@ -155,7 +155,7 @@ class TestProviderDriftGuard:
 
 
 class TestCreateJobSnapshot:
-    """create_job captures provider_snapshot for unpinned agent jobs only."""
+    """create_job persists the fully resolved contract and exact snapshots."""
 
     @staticmethod
     def _isolate_storage(monkeypatch):
@@ -174,6 +174,16 @@ class TestCreateJobSnapshot:
 
     def test_unpinned_job_captures_snapshot(self, monkeypatch):
         jobs = self._isolate_storage(monkeypatch)
+        monkeypatch.delenv("HERMES_INFERENCE_PROVIDER", raising=False)
+        monkeypatch.setattr(
+            jobs,
+            "_load_cron_runtime_config",
+            lambda: {"model": {"default": "test-cron-default-model"}},
+        )
+        monkeypatch.setattr(
+            "hermes_cli.runtime_provider.resolve_requested_provider",
+            lambda requested=None: "auto",
+        )
 
         with patch(
             "hermes_cli.runtime_provider.resolve_runtime_provider",
@@ -181,7 +191,7 @@ class TestCreateJobSnapshot:
         ):
             job = jobs.create_job(prompt="do a thing", schedule="every 1 hour")
 
-        assert job["provider"] is None
+        assert job["provider"] == "openrouter"
         assert job["provider_snapshot"] == "openrouter"
 
     def test_pinned_job_skips_snapshot(self, monkeypatch):
@@ -193,22 +203,64 @@ class TestCreateJobSnapshot:
                 prompt="do a thing", schedule="every 1 hour", provider="nous"
             )
 
-        # Explicit provider → pinned → no snapshot needed, and resolution skipped.
+        # Explicit provider wins and is snapshotted exactly.
         assert job["provider"] == "nous"
-        assert job["provider_snapshot"] is None
+        assert job["provider_snapshot"] == "nous"
         resolver.assert_not_called()
 
-    def test_snapshot_resolution_error_fails_open_to_none(self, monkeypatch):
-        """If resolution raises at creation, snapshot is None — creation never breaks."""
+    def test_snapshot_resolution_error_rejects_incomplete_job(self, monkeypatch):
+        """Provider resolution failure must not persist an incomplete agent job."""
         jobs = self._isolate_storage(monkeypatch)
+        monkeypatch.delenv("HERMES_INFERENCE_PROVIDER", raising=False)
+        monkeypatch.setattr(
+            jobs,
+            "_load_cron_runtime_config",
+            lambda: {"model": {"default": "test-cron-default-model"}},
+        )
+        monkeypatch.setattr(
+            "hermes_cli.runtime_provider.resolve_requested_provider",
+            lambda requested=None: "auto",
+        )
 
         with patch(
             "hermes_cli.runtime_provider.resolve_runtime_provider",
             side_effect=RuntimeError("no creds"),
         ):
-            job = jobs.create_job(prompt="do a thing", schedule="every 1 hour")
+            with pytest.raises(ValueError, match="complete inference contract"):
+                jobs.create_job(prompt="do a thing", schedule="every 1 hour")
 
-        assert job["provider_snapshot"] is None
+    def test_unpinned_model_captures_model_snapshot(self, monkeypatch, tmp_path):
+        """A defaulted model is resolved and snapshotted from config."""
+        jobs = self._isolate_storage(monkeypatch)
+        (tmp_path / "config.yaml").write_text("model:\n  default: llama-3.3-70b:free\n")
+        monkeypatch.delenv("HERMES_MODEL", raising=False)
+        monkeypatch.setattr(
+            "cron.jobs.get_hermes_home", lambda: tmp_path, raising=True
+        )
+        with patch(
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
+            return_value={"provider": "openrouter"},
+        ):
+            job = jobs.create_job(prompt="do a thing", schedule="every 1 hour")
+        assert job["model"] == "llama-3.3-70b:free"
+        assert job["model_snapshot"] == "llama-3.3-70b:free"
+
+    def test_pinned_model_skips_model_snapshot(self, monkeypatch, tmp_path):
+        """An explicit model is snapshotted exactly."""
+        jobs = self._isolate_storage(monkeypatch)
+        (tmp_path / "config.yaml").write_text("model:\n  default: llama-3.3-70b:free\n")
+        monkeypatch.setattr(
+            "cron.jobs.get_hermes_home", lambda: tmp_path, raising=True
+        )
+        with patch(
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
+            return_value={"provider": "openrouter"},
+        ):
+            job = jobs.create_job(
+                prompt="do a thing", schedule="every 1 hour", model="my-model"
+        )
+        assert job["model"] == "my-model"
+        assert job["model_snapshot"] == "my-model"
 
 
 def _run_with_current_provider_and_model(

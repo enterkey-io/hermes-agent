@@ -566,6 +566,12 @@ def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
         "prompt_preview": prompt[:100] + "..." if len(prompt) > 100 else prompt,
         "model": job.get("model"),
         "provider": job.get("provider"),
+        "reasoning_effort": job.get("reasoning_effort"),
+        "speed": job.get("speed"),
+        "provider_snapshot": job.get("provider_snapshot"),
+        "model_snapshot": job.get("model_snapshot"),
+        "reasoning_effort_snapshot": job.get("reasoning_effort_snapshot"),
+        "speed_snapshot": job.get("speed_snapshot"),
         "base_url": job.get("base_url"),
         "schedule": job.get("schedule_display") or "?",
         "repeat": _repeat_display(job),
@@ -1042,6 +1048,9 @@ def cronjob(
     skills: Optional[List[str]] = None,
     model: Optional[str] = None,
     provider: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
+    speed: Optional[str] = None,
+    service_tier: Optional[str] = None,
     base_url: Optional[str] = None,
     reason: Optional[str] = None,
     script: Optional[str] = None,
@@ -1131,6 +1140,9 @@ def cronjob(
                     skills=canonical_skills,
                     model=_normalize_optional_job_value(model),
                     provider=_normalize_optional_job_value(provider),
+                    reasoning_effort=_normalize_optional_job_value(reasoning_effort),
+                    speed=_normalize_optional_job_value(speed),
+                    service_tier=_normalize_optional_job_value(service_tier),
                     base_url=_normalize_optional_job_value(base_url, strip_trailing_slash=True),
                     script=_normalize_optional_job_value(script),
                     context_from=context_from,
@@ -1318,6 +1330,12 @@ def cronjob(
                 updates["model"] = _normalize_optional_job_value(model)
             if provider is not None:
                 updates["provider"] = _normalize_optional_job_value(provider)
+            if reasoning_effort is not None:
+                updates["reasoning_effort"] = _normalize_optional_job_value(reasoning_effort)
+            if speed is not None:
+                updates["speed"] = _normalize_optional_job_value(speed)
+            if service_tier is not None:
+                updates["service_tier"] = _normalize_optional_job_value(service_tier)
             if base_url is not None:
                 updates["base_url"] = _normalize_optional_job_value(base_url, strip_trailing_slash=True)
             # Re-validate the EFFECTIVE provider/base_url on EVERY update, not

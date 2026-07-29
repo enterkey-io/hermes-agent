@@ -1428,48 +1428,24 @@ def _normalize_workdir(workdir: Optional[str]) -> Optional[str]:
     return str(resolved)
 
 
-def _resolve_default_model_snapshot() -> Optional[str]:
-    """Resolve the global default model the same way the cron ticker does.
-
-    Mirrors the unpinned-model resolution in ``cron/scheduler.py`` ``run_job``:
-    read ``config.yaml`` ``model.default`` (or the ``model`` alias / bare string
-    form), applying the managed-scope overlay and env expansion. Used by
-    ``create_job`` to snapshot the default model for unpinned jobs so a later
-    swap of the global default is detected at fire time (#44585).
-
-    Returns the resolved model string, or ``None`` if config is missing/empty
-    or resolution fails (fail-open — caller treats ``None`` as "no snapshot").
-    """
+def _load_cron_runtime_config() -> Dict[str, Any]:
+    """Load config with the same overlay/env expansion used by cron execution."""
     try:
         from hermes_cli.config import _expand_env_vars, read_user_config_raw
 
         cfg_path = get_hermes_home() / "config.yaml"
         if not cfg_path.exists():
-            return None
+            return {}
         cfg = read_user_config_raw(cfg_path)
         try:
             from hermes_cli import managed_scope
             cfg = managed_scope.apply_managed_overlay(cfg)
         except Exception:
             pass
-        cfg = _expand_env_vars(cfg)
-        # Mirror run_job's precedence: the explicit cron-fleet default
-        # (cron.model) beats the global chat model for unpinned cron jobs.
-        cron_cfg = cfg.get("cron") or {}
-        if isinstance(cron_cfg, dict):
-            cron_model = cron_cfg.get("model")
-            if isinstance(cron_model, str) and cron_model.strip():
-                return cron_model.strip()
-        model_cfg = cfg.get("model") or {}
-        if isinstance(model_cfg, str):
-            return model_cfg.strip() or None
-        if isinstance(model_cfg, dict):
-            default = model_cfg.get("default") or model_cfg.get("model")
-            if isinstance(default, str):
-                return default.strip() or None
-        return None
+        expanded = _expand_env_vars(cfg)
+        return expanded if isinstance(expanded, dict) else {}
     except Exception:
-        return None
+        return {}
 
 
 def _normalize_job_optional_text(value: Any, *, strip_trailing_slash: bool = False) -> Optional[str]:
@@ -1481,56 +1457,173 @@ def _normalize_job_optional_text(value: Any, *, strip_trailing_slash: bool = Fal
     return text or None
 
 
-def _compute_provider_model_snapshots(
+def _normalize_reasoning_effort(value: Any) -> str:
+    from hermes_constants import parse_reasoning_effort
+
+    parsed = parse_reasoning_effort(value)
+    if parsed is None:
+        raise ValueError(f"Invalid cron reasoning_effort: {value!r}")
+    if parsed.get("enabled") is False:
+        return "none"
+    effort = _normalize_job_optional_text(parsed.get("effort"))
+    if effort is None:
+        raise ValueError(f"Invalid cron reasoning_effort: {value!r}")
+    return effort.lower()
+
+
+def _normalize_inference_speed(value: Any) -> str:
+    normalized = _normalize_job_optional_text(value)
+    if normalized is None:
+        raise ValueError(f"Invalid cron speed: {value!r}")
+    lowered = normalized.lower()
+    if lowered in {"fast", "priority", "on"}:
+        return "fast"
+    if lowered in {"standard", "normal", "default", "off", "none"}:
+        return "standard"
+    raise ValueError(f"Invalid cron speed: {value!r}")
+
+
+def _resolve_complete_inference_contract(
     *,
     provider: Any,
     model: Any,
+    reasoning_effort: Any,
+    speed: Any,
+    service_tier: Any,
     base_url: Any,
     no_agent: Any,
-) -> Tuple[Optional[str], Optional[str]]:
-    """Snapshot unpinned inference axes for the provider/model drift guard.
+) -> Dict[str, Optional[str]]:
+    """Resolve and snapshot the complete contract an agent cron job will use."""
+    fields = ("provider", "model", "reasoning_effort", "speed")
+    if bool(no_agent):
+        return {
+            key: None
+            for field in fields
+            for key in (field, f"{field}_snapshot")
+        }
 
-    Agent cron jobs with unpinned provider/model follow global config at fire
-    time. Capture the current resolution for each unpinned axis so a later
-    global switch fails closed instead of silently changing spend. Pinned axes
-    and no-agent script jobs intentionally carry no snapshot.
-    """
+    cfg = _load_cron_runtime_config()
     normalized_provider = _normalize_job_optional_text(provider)
     normalized_model = _normalize_job_optional_text(model)
     normalized_base_url = _normalize_job_optional_text(
         base_url,
         strip_trailing_slash=True,
     )
-    if bool(no_agent):
-        return None, None
+    model_cfg = cfg.get("model")
+    if normalized_model is None:
+        cron_cfg = cfg.get("cron") if isinstance(cfg.get("cron"), dict) else {}
+        normalized_model = (
+            _normalize_job_optional_text(cron_cfg.get("model"))
+            or _normalize_job_optional_text(os.getenv("HERMES_MODEL"))
+            or _normalize_job_optional_text(
+                model_cfg if isinstance(model_cfg, str) else None
+            )
+        )
+        if normalized_model is None and isinstance(model_cfg, dict):
+            normalized_model = _normalize_job_optional_text(
+                model_cfg.get("default") or model_cfg.get("model")
+            )
 
-    provider_snapshot: Optional[str] = None
-    model_snapshot: Optional[str] = None
+    if normalized_provider is None and isinstance(model_cfg, dict):
+        normalized_provider = _normalize_job_optional_text(model_cfg.get("provider"))
+
+    if normalized_provider is None:
+        try:
+            from hermes_cli.runtime_provider import resolve_requested_provider
+
+            requested_provider = _normalize_job_optional_text(
+                resolve_requested_provider()
+            )
+            if requested_provider and requested_provider.lower() != "auto":
+                normalized_provider = requested_provider
+        except Exception:
+            pass
+
     if normalized_provider is None:
         try:
             from hermes_cli.runtime_provider import resolve_runtime_provider
 
-            runtime_kwargs = {"requested": None}
+            runtime_kwargs = {
+                "requested": None,
+                "target_model": normalized_model or "",
+            }
             if normalized_base_url:
                 runtime_kwargs["explicit_base_url"] = normalized_base_url
-            snap = resolve_runtime_provider(**runtime_kwargs)
-            snap_provider = str(snap.get("provider") or "").strip().lower()
-            provider_snapshot = snap_provider or None
-        except Exception:
-            provider_snapshot = None
-    if normalized_model is None:
-        try:
-            model_snapshot = _resolve_default_model_snapshot() or None
-        except Exception:
-            model_snapshot = None
-    return provider_snapshot, model_snapshot
+            runtime = resolve_runtime_provider(**runtime_kwargs)
+            normalized_provider = _normalize_job_optional_text(runtime.get("provider"))
+        except Exception as exc:
+            raise ValueError(
+                "Cannot persist enabled agent cron job without a complete "
+                f"inference contract: provider resolution failed ({exc})."
+            ) from exc
+
+    if reasoning_effort is not None:
+        normalized_effort = _normalize_reasoning_effort(reasoning_effort)
+    else:
+        from hermes_constants import resolve_reasoning_config
+
+        reasoning_config = resolve_reasoning_config(cfg, normalized_model or "")
+        if reasoning_config is None:
+            normalized_effort = "medium"
+        elif reasoning_config.get("enabled") is False:
+            normalized_effort = "none"
+        else:
+            normalized_effort = _normalize_reasoning_effort(
+                reasoning_config.get("effort")
+            )
+
+    if speed is not None and service_tier is not None:
+        normalized_speed = _normalize_inference_speed(speed)
+        legacy_speed = _normalize_inference_speed(service_tier)
+        if normalized_speed != legacy_speed:
+            raise ValueError(
+                "Conflicting cron inference speed and legacy service_tier values."
+            )
+    elif speed is not None:
+        normalized_speed = _normalize_inference_speed(speed)
+    elif service_tier is not None:
+        normalized_speed = _normalize_inference_speed(service_tier)
+    else:
+        agent_cfg = cfg.get("agent") if isinstance(cfg.get("agent"), dict) else {}
+        configured_speed = (
+            agent_cfg.get("speed")
+            if agent_cfg.get("speed") is not None
+            else agent_cfg.get("service_tier")
+        )
+        normalized_speed = (
+            _normalize_inference_speed(configured_speed)
+            if configured_speed is not None
+            else "standard"
+        )
+
+    contract = {
+        "provider": normalized_provider.lower() if normalized_provider else None,
+        "model": normalized_model,
+        "reasoning_effort": normalized_effort,
+        "speed": normalized_speed,
+    }
+    missing = [field for field in fields if not contract.get(field)]
+    if missing:
+        raise ValueError(
+            "Cannot persist enabled agent cron job without a complete inference "
+            f"contract; unresolved field(s): {', '.join(missing)}."
+        )
+    return {
+        key: value
+        for field, value in contract.items()
+        for key in (field, f"{field}_snapshot")
+    }
 
 
-def _normalized_inference_axes(job: Dict[str, Any]) -> Tuple[Optional[str], Optional[str], Optional[str], bool]:
+def _normalized_inference_axes(
+    job: Dict[str, Any],
+) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], bool]:
     """Return the stored inference-routing fields in their semantic form."""
     return (
         _normalize_job_optional_text(job.get("provider")),
         _normalize_job_optional_text(job.get("model")),
+        _normalize_job_optional_text(job.get("reasoning_effort")),
+        _normalize_job_optional_text(job.get("speed")),
         _normalize_job_optional_text(job.get("base_url"), strip_trailing_slash=True),
         bool(job.get("no_agent")),
     )
@@ -1586,6 +1679,9 @@ def create_job(
     attach_to_session: Optional[bool] = None,
     monitor_script: Optional[str] = None,
     monitor_url: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
+    speed: Optional[str] = None,
+    service_tier: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -1713,9 +1809,12 @@ def create_job(
 
     label_source = (prompt_text or (normalized_skills[0] if normalized_skills else None) or (normalized_script if normalized_no_agent else None)) or "cron job"
 
-    provider_snapshot, model_snapshot = _compute_provider_model_snapshots(
+    inference_contract = _resolve_complete_inference_contract(
         provider=normalized_provider,
         model=normalized_model,
+        reasoning_effort=reasoning_effort,
+        speed=speed,
+        service_tier=service_tier,
         base_url=normalized_base_url,
         no_agent=normalized_no_agent,
     )
@@ -1740,13 +1839,7 @@ def create_job(
         "prompt": prompt_text,
         "skills": normalized_skills,
         "skill": normalized_skills[0] if normalized_skills else None,
-        "model": normalized_model,
-        "provider": normalized_provider,
-        # Provider/model resolution captured at creation for unpinned jobs
-        # (#44585). None for pinned axes, no_agent jobs, resolution failures, and
-        # any pre-existing job written before these fields existed (back-compat).
-        "provider_snapshot": provider_snapshot,
-        "model_snapshot": model_snapshot,
+        **inference_contract,
         "base_url": normalized_base_url,
         "script": normalized_script,
         "no_agent": normalized_no_agent,
@@ -1866,6 +1959,19 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
             f"Cron job field(s) cannot be updated: {', '.join(sorted(bad_fields))}"
         )
 
+    updates = dict(updates or {})
+    if "service_tier" in updates:
+        if "speed" not in updates:
+            updates["speed"] = updates["service_tier"]
+        elif (
+            _normalize_inference_speed(updates["speed"])
+            != _normalize_inference_speed(updates["service_tier"])
+        ):
+            raise ValueError(
+                "Conflicting cron inference speed and legacy service_tier values."
+            )
+        updates.pop("service_tier")
+
     with _jobs_lock():
         jobs = load_jobs()
         for i, job in enumerate(jobs):
@@ -1910,7 +2016,14 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
                 )
             schedule_changed = "schedule" in updates
             inference_fields_changed = bool(
-                {"provider", "model", "base_url", "no_agent"}.intersection(updates)
+                {
+                    "provider",
+                    "model",
+                    "reasoning_effort",
+                    "speed",
+                    "base_url",
+                    "no_agent",
+                }.intersection(updates)
             ) and _normalized_inference_axes(updated) != previous_inference_axes
 
             if "skills" in updates or "skill" in updates:
@@ -1956,14 +2069,15 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
                     updated["next_run_at"] = updated_next_run
 
             if inference_fields_changed:
-                provider_snapshot, model_snapshot = _compute_provider_model_snapshots(
+                updated.update(_resolve_complete_inference_contract(
                     provider=updated.get("provider"),
                     model=updated.get("model"),
+                    reasoning_effort=updated.get("reasoning_effort"),
+                    speed=updated.get("speed"),
+                    service_tier=None,
                     base_url=updated.get("base_url"),
                     no_agent=updated.get("no_agent"),
-                )
-                updated["provider_snapshot"] = provider_snapshot
-                updated["model_snapshot"] = model_snapshot
+                ))
 
             if updated.get("enabled", True) and updated.get("state") != "paused" and not updated.get("next_run_at"):
                 next_run = compute_next_run(updated["schedule"])

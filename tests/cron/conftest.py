@@ -11,6 +11,9 @@ edge cases — call ``monkeypatch.delenv("HERMES_MODEL", raising=False)``
 inside the test, which overrides this fixture's value for that scope.
 """
 
+from pathlib import Path
+import os
+
 import pytest
 
 
@@ -49,6 +52,19 @@ def make_cron_provider():
 def _default_cron_test_model(monkeypatch):
     """Pin a default HERMES_MODEL so cron run_job tests have a resolvable model."""
     monkeypatch.setenv("HERMES_MODEL", "test-cron-default-model")
+    monkeypatch.setenv("HERMES_INFERENCE_PROVIDER", "openrouter")
+    home = Path(os.environ["HERMES_HOME"])
+    config = home / "config.yaml"
+    if not config.exists():
+        config.write_text(
+            "model:\n"
+            "  default: test-cron-default-model\n"
+            "  provider: openrouter\n"
+            "agent:\n"
+            "  reasoning_effort: medium\n"
+            "  speed: standard\n",
+            encoding="utf-8",
+        )
     yield
 
 

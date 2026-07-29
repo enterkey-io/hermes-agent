@@ -228,6 +228,11 @@ class TestUnifiedCronjobTool:
         monkeypatch.setattr("cron.jobs.CRON_DIR", tmp_path / "cron")
         monkeypatch.setattr("cron.jobs.JOBS_FILE", tmp_path / "cron" / "jobs.json")
         monkeypatch.setattr("cron.jobs.OUTPUT_DIR", tmp_path / "cron" / "output")
+        monkeypatch.setenv("HERMES_MODEL", "test-model")
+        (tmp_path / "config.yaml").write_text(
+            "model:\n  default: test-model\n  provider: test-provider\n"
+        )
+        monkeypatch.setattr("cron.jobs.get_hermes_home", lambda: tmp_path)
 
     def test_create_and_list(self):
         created = json.loads(
@@ -453,6 +458,11 @@ class TestLocalDeliveryNotice:
         monkeypatch.setattr("cron.jobs.CRON_DIR", tmp_path / "cron")
         monkeypatch.setattr("cron.jobs.JOBS_FILE", tmp_path / "cron" / "jobs.json")
         monkeypatch.setattr("cron.jobs.OUTPUT_DIR", tmp_path / "cron" / "output")
+        monkeypatch.setenv("HERMES_MODEL", "test-model")
+        (tmp_path / "config.yaml").write_text(
+            "model:\n  default: test-model\n  provider: test-provider\n"
+        )
+        monkeypatch.setattr("cron.jobs.get_hermes_home", lambda: tmp_path)
         # Default: no session origin (the TUI/CLI condition).
         for var in (
             "HERMES_SESSION_PLATFORM",

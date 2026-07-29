@@ -15,6 +15,11 @@ def tmp_cron_dir(tmp_path, monkeypatch):
     monkeypatch.setattr("cron.jobs.CRON_DIR", tmp_path / "cron")
     monkeypatch.setattr("cron.jobs.JOBS_FILE", tmp_path / "cron" / "jobs.json")
     monkeypatch.setattr("cron.jobs.OUTPUT_DIR", tmp_path / "cron" / "output")
+    monkeypatch.setenv("HERMES_MODEL", "test-model")
+    (tmp_path / "config.yaml").write_text(
+        "model:\n  default: test-model\n  provider: test-provider\n"
+    )
+    monkeypatch.setattr("cron.jobs.get_hermes_home", lambda: tmp_path)
     return tmp_path
 
 

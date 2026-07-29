@@ -24,6 +24,14 @@ def hermes_env(tmp_path, monkeypatch):
     home.mkdir()
     (home / "scripts").mkdir()
     (home / "cron").mkdir()
+    (home / "config.yaml").write_text(
+        "model:\n"
+        "  default: test-cron-default-model\n"
+        "  provider: test-cron-provider\n"
+        "agent:\n"
+        "  reasoning_effort: medium\n"
+        "  speed: standard\n"
+    )
 
     monkeypatch.setenv("HERMES_HOME", str(home))
 
