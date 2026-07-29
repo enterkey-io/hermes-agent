@@ -93,11 +93,100 @@ WantedBy=default.target
 
 
 # ---------------------------------------------------------------------------
+# _normalize_service_definition
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeServiceDefinition:
+    def test_normalizes_only_transient_fnm_multishell_path_components(self):
+        from hermes_cli.gateway import _normalize_service_definition
+
+        installed = """[Service]
+Environment="PATH=/opt/hermes/bin:/run/user/1000/fnm_multishells/111_aaa/bin:/usr/bin"
+"""
+        expected = """[Service]
+Environment="PATH=/opt/hermes/bin:/run/user/1000/fnm_multishells/222_bbb/bin:/usr/bin"
+"""
+
+        assert _normalize_service_definition(installed) == _normalize_service_definition(
+            expected
+        )
+
+    def test_preserves_stable_path_differences(self):
+        from hermes_cli.gateway import _normalize_service_definition
+
+        installed = """[Service]
+Environment="PATH=/opt/hermes-v1/bin:/run/user/1000/fnm_multishells/111_aaa/bin:/usr/bin"
+"""
+        expected = """[Service]
+Environment="PATH=/opt/hermes-v2/bin:/run/user/1000/fnm_multishells/222_bbb/bin:/usr/bin"
+"""
+
+        assert _normalize_service_definition(installed) != _normalize_service_definition(
+            expected
+        )
+
+
+# ---------------------------------------------------------------------------
 # systemd_unit_is_current integration
 # ---------------------------------------------------------------------------
 
 
 class TestSystemdUnitIsCurrent:
+    def test_transient_fnm_multishell_path_does_not_make_unit_stale(
+        self, tmp_path, monkeypatch,
+    ):
+        from hermes_cli import gateway as gw
+
+        installed = """[Service]
+Environment="PATH=/opt/hermes/bin:/run/user/1000/fnm_multishells/111_aaa/bin:/usr/bin"
+"""
+        expected = """[Service]
+Environment="PATH=/opt/hermes/bin:/run/user/1000/fnm_multishells/222_bbb/bin:/usr/bin"
+"""
+        unit_file = tmp_path / "hermes-gateway.service"
+        unit_file.write_text(installed)
+
+        monkeypatch.setattr(gw, "get_systemd_unit_path", lambda system=False: unit_file)
+        monkeypatch.setattr(
+            gw,
+            "generate_systemd_unit",
+            lambda system=False, run_as_user=None: expected,
+        )
+        monkeypatch.setattr(
+            gw,
+            "_sync_hermes_home_from_systemd_unit",
+            lambda system=False: None,
+        )
+
+        assert gw.systemd_unit_is_current(system=False) is True
+
+    def test_stable_path_difference_keeps_unit_stale(self, tmp_path, monkeypatch):
+        from hermes_cli import gateway as gw
+
+        installed = """[Service]
+Environment="PATH=/opt/hermes-v1/bin:/run/user/1000/fnm_multishells/111_aaa/bin:/usr/bin"
+"""
+        expected = """[Service]
+Environment="PATH=/opt/hermes-v2/bin:/run/user/1000/fnm_multishells/222_bbb/bin:/usr/bin"
+"""
+        unit_file = tmp_path / "hermes-gateway.service"
+        unit_file.write_text(installed)
+
+        monkeypatch.setattr(gw, "get_systemd_unit_path", lambda system=False: unit_file)
+        monkeypatch.setattr(
+            gw,
+            "generate_systemd_unit",
+            lambda system=False, run_as_user=None: expected,
+        )
+        monkeypatch.setattr(
+            gw,
+            "_sync_hermes_home_from_systemd_unit",
+            lambda system=False: None,
+        )
+
+        assert gw.systemd_unit_is_current(system=False) is False
+
     def test_unit_without_fatal_config_restart_policy_is_not_current(
         self, tmp_path, monkeypatch,
     ):

@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -2984,7 +2985,12 @@ WantedBy=default.target
 
 
 def _normalize_service_definition(text: str) -> str:
-    return "\n".join(line.rstrip() for line in text.strip().splitlines())
+    normalized = "\n".join(line.rstrip() for line in text.strip().splitlines())
+    return re.sub(
+        r"/run/user/\d+/fnm_multishells/[^:/\"\s]+/bin",
+        "/run/user/__UID__/fnm_multishells/__SESSION__/bin",
+        normalized,
+    )
 
 
 # Directives that older systemd versions silently ignore/strip.  Normalize
