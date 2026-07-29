@@ -1,6 +1,9 @@
 """Tests for the BlueBubbles iMessage gateway adapter."""
 import asyncio
 import json
+import sqlite3
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -12,15 +15,26 @@ def _make_adapter(monkeypatch, **extra):
     monkeypatch.setenv("BLUEBUBBLES_PASSWORD", "secret")
     from gateway.platforms.bluebubbles import BlueBubblesAdapter
 
+    ledger_path = extra.pop("inbound_ledger_path", None)
+    if ledger_path is None:
+        temp_dir = tempfile.TemporaryDirectory(prefix="hermes-bb-test-")
+        ledger_path = str(Path(temp_dir.name) / "state.db")
+    else:
+        temp_dir = None
     cfg = PlatformConfig(
         enabled=True,
         extra={
             "server_url": "http://localhost:1234",
             "password": "secret",
+            "_inbound_ledger_path": str(ledger_path),
+            "_inbound_coalesce_seconds": 0,
+            "_server_identity": "test-bluebubbles-server",
             **extra,
         },
     )
-    return BlueBubblesAdapter(cfg)
+    adapter = BlueBubblesAdapter(cfg)
+    adapter._test_temp_dir = temp_dir
+    return adapter
 
 
 class TestBlueBubblesConfigLoading:
@@ -83,6 +97,34 @@ class _FakeBlueBubblesRequest:
         return self._body
 
 
+async def _drain_bluebubbles_tasks(adapter):
+    await asyncio.sleep(0.08)
+    tasks = [task for task in adapter._background_tasks if not task.done()]
+    if tasks:
+        await asyncio.gather(*tasks)
+    await asyncio.sleep(0)
+
+
+def _dm_payload(
+    *,
+    guid,
+    text="hello",
+    event_type="new-message",
+    chat_guid="any;-;+15551234567",
+):
+    return {
+        "type": event_type,
+        "data": {
+            "guid": guid,
+            "text": text,
+            "handle": {"address": "+15551234567"},
+            "isFromMe": False,
+            "chatGuid": chat_guid,
+            "chatIdentifier": "+15551234567",
+        },
+    }
+
+
 class TestBlueBubblesMentionGating:
     @pytest.mark.asyncio
     async def test_group_message_without_mention_is_acknowledged_and_skipped(self, monkeypatch):
@@ -108,11 +150,68 @@ class TestBlueBubblesMentionGating:
                 "chats": [{"guid": "iMessage;+;group-chat"}],
             },
         }))
-        await asyncio.sleep(0)
+        await _drain_bluebubbles_tasks(adapter)
 
         assert response.status == 200
         assert handled == []
 
+    @pytest.mark.asyncio
+    async def test_group_message_with_default_mention_is_dispatched_cleaned(self, monkeypatch):
+        adapter = _make_adapter(
+            monkeypatch,
+            require_mention=True,
+            send_read_receipts=False,
+        )
+        handled = []
+
+        async def fake_handle_message(event):
+            handled.append(event)
+
+        monkeypatch.setattr(adapter, "handle_message", fake_handle_message)
+        response = await adapter._handle_webhook(_FakeBlueBubblesRequest({
+            "type": "new-message",
+            "data": {
+                "guid": "msg-2",
+                "text": "Hermes, summarize this",
+                "handle": {"address": "+15555550100"},
+                "isFromMe": False,
+                "isGroup": True,
+                "chats": [{"guid": "iMessage;+;group-chat"}],
+            },
+        }))
+        await _drain_bluebubbles_tasks(adapter)
+
+        assert response.status == 200
+        assert [event.text for event in handled] == ["summarize this"]
+
+    @pytest.mark.asyncio
+    async def test_dm_message_does_not_require_mention(self, monkeypatch):
+        adapter = _make_adapter(
+            monkeypatch,
+            require_mention=True,
+            send_read_receipts=False,
+        )
+        handled = []
+
+        async def fake_handle_message(event):
+            handled.append(event)
+
+        monkeypatch.setattr(adapter, "handle_message", fake_handle_message)
+        response = await adapter._handle_webhook(_FakeBlueBubblesRequest({
+            "type": "new-message",
+            "data": {
+                "guid": "msg-3",
+                "text": "hello from a dm",
+                "handle": {"address": "user@example.com"},
+                "isFromMe": False,
+                "chatGuid": "iMessage;-;user@example.com",
+                "chatIdentifier": "user@example.com",
+            },
+        }))
+        await _drain_bluebubbles_tasks(adapter)
+
+        assert response.status == 200
+        assert [event.text for event in handled] == ["hello from a dm"]
 
 class TestBlueBubblesWebhookParsing:
 
@@ -171,6 +270,318 @@ class TestBlueBubblesWebhookParsing:
         }
         record = adapter._extract_payload_record(payload)
         assert record == payload["data"][0]
+
+
+class TestBlueBubblesDurableInboundDedup:
+    @pytest.mark.asyncio
+    async def test_same_guid_new_and_updated_dispatches_one_turn(self, monkeypatch):
+        adapter = _make_adapter(monkeypatch)
+        handled = []
+
+        async def fake_handle_message(event):
+            handled.append(event)
+
+        monkeypatch.setattr(adapter, "handle_message", fake_handle_message)
+        await adapter._handle_webhook(
+            _FakeBlueBubblesRequest(
+                _dm_payload(guid="message-guid-1", text="original")
+            )
+        )
+        updated = {
+            "type": "updated-message",
+            "data": {
+                "message": {
+                    "messageGuid": "message-guid-1",
+                    "text": "updated",
+                    "handle": {"address": "+15551234567"},
+                    "isFromMe": False,
+                    "chats": [
+                        {
+                            "guid": "iMessage;-;+15551234567",
+                            "chatIdentifier": "+15551234567",
+                        }
+                    ],
+                }
+            },
+        }
+        await adapter._handle_webhook(_FakeBlueBubblesRequest(updated))
+        await _drain_bluebubbles_tasks(adapter)
+
+        assert [event.text for event in handled] == ["updated"]
+        assert handled[0].message_id == "message-guid-1"
+
+    @pytest.mark.asyncio
+    async def test_different_dm_chat_representations_dispatch_one_turn(self, monkeypatch):
+        adapter = _make_adapter(monkeypatch)
+        handled = []
+
+        async def fake_handle_message(event):
+            handled.append(event)
+
+        monkeypatch.setattr(adapter, "handle_message", fake_handle_message)
+        await adapter._handle_webhook(
+            _FakeBlueBubblesRequest(
+                _dm_payload(
+                    guid="message-guid-2",
+                    chat_guid="any;-;+1 (555) 123-4567",
+                )
+            )
+        )
+        await adapter._handle_webhook(
+            _FakeBlueBubblesRequest(
+                _dm_payload(
+                    guid="message-guid-2",
+                    event_type="updated-message",
+                    chat_guid="+15551234567",
+                )
+            )
+        )
+        await _drain_bluebubbles_tasks(adapter)
+
+        assert len(handled) == 1
+        assert handled[0].source.chat_id == "+15551234567"
+        assert handled[0].source.chat_id_alt in {
+            "any;-;+1 (555) 123-4567",
+            "+15551234567",
+        }
+
+    @pytest.mark.asyncio
+    async def test_retry_after_gateway_restart_dispatches_one_turn(
+        self, monkeypatch, tmp_path,
+    ):
+        ledger_path = tmp_path / "state.db"
+        first = _make_adapter(
+            monkeypatch,
+            inbound_ledger_path=ledger_path,
+            _inbound_coalesce_seconds=60,
+        )
+        handled = []
+
+        async def fake_handle_message(event):
+            handled.append(event)
+
+        monkeypatch.setattr(first, "handle_message", fake_handle_message)
+        await first._handle_webhook(
+            _FakeBlueBubblesRequest(_dm_payload(guid="message-guid-3"))
+        )
+        pending = list(first._pending_inbound_tasks.values())
+        assert len(pending) == 1
+        pending[0].cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+
+        restarted = _make_adapter(monkeypatch, inbound_ledger_path=ledger_path)
+        monkeypatch.setattr(restarted, "handle_message", fake_handle_message)
+        await restarted._handle_webhook(
+            _FakeBlueBubblesRequest(
+                _dm_payload(
+                    guid="message-guid-3",
+                    event_type="updated-message",
+                    chat_guid="+15551234567",
+                )
+            )
+        )
+        await _drain_bluebubbles_tasks(restarted)
+
+        assert len(handled) == 1
+
+    @pytest.mark.asyncio
+    async def test_same_text_with_different_guids_dispatches_two_turns(self, monkeypatch):
+        adapter = _make_adapter(monkeypatch)
+        handled = []
+
+        async def fake_handle_message(event):
+            handled.append(event)
+
+        monkeypatch.setattr(adapter, "handle_message", fake_handle_message)
+        await adapter._handle_webhook(
+            _FakeBlueBubblesRequest(
+                _dm_payload(guid="message-guid-4a", text="same text")
+            )
+        )
+        await adapter._handle_webhook(
+            _FakeBlueBubblesRequest(
+                _dm_payload(guid="message-guid-4b", text="same text")
+            )
+        )
+        await _drain_bluebubbles_tasks(adapter)
+
+        assert [event.message_id for event in handled] == [
+            "message-guid-4a",
+            "message-guid-4b",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_update_before_dispatch_replaces_pending_content(self, monkeypatch):
+        adapter = _make_adapter(monkeypatch, _inbound_coalesce_seconds=0.05)
+        handled = []
+
+        async def fake_handle_message(event):
+            handled.append(event)
+
+        monkeypatch.setattr(adapter, "handle_message", fake_handle_message)
+        await adapter._handle_webhook(
+            _FakeBlueBubblesRequest(
+                _dm_payload(guid="message-guid-5", text="draft")
+            )
+        )
+        partial_update = {
+            "type": "updated-message",
+            "data": {
+                "id": "message-guid-5",
+                "text": "final",
+            },
+        }
+        await adapter._handle_webhook(
+            _FakeBlueBubblesRequest(partial_update)
+        )
+        await _drain_bluebubbles_tasks(adapter)
+
+        assert [event.text for event in handled] == ["final"]
+        assert handled[0].source.chat_id == "+15551234567"
+
+    @pytest.mark.asyncio
+    async def test_claim_is_durable_before_attachment_processing(
+        self, monkeypatch, tmp_path,
+    ):
+        ledger_path = tmp_path / "state.db"
+        adapter = _make_adapter(monkeypatch, inbound_ledger_path=ledger_path)
+        claimed_before_download = []
+
+        async def fake_download(_guid, _metadata):
+            with sqlite3.connect(ledger_path) as conn:
+                count = conn.execute(
+                    "SELECT COUNT(*) FROM bluebubbles_inbound_ledger"
+                ).fetchone()[0]
+            claimed_before_download.append(count)
+            return "/tmp/image.png"
+
+        async def fake_handle_message(_event):
+            return None
+
+        monkeypatch.setattr(adapter, "_download_attachment", fake_download)
+        monkeypatch.setattr(adapter, "handle_message", fake_handle_message)
+        payload = _dm_payload(guid="message-guid-6")
+        payload["data"]["attachments"] = [
+            {"guid": "attachment-guid", "mimeType": "image/png"}
+        ]
+        await adapter._handle_webhook(_FakeBlueBubblesRequest(payload))
+        await _drain_bluebubbles_tasks(adapter)
+
+        assert claimed_before_download == [1]
+
+    @pytest.mark.parametrize(
+        ("payload", "expected"),
+        [
+            (
+                {"type": "new-message", "data": {"guid": "shape-guid-1"}},
+                "shape-guid-1",
+            ),
+            (
+                {
+                    "type": "updated-message",
+                    "data": {"message": {"messageGuid": "shape-guid-2"}},
+                },
+                "shape-guid-2",
+            ),
+            (
+                {
+                    "type": "updated-message",
+                    "message": {"message_guid": "shape-guid-3"},
+                },
+                "shape-guid-3",
+            ),
+            (
+                {
+                    "type": "new-message",
+                    "data": [{"guid": "shape-guid-4"}],
+                },
+                "shape-guid-4",
+            ),
+            (
+                {
+                    "type": "updated-message",
+                    "data": {"id": "shape-guid-5"},
+                },
+                "shape-guid-5",
+            ),
+        ],
+    )
+    def test_message_guid_supported_payload_shapes(
+        self, monkeypatch, payload, expected,
+    ):
+        adapter = _make_adapter(monkeypatch)
+        record = adapter._extract_payload_record(payload) or {}
+        assert adapter._extract_message_guid(payload, record) == expected
+
+    @pytest.mark.asyncio
+    async def test_missing_guid_reconciles_by_row_id_without_text_dedup(
+        self, monkeypatch,
+    ):
+        adapter = _make_adapter(monkeypatch)
+        handled = []
+        api_queries = []
+
+        async def fake_api_post(path, query):
+            api_queries.append((path, query))
+            return {
+                "data": [
+                    {
+                        "guid": "reconciled-guid",
+                        "originalROWID": 42,
+                        "dateCreated": 1785350000000,
+                        "handle": {"address": "+15551234567"},
+                        "chats": [{"guid": "any;-;+15551234567"}],
+                    }
+                ]
+            }
+
+        async def fake_handle_message(event):
+            handled.append(event)
+
+        monkeypatch.setattr(adapter, "_api_post", fake_api_post)
+        monkeypatch.setattr(adapter, "handle_message", fake_handle_message)
+        payload = _dm_payload(guid=None, text="not used for reconciliation")
+        payload["data"].pop("guid")
+        payload["data"]["originalROWID"] = 42
+        payload["data"]["dateCreated"] = 1785350000000
+        await adapter._handle_webhook(_FakeBlueBubblesRequest(payload))
+        await _drain_bluebubbles_tasks(adapter)
+
+        assert [event.message_id for event in handled] == ["reconciled-guid"]
+        assert api_queries[0][0] == "/api/v1/message/query"
+        assert "not used for reconciliation" not in json.dumps(api_queries)
+
+    @pytest.mark.asyncio
+    async def test_unreconcilable_missing_guid_fails_closed_but_later_valid_dispatches(
+        self, monkeypatch,
+    ):
+        adapter = _make_adapter(monkeypatch)
+        handled = []
+
+        async def empty_query(_path, _payload):
+            return {"data": []}
+
+        async def fake_handle_message(event):
+            handled.append(event)
+
+        monkeypatch.setattr(adapter, "_api_post", empty_query)
+        monkeypatch.setattr(adapter, "handle_message", fake_handle_message)
+        missing = _dm_payload(guid=None, text="missing")
+        missing["data"].pop("guid")
+        response = await adapter._handle_webhook(
+            _FakeBlueBubblesRequest(missing)
+        )
+        await _drain_bluebubbles_tasks(adapter)
+        assert response.status == 202
+        assert handled == []
+
+        await adapter._handle_webhook(
+            _FakeBlueBubblesRequest(
+                _dm_payload(guid="later-valid-guid", text="valid")
+            )
+        )
+        await _drain_bluebubbles_tasks(adapter)
+        assert [event.message_id for event in handled] == ["later-valid-guid"]
 
 
 class TestBlueBubblesGuidResolution:
@@ -436,5 +847,4 @@ class TestBlueBubblesWebhookRegistration:
         )
         assert ok is True
         assert len(deleted_ids) == 2
-
 

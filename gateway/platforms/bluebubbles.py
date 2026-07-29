@@ -17,6 +17,7 @@ import time
 import uuid
 from collections import OrderedDict
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
@@ -34,6 +35,9 @@ from gateway.platforms.base import (
 )
 from .media_cache import ext_for_mime
 from gateway.platforms.helpers import compile_mention_patterns, strip_markdown
+from gateway.platforms.bluebubbles_inbound_ledger import (
+    BlueBubblesInboundLedger,
+)
 
 # Historical BlueBubbles mime→ext maps, preserved verbatim as overrides for
 # the shared dispatch in gateway.platforms.media_cache. Both maps are
@@ -79,7 +83,6 @@ def _get_scoped_secret(name, default=None):
     except _UnscopedSecretError:
         val = os.getenv(name)
     return val if val is not None else default
-
 
 logger = logging.getLogger(__name__)
 
@@ -213,6 +216,14 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         self._helper_connected: bool = False
         self._guid_cache: OrderedDict[str, str] = OrderedDict()
         self._owns_webhook_registration = False
+        self._server_identity = self._value(extra.get("_server_identity"))
+        ledger_path = extra.get("_inbound_ledger_path")
+        self._inbound_ledger = BlueBubblesInboundLedger(
+            Path(ledger_path) if ledger_path else None
+        )
+        coalesce = extra.get("_inbound_coalesce_seconds", 0.15)
+        self._inbound_coalesce_seconds = max(0.0, float(coalesce))
+        self._pending_inbound_tasks: Dict[str, asyncio.Task] = {}
 
     # ------------------------------------------------------------------
     # API helpers
@@ -293,6 +304,14 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             server_data = (info or {}).get("data", {})
             self._private_api_enabled = bool(server_data.get("private_api"))
             self._helper_connected = bool(server_data.get("helper_connected"))
+            discovered_identity = self._value(
+                server_data.get("computer_id"),
+                server_data.get("computerId"),
+                server_data.get("server_id"),
+                server_data.get("serverId"),
+            )
+            if discovered_identity:
+                self._server_identity = discovered_identity
             logger.info(
                 "[bluebubbles] connected to %s (private_api=%s, helper=%s)",
                 self.server_url,
@@ -312,6 +331,16 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             self._mark_connected()
             logger.info("[bluebubbles] outbound-only transport connected")
             return True
+
+        if not self._server_identity:
+            logger.error(
+                "[bluebubbles] server info did not provide a stable server identity; "
+                "refusing inbound webhook startup"
+            )
+            if self.client:
+                await self.client.aclose()
+                self.client = None
+            return False
 
         from aiohttp import web
 
@@ -970,10 +999,14 @@ class BlueBubblesAdapter(BasePlatformAdapter):
     ) -> Optional[Dict[str, Any]]:
         data = payload.get("data")
         if isinstance(data, dict):
+            if isinstance(data.get("message"), dict):
+                return data["message"]
             return data
         if isinstance(data, list):
             for item in data:
                 if isinstance(item, dict):
+                    if isinstance(item.get("message"), dict):
+                        return item["message"]
                     return item
         if isinstance(payload.get("message"), dict):
             return payload.get("message")
@@ -985,6 +1018,313 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             if isinstance(candidate, str) and candidate.strip():
                 return candidate.strip()
         return None
+
+    def _extract_message_guid(
+        self,
+        payload: Dict[str, Any],
+        record: Dict[str, Any],
+    ) -> Optional[str]:
+        explicit = self._value(
+            record.get("messageGuid"),
+            record.get("message_guid"),
+            record.get("guid"),
+            payload.get("messageGuid"),
+            payload.get("message_guid"),
+        )
+        if explicit:
+            return explicit
+        record_id = record.get("id")
+        if isinstance(record_id, str) and not record_id.isdigit():
+            explicit = record_id.strip()
+            if explicit:
+                return explicit
+        message = payload.get("message")
+        if isinstance(message, dict):
+            explicit = self._value(
+                message.get("messageGuid"),
+                message.get("message_guid"),
+                message.get("guid"),
+            )
+            if explicit:
+                return explicit
+        data = payload.get("data")
+        candidates = data if isinstance(data, list) else [data]
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            nested = item.get("message")
+            if isinstance(nested, dict):
+                explicit = self._value(
+                    nested.get("messageGuid"),
+                    nested.get("message_guid"),
+                    nested.get("guid"),
+                )
+                if explicit:
+                    return explicit
+        return None
+
+    @staticmethod
+    def _canonical_address(value: Optional[str]) -> Optional[str]:
+        if not value:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        if "@" in text:
+            return text.casefold()
+        digits = re.sub(r"\D", "", text)
+        if not digits:
+            return text
+        if text.startswith("+"):
+            return f"+{digits}"
+        if len(digits) == 11 and digits.startswith("1"):
+            return f"+{digits}"
+        if len(digits) == 10:
+            return f"+1{digits}"
+        return f"+{digits}"
+
+    def _routing_fields(
+        self,
+        payload: Dict[str, Any],
+        record: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        chat_guid = self._value(
+            record.get("chatGuid"),
+            payload.get("chatGuid"),
+            record.get("chat_guid"),
+            payload.get("chat_guid"),
+        )
+        chats = record.get("chats") or []
+        if not chat_guid and chats and isinstance(chats[0], dict):
+            chat_guid = self._value(
+                chats[0].get("guid"),
+                chats[0].get("chatGuid"),
+            )
+        chat_identifier = self._value(
+            record.get("chatIdentifier"),
+            record.get("identifier"),
+            payload.get("chatIdentifier"),
+            payload.get("identifier"),
+        )
+        if not chat_identifier and chats and isinstance(chats[0], dict):
+            chat_identifier = self._value(
+                chats[0].get("chatIdentifier"),
+                chats[0].get("identifier"),
+            )
+        sender = (
+            self._value(
+                record.get("handle", {}).get("address")
+                if isinstance(record.get("handle"), dict)
+                else None,
+                record.get("sender"),
+                record.get("from"),
+                record.get("address"),
+            )
+            or chat_identifier
+        )
+        is_group = bool(record.get("isGroup")) or (";+;" in (chat_guid or ""))
+        if not is_group:
+            guid_participant = None
+            if chat_guid and ";-;" in chat_guid:
+                guid_participant = chat_guid.split(";-;", 1)[1]
+            sender = sender or guid_participant
+            stable_chat_id = self._canonical_address(
+                sender or chat_identifier or guid_participant
+            )
+        else:
+            stable_chat_id = chat_guid or chat_identifier
+        return {
+            "chat_guid": chat_guid,
+            "chat_identifier": chat_identifier,
+            "sender": sender,
+            "stable_chat_id": stable_chat_id,
+            "is_group": is_group,
+        }
+
+    @staticmethod
+    def _row_id(record: Dict[str, Any]) -> Optional[int]:
+        for key in ("originalROWID", "originalRowId", "rowid", "rowId", "id"):
+            value = record.get(key)
+            if isinstance(value, int):
+                return value
+            if isinstance(value, str) and value.isdigit():
+                return int(value)
+        return None
+
+    async def _reconcile_message_guid(
+        self,
+        payload: Dict[str, Any],
+        record: Dict[str, Any],
+    ) -> Optional[str]:
+        row_id = self._row_id(record)
+        created = record.get("dateCreated") or record.get("date_created")
+        routing = self._routing_fields(payload, record)
+        query: Dict[str, Any] = {
+            "limit": 50,
+            "offset": 0,
+            "sort": "DESC",
+            "with": ["chats", "handle"],
+        }
+        if row_id is not None:
+            query["where"] = [
+                {
+                    "statement": "message.ROWID = :rowid",
+                    "args": {"rowid": row_id},
+                }
+            ]
+        try:
+            response = await self._api_post("/api/v1/message/query", query)
+        except Exception as exc:
+            logger.warning(
+                "[bluebubbles] message GUID reconciliation failed: %s",
+                exc,
+            )
+            return None
+
+        matches: List[str] = []
+        for candidate in response.get("data", []) or []:
+            if not isinstance(candidate, dict):
+                continue
+            candidate_guid = self._value(
+                candidate.get("messageGuid"),
+                candidate.get("message_guid"),
+                candidate.get("guid"),
+            )
+            if not candidate_guid:
+                continue
+            candidate_row = self._row_id(candidate)
+            if row_id is not None:
+                if candidate_row == row_id:
+                    matches.append(candidate_guid)
+                continue
+            candidate_created = (
+                candidate.get("dateCreated") or candidate.get("date_created")
+            )
+            if created is None or candidate_created != created:
+                continue
+            candidate_routing = self._routing_fields(payload, candidate)
+            same_sender = (
+                self._canonical_address(candidate_routing.get("sender"))
+                == self._canonical_address(routing.get("sender"))
+            )
+            same_chat = (
+                candidate_routing.get("stable_chat_id")
+                == routing.get("stable_chat_id")
+            )
+            if same_sender and same_chat:
+                matches.append(candidate_guid)
+        unique = list(dict.fromkeys(matches))
+        return unique[0] if len(unique) == 1 else None
+
+    async def _build_inbound_event(
+        self,
+        payload: Dict[str, Any],
+        message_guid: str,
+    ) -> Optional[MessageEvent]:
+        record = self._extract_payload_record(payload) or {}
+        text = (
+            self._value(
+                record.get("text"), record.get("message"), record.get("body")
+            )
+            or ""
+        )
+        attachments = record.get("attachments") or []
+        media_urls: List[str] = []
+        media_types: List[str] = []
+        msg_type = MessageType.TEXT
+        for att in attachments:
+            if not isinstance(att, dict):
+                continue
+            att_guid = self._value(
+                att.get("guid"),
+                att.get("attachmentGuid"),
+            )
+            if not att_guid:
+                continue
+            cached = await self._download_attachment(att_guid, att)
+            if not cached:
+                continue
+            mime = (att.get("mimeType") or "").lower()
+            media_urls.append(cached)
+            media_types.append(mime)
+            if mime.startswith("image/"):
+                msg_type = MessageType.PHOTO
+            elif mime.startswith("audio/") or (att.get("uti") or "").endswith(
+                "caf"
+            ):
+                msg_type = MessageType.VOICE
+            elif mime.startswith("video/"):
+                msg_type = MessageType.VIDEO
+            else:
+                msg_type = MessageType.DOCUMENT
+        if len(media_urls) > 1 and any(
+            mime.startswith("image/") for mime in media_types
+        ):
+            msg_type = MessageType.PHOTO
+        if not text and media_urls:
+            text = "(attachment)"
+
+        routing = self._routing_fields(payload, record)
+        sender = routing["sender"]
+        stable_chat_id = routing["stable_chat_id"]
+        if not sender or not stable_chat_id or not text:
+            return None
+        if routing["is_group"] and self.require_mention:
+            if not self._message_matches_mention_patterns(text):
+                return None
+            text = self._clean_mention_text(text)
+        source = self.build_source(
+            chat_id=stable_chat_id,
+            chat_name=routing["chat_identifier"] or sender,
+            chat_type="group" if routing["is_group"] else "dm",
+            user_id=self._canonical_address(sender) or sender,
+            user_name=sender,
+            chat_id_alt=routing["chat_guid"],
+        )
+        return MessageEvent(
+            text=text,
+            message_type=msg_type,
+            source=source,
+            raw_message=payload,
+            message_id=message_guid,
+            reply_to_message_id=self._value(
+                record.get("threadOriginatorGuid"),
+                record.get("associatedMessageGuid"),
+            ),
+            media_urls=media_urls,
+            media_types=media_types,
+            metadata={"bluebubbles_raw_chat_guid": routing["chat_guid"]},
+        )
+
+    async def _dispatch_pending_inbound(self, key: str) -> None:
+        try:
+            await asyncio.sleep(self._inbound_coalesce_seconds)
+            claimed = self._inbound_ledger.claim_for_dispatch(key)
+            if claimed is None:
+                return
+            event = await self._build_inbound_event(
+                claimed["payload"],
+                claimed["message_guid"],
+            )
+            if event is None:
+                self._inbound_ledger.mark_failed(
+                    key,
+                    "claimed payload could not produce a message event",
+                )
+                return
+            await self.handle_message(event)
+            self._inbound_ledger.mark_completed(key)
+            if self.send_read_receipts:
+                asyncio.create_task(self.mark_read(event.source.chat_id))
+        except Exception as exc:
+            self._inbound_ledger.mark_failed(key, str(exc))
+            logger.error(
+                "[bluebubbles] inbound dispatch failed: %s",
+                exc,
+                exc_info=True,
+            )
+        finally:
+            self._pending_inbound_tasks.pop(key, None)
 
     async def _handle_webhook(self, request):
         from aiohttp import web
@@ -1040,125 +1380,51 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         }:
             return web.Response(text="ok")
 
-        text = (
-            self._value(
-                record.get("text"), record.get("message"), record.get("body")
+        message_guid = self._extract_message_guid(payload, record)
+        if not message_guid:
+            message_guid = await self._reconcile_message_guid(payload, record)
+        if not message_guid:
+            logger.warning(
+                "[bluebubbles] inbound message has no reconcilable GUID; "
+                "acknowledging without dispatch"
             )
-            or ""
-        )
-
-        # --- Inbound attachment handling ---
-        attachments = record.get("attachments") or []
-        media_urls: List[str] = []
-        media_types: List[str] = []
-        msg_type = MessageType.TEXT
-
-        for att in attachments:
-            att_guid = att.get("guid", "")
-            if not att_guid:
-                continue
-            cached = await self._download_attachment(att_guid, att)
-            if cached:
-                mime = (att.get("mimeType") or "").lower()
-                media_urls.append(cached)
-                media_types.append(mime)
-                if mime.startswith("image/"):
-                    msg_type = MessageType.PHOTO
-                elif mime.startswith("audio/") or (att.get("uti") or "").endswith(
-                    "caf"
-                ):
-                    msg_type = MessageType.VOICE
-                elif mime.startswith("video/"):
-                    msg_type = MessageType.VIDEO
-                else:
-                    msg_type = MessageType.DOCUMENT
-
-        # With multiple attachments, prefer PHOTO if any images present
-        if len(media_urls) > 1:
-            mime_prefixes = {(m or "").split("/")[0] for m in media_types}
-            if "image" in mime_prefixes:
-                msg_type = MessageType.PHOTO
-
-        if not text and media_urls:
-            text = "(attachment)"
-        # --- End attachment handling ---
-
-        chat_guid = self._value(
-            record.get("chatGuid"),
-            payload.get("chatGuid"),
-            record.get("chat_guid"),
-            payload.get("chat_guid"),
-            payload.get("guid"),
-        )
-        # Fallback: BlueBubbles v1.9+ webhook payloads omit top-level chatGuid;
-        # the chat GUID is nested under data.chats[0].guid instead.
-        if not chat_guid:
-            _chats = record.get("chats") or []
-            if _chats and isinstance(_chats[0], dict):
-                chat_guid = _chats[0].get("guid") or _chats[0].get("chatGuid")
-        chat_identifier = self._value(
-            record.get("chatIdentifier"),
-            record.get("identifier"),
-            payload.get("chatIdentifier"),
-            payload.get("identifier"),
-        )
-        sender = (
-            self._value(
-                record.get("handle", {}).get("address")
-                if isinstance(record.get("handle"), dict)
-                else None,
-                record.get("sender"),
-                record.get("from"),
-                record.get("address"),
+            return web.json_response(
+                {"status": "pending_guid_reconciliation"},
+                status=202,
             )
-            or chat_identifier
-            or chat_guid
-        )
-        if not (chat_guid or chat_identifier) and sender:
-            chat_identifier = sender
-        if not sender or not (chat_guid or chat_identifier) or not text:
-            return web.json_response({"error": "missing message fields"}, status=400)
+        if not self._server_identity:
+            logger.error(
+                "[bluebubbles] inbound message cannot be claimed without "
+                "stable server identity"
+            )
+            return web.json_response(
+                {"status": "missing_server_identity"},
+                status=503,
+            )
 
-        session_chat_id = chat_guid or chat_identifier
-        is_group = bool(record.get("isGroup")) or (";+;" in (chat_guid or ""))
-        if is_group and self.require_mention:
-            if not self._message_matches_mention_patterns(text):
-                logger.debug(
-                    "[bluebubbles] ignoring group message (require_mention=true, no mention pattern matched)"
-                )
-                return web.Response(text="ok")
-            text = self._clean_mention_text(text)
-        source = self.build_source(
-            chat_id=session_chat_id,
-            chat_name=chat_identifier or sender,
-            chat_type="group" if is_group else "dm",
-            user_id=sender,
-            user_name=sender,
-            chat_id_alt=chat_identifier,
+        routing = self._routing_fields(payload, record)
+        claim = self._inbound_ledger.claim_or_merge(
+            server_identity=self._server_identity,
+            message_guid=message_guid,
+            payload=payload,
+            event_type=event_type,
+            stable_chat_id=routing["stable_chat_id"],
+            raw_chat_guid=routing["chat_guid"],
         )
-        event = MessageEvent(
-            text=text,
-            message_type=msg_type,
-            source=source,
-            raw_message=payload,
-            message_id=self._value(
-                record.get("guid"),
-                record.get("messageGuid"),
-                record.get("id"),
-            ),
-            reply_to_message_id=self._value(
-                record.get("threadOriginatorGuid"),
-                record.get("associatedMessageGuid"),
-            ),
-            media_urls=media_urls,
-            media_types=media_types,
-        )
-        task = asyncio.create_task(self.handle_message(event))
-        self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
-
-        # Fire-and-forget read receipt
-        if self.send_read_receipts and session_chat_id:
-            asyncio.create_task(self.mark_read(session_chat_id))
+        if claim.action == "invalid":
+            return web.json_response(
+                {"error": "missing stable chat identity"},
+                status=400,
+            )
+        if (
+            claim.action in {"claimed", "merged"}
+            and claim.key not in self._pending_inbound_tasks
+        ):
+            task = asyncio.create_task(
+                self._dispatch_pending_inbound(claim.key)
+            )
+            self._pending_inbound_tasks[claim.key] = task
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
 
         return web.Response(text="ok")
