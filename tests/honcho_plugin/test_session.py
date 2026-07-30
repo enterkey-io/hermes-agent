@@ -7,6 +7,8 @@ from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from plugins.memory.honcho.client import HonchoClientConfig
 from plugins.memory.honcho.session import (
     HonchoSession,
@@ -136,11 +138,11 @@ class TestManagerCacheOps:
 
 
 class TestProfileSessionIsolation:
-    def test_foreign_looking_session_key_is_prefixed_before_honcho_lookup(self):
+    def test_unprefixed_session_key_is_prefixed_before_honcho_lookup(self):
         config = HonchoClientConfig(
-            host="hermes_grace",
-            peer_name="elliott-grace-private-synthetic",
-            ai_peer="grace-private-synthetic",
+            host="hermes_alpha",
+            peer_name="elliott-alpha-private-synthetic",
+            ai_peer="alpha-private-synthetic",
             session_peer_prefix=True,
             isolate_peer_tools=True,
             write_frequency="session",
@@ -156,11 +158,36 @@ class TestProfileSessionIsolation:
             "honcho",
             new_callable=lambda: property(lambda self: honcho_client),
         ):
-            local = manager.get_or_create("xenia-foreign-session")
+            local = manager.get_or_create("neutral-session")
 
-        expected = "elliott-grace-private-synthetic-xenia-foreign-session"
+        expected = "elliott-alpha-private-synthetic-neutral-session"
         assert local.honcho_session_id == expected
         honcho_client.session.assert_called_once_with(expected)
+
+    def test_explicit_foreign_session_prefix_is_rejected_before_honcho_lookup(self):
+        config = HonchoClientConfig(
+            host="hermes_alpha",
+            peer_name="elliott-alpha-private-synthetic",
+            ai_peer="alpha-private-synthetic",
+            session_peer_prefix=True,
+            isolate_peer_tools=True,
+            write_frequency="session",
+        )
+        honcho_client = MagicMock()
+        manager = HonchoSessionManager(honcho=honcho_client, config=config)
+
+        with patch.object(
+            HonchoSessionManager,
+            "honcho",
+            new_callable=lambda: property(lambda self: honcho_client),
+        ):
+            with pytest.raises(ValueError, match="foreign Honcho session"):
+                manager.get_or_create(
+                    "elliott-beta-private-synthetic-foreign-session"
+                )
+
+        honcho_client.peer.assert_not_called()
+        honcho_client.session.assert_not_called()
 
 
 class TestPeerLookupHelpers:
@@ -1531,25 +1558,25 @@ class TestPeerToolIsolation:
         session = HonchoSession(
             key="test",
             honcho_session_id="sid",
-            user_peer_id="elliott-alina",
-            assistant_peer_id="alina",
+            user_peer_id="owner-alpha",
+            assistant_peer_id="ai-alpha",
         )
         return mgr, session
 
     def test_isolated_profile_resolves_builtin_aliases(self):
         mgr, session = self._manager(isolated=True)
 
-        assert mgr._resolve_peer_id(session, "user") == "elliott-alina"
-        assert mgr._resolve_peer_id(session, "ai") == "alina"
+        assert mgr._resolve_peer_id(session, "user") == "owner-alpha"
+        assert mgr._resolve_peer_id(session, "ai") == "ai-alpha"
 
     def test_isolated_profile_rejects_explicit_peer_ids(self):
         mgr, session = self._manager(isolated=True)
 
-        assert mgr._resolve_peer_id(session, "elliott") is None
-        assert mgr._resolve_peer_id(session, "elliott-grace") is None
-        assert mgr._resolve_peer_id(session, "grace") is None
+        assert mgr._resolve_peer_id(session, "owner-beta") is None
+        assert mgr._resolve_peer_id(session, "ai-beta") is None
+        assert mgr._resolve_peer_id(session, "neutral-foreign-peer") is None
 
     def test_legacy_profile_preserves_explicit_peer_behavior(self):
         mgr, session = self._manager(isolated=False)
 
-        assert mgr._resolve_peer_id(session, "elliott-grace") == "elliott-grace"
+        assert mgr._resolve_peer_id(session, "owner-beta") == "owner-beta"

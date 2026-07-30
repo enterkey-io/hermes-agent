@@ -719,3 +719,30 @@ class TestProfilePeerUniqueness:
             "Profiles pinned to distinct peer names must not collapse to "
             "the same Honcho peer — otherwise profile isolation is fictional."
         )
+
+    def test_host_peer_name_overrides_root_when_pinned(self, tmp_path, monkeypatch):
+        """Host-level peerName wins so each profile can pin uniquely while
+        sharing a single root-level apiKey and workspace.
+        """
+        config_file = tmp_path / "honcho.json"
+        config_file.write_text(json.dumps({
+            "apiKey": "k",
+            "peerName": "default-user",
+            "hosts": {
+                "hermes_partner": {
+                    "peerName": "partner-user",
+                    "pinPeerName": True,
+                },
+            },
+        }))
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "isolated"))
+        monkeypatch.setattr(
+            "plugins.memory.honcho.client._active_profile_name",
+            lambda: "partner",
+        )
+
+        cfg = HonchoClientConfig.from_global_config(
+            host="hermes_partner", config_path=config_file,
+        )
+        assert cfg.peer_name == "partner-user"
+        assert cfg.pin_peer_name is True

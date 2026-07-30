@@ -18,6 +18,7 @@ import os
 import logging
 import hashlib
 import ipaddress
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
@@ -34,14 +35,16 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 HOST = "hermes"
+_PROFILE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 
 def profile_host_key(profile: str | None) -> str:
-    """Return the safe Honcho host key for a Hermes profile."""
+    """Return the canonical Honcho host key for a Hermes profile."""
     if not profile or profile in {"default", "custom"}:
         return HOST
-    sanitized = "".join(c if c.isalnum() or c in "_-" else "_" for c in profile).strip("_")
-    return f"{HOST}_{sanitized or 'profile'}"
+    if not _PROFILE_ID_RE.fullmatch(profile):
+        raise ValueError(f"invalid profile name: {profile!r}")
+    return f"{HOST}_{profile}"
 
 
 def _active_profile_name() -> str:
@@ -57,15 +60,11 @@ def _active_profile_name() -> str:
 def _validate_profile_host(
     host: str,
     profile: str | None = None,
-    *,
-    allow_custom_legacy: bool = False,
 ) -> str:
     """Reject a host that is outside the current profile's Honcho namespace."""
     active_profile = profile or _active_profile_name()
     allowed = profile_host_key(active_profile)
     if host != allowed:
-        if allow_custom_legacy and host.startswith("hermes."):
-            return host
         raise ValueError(
             f"Honcho host {host!r} is not allowed for profile {active_profile!r}; "
             f"expected {allowed!r}"
@@ -521,22 +520,7 @@ class HonchoClientConfig:
             return cls.from_env(host=resolved_host)
 
         if host:
-            active_profile = _active_profile_name()
-            try:
-                native_root = (Path.home() / ".hermes").resolve()
-                current_home = get_hermes_home().resolve()
-                custom_root = not current_home.is_relative_to(native_root)
-            except (OSError, ValueError):
-                custom_root = False
-            _validate_profile_host(
-                host,
-                allow_custom_legacy=(
-                    active_profile == "default"
-                    and custom_root
-                    and bool(_host_block(raw, host))
-                    and host.startswith("hermes.")
-                ),
-            )
+            _validate_profile_host(host)
 
         host_block = _host_block(raw, resolved_host)
         # A hosts.hermes block or explicit enabled flag means the user
@@ -896,6 +880,7 @@ class HonchoClientConfig:
 
 _honcho_client_slot: SingletonSlot = SingletonSlot()
 _cached_timeout: float | None = None
+_cached_host: str | None = None
 # Memo for the honcho.json-derived timeout, keyed on the file's mtime_ns so
 # the staleness check on every get_honcho_client() call costs one stat()
 # instead of a JSON parse. mtime -1 = file absent; (None, None) = not yet
@@ -1014,10 +999,19 @@ def get_honcho_client(config: HonchoClientConfig | None = None) -> Honcho:
     first calls (double-checked locking via ``SingletonSlot``), so racing
     threads can't each construct a client and leak the loser's connection.
     """
-    global _cached_timeout
-    if config is not None:
+    global _cached_host, _cached_timeout
+    active_host = resolve_active_host()
+    requested_host = (
         _validate_profile_host(config.host)
+        if config is not None
+        else active_host
+    )
     cached = _honcho_client_slot.peek()
+    if cached is not None and _cached_host != requested_host:
+        _honcho_client_slot.reset()
+        _cached_host = None
+        _cached_timeout = None
+        cached = None
     if cached is not None:
         # Detect timeout config changes in long-lived processes (gateway,
         # dashboard).  If the user changed the timeout after the client was
@@ -1025,6 +1019,7 @@ def get_honcho_client(config: HonchoClientConfig | None = None) -> Honcho:
         new_timeout = _resolve_timeout_from_sources(config)
         if new_timeout != _cached_timeout:
             _honcho_client_slot.reset()
+            _cached_host = None
             _cached_timeout = None
             cached = None
         else:
@@ -1140,7 +1135,8 @@ def get_honcho_client(config: HonchoClientConfig | None = None) -> Honcho:
         if resolved_timeout is not None:
             kwargs["timeout"] = resolved_timeout
 
-        global _cached_timeout
+        global _cached_host, _cached_timeout
+        _cached_host = config.host
         _cached_timeout = resolved_timeout
         return Honcho(**kwargs)
 
@@ -1149,7 +1145,8 @@ def get_honcho_client(config: HonchoClientConfig | None = None) -> Honcho:
 
 def reset_honcho_client() -> None:
     """Reset the Honcho client singleton (useful for testing)."""
-    global _cached_timeout, _honcho_json_timeout_memo
+    global _cached_host, _cached_timeout, _honcho_json_timeout_memo
     _honcho_client_slot.reset()
+    _cached_host = None
     _cached_timeout = None
     _honcho_json_timeout_memo = (None, None)

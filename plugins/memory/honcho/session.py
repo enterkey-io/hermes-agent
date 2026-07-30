@@ -593,6 +593,17 @@ class HonchoSessionManager:
             return session_id
         peer_name = self._sanitize_id(str(self._config.peer_name or "").strip())
         if (
+            session_id.startswith("elliott-")
+            and "-private-" in session_id
+            and peer_name
+            and session_id != peer_name
+            and not session_id.startswith(f"{peer_name}-")
+        ):
+            raise ValueError(
+                f"foreign Honcho session {session_id!r} is not allowed for "
+                f"peer {peer_name!r}"
+            )
+        if (
             not peer_name
             or session_id == peer_name
             or session_id.startswith(f"{peer_name}-")

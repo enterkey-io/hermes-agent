@@ -375,6 +375,26 @@ class TestProfileScopedConfig:
                     host="hermes_alina", config_path=config_file,
                 )
 
+    def test_custom_root_rejects_configured_legacy_explicit_host(
+        self, tmp_path, monkeypatch,
+    ):
+        config_file = tmp_path / "honcho.json"
+        config_file.write_text(json.dumps({
+            "apiKey": "neutral-key",
+            "hosts": {
+                "hermes.beta": {
+                    "peerName": "foreign-beta-owner",
+                    "aiPeer": "foreign-beta-ai",
+                }
+            },
+        }))
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "isolated"))
+
+        with pytest.raises(ValueError, match="not allowed for profile 'default'"):
+            HonchoClientConfig.from_global_config(
+                host="hermes.beta", config_path=config_file,
+            )
+
     def test_from_global_config_auto_resolves_host(self, tmp_path):
         config_file = tmp_path / "config.json"
         config_file.write_text(json.dumps({
@@ -452,6 +472,89 @@ class TestObservationModeMigration:
 class TestGetHonchoClient:
     def teardown_method(self):
         reset_honcho_client()
+
+    @pytest.mark.skipif(
+        not importlib.util.find_spec("honcho"),
+        reason="honcho SDK not installed"
+    )
+    def test_cached_client_rebuilds_after_active_profile_switch(
+        self, tmp_path, monkeypatch,
+    ):
+        current = {"profile": "alpha"}
+        config_paths = {}
+        for profile in ("alpha", "beta"):
+            path = tmp_path / profile / "honcho.json"
+            path.parent.mkdir()
+            path.write_text(json.dumps({
+                "apiKey": "neutral-key",
+                "hosts": {
+                    f"hermes_{profile}": {
+                        "workspace": "hermes",
+                        "peerName": f"owner-{profile}",
+                        "aiPeer": f"ai-{profile}",
+                    }
+                },
+            }))
+            config_paths[profile] = path
+        monkeypatch.delenv("HERMES_HONCHO_HOST", raising=False)
+        first_client = MagicMock(name="alpha-client")
+        second_client = MagicMock(name="beta-client")
+
+        with patch(
+            "hermes_cli.profiles.get_active_profile_name",
+            side_effect=lambda: current["profile"],
+        ), patch(
+            "plugins.memory.honcho.client.resolve_config_path",
+            side_effect=lambda: config_paths[current["profile"]],
+        ), patch(
+            "honcho.Honcho",
+            side_effect=[first_client, second_client],
+        ) as sdk:
+            first = get_honcho_client()
+            current["profile"] = "beta"
+            second = get_honcho_client()
+
+        assert first is first_client
+        assert second is second_client
+        assert sdk.call_count == 2
+        assert sdk.call_args_list[0].kwargs["workspace_id"] == "hermes"
+        assert sdk.call_args_list[1].kwargs["workspace_id"] == "hermes"
+
+    @pytest.mark.skipif(
+        not importlib.util.find_spec("honcho"),
+        reason="honcho SDK not installed"
+    )
+    def test_cached_client_rejects_later_foreign_host_override(
+        self, tmp_path, monkeypatch,
+    ):
+        config_file = tmp_path / "honcho.json"
+        config_file.write_text(json.dumps({
+            "apiKey": "neutral-key",
+            "hosts": {
+                "hermes_alpha": {
+                    "workspace": "hermes",
+                    "peerName": "owner-alpha",
+                    "aiPeer": "ai-alpha",
+                }
+            },
+        }))
+        monkeypatch.delenv("HERMES_HONCHO_HOST", raising=False)
+        cached_client = MagicMock(name="alpha-client")
+
+        with patch(
+            "hermes_cli.profiles.get_active_profile_name",
+            return_value="alpha",
+        ), patch(
+            "plugins.memory.honcho.client.resolve_config_path",
+            return_value=config_file,
+        ), patch("honcho.Honcho", return_value=cached_client) as sdk:
+            config = HonchoClientConfig.from_global_config()
+            assert get_honcho_client(config) is cached_client
+            monkeypatch.setenv("HERMES_HONCHO_HOST", "hermes_beta")
+            with pytest.raises(ValueError, match="not allowed for profile 'alpha'"):
+                get_honcho_client(config)
+
+        sdk.assert_called_once()
 
     @pytest.mark.skipif(
         not importlib.util.find_spec("honcho"),
