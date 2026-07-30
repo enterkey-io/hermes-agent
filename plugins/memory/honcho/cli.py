@@ -106,6 +106,13 @@ def clone_honcho_for_profile(profile_name: str) -> bool:
     cfg.setdefault("hosts", {})[new_host] = new_block
     _write_config(cfg)
 
+    # Runtime reads are profile-local. Keep the shared inventory block for
+    # status/compatibility, and provision a bounded target-local config.
+    target_context = _target_profile_context(profile_name)
+    target_cfg = dict(cfg)
+    target_cfg["hosts"] = {new_host: dict(new_block)}
+    _write_config(target_cfg, target_context.root / "honcho.json")
+
     # Eagerly create the peer in Honcho so it exists before first message
     _ensure_peer_exists(new_host)
     return True

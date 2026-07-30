@@ -380,11 +380,12 @@ class TestTargetProfileContext:
         config_path.write_text(json.dumps(initial))
         monkeypatch.setattr(honcho_cli, "_profile_override", None)
         monkeypatch.setattr(honcho_cli, "_read_config", lambda: initial)
-        monkeypatch.setattr(
-            honcho_cli,
-            "_write_config",
-            lambda cfg, path=None: config_path.write_text(json.dumps(cfg)),
-        )
+        def write_config(cfg, path=None):
+            destination = path or config_path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(json.dumps(cfg))
+
+        monkeypatch.setattr(honcho_cli, "_write_config", write_config)
         monkeypatch.setattr(
             "hermes_cli.profiles.resolve_profile_env",
             lambda name: str(alpha_root if name == "alpha" else default_root),
@@ -394,8 +395,8 @@ class TestTargetProfileContext:
         with patch("honcho.Honcho", return_value=client):
             assert honcho_cli.clone_honcho_for_profile("alpha") is True
 
-        written = json.loads(config_path.read_text())
-        assert "hermes_alpha" in written["hosts"]
+        written = json.loads((alpha_root / "honcho.json").read_text())
+        assert set(written["hosts"]) == {"hermes_alpha"}
         assert [call.args[0] for call in client.peer.call_args_list] == [
             "alpha",
             "owner-alpha",
@@ -422,6 +423,20 @@ class TestCloneHonchoForProfile:
         import plugins.memory.honcho.cli as honcho_cli
         cfg_path = tmp_path / "config.json"
         cfg_path.write_text("{}")
+        default_root = tmp_path / "default"
+        default_root.mkdir()
+
+        def resolve_profile(name):
+            if name == "default":
+                return str(default_root)
+            profile_root = default_root / "profiles" / name
+            profile_root.mkdir(parents=True, exist_ok=True)
+            return str(profile_root)
+
+        monkeypatch.setattr(
+            "hermes_cli.profiles.resolve_profile_env",
+            resolve_profile,
+        )
         monkeypatch.setattr(honcho_cli, "_read_config", lambda: cfg)
         monkeypatch.setattr(honcho_cli, "_config_path", lambda: cfg_path)
         monkeypatch.setattr(honcho_cli, "_local_config_path", lambda: cfg_path)
@@ -822,6 +837,13 @@ class TestCloneCarriesPinUserPeer:
         monkeypatch.setattr(honcho_cli, "_config_path", lambda: cfg_path)
         monkeypatch.setattr(honcho_cli, "_local_config_path", lambda: cfg_path)
         monkeypatch.setattr(honcho_cli, "_ensure_peer_exists", lambda host_key=None: True)
+        default_root = tmp_path / "default"
+        partner_root = default_root / "profiles" / "partner"
+        partner_root.mkdir(parents=True)
+        monkeypatch.setattr(
+            "hermes_cli.profiles.resolve_profile_env",
+            lambda name: str(partner_root if name == "partner" else default_root),
+        )
         written = {}
         monkeypatch.setattr(
             honcho_cli, "_write_config", lambda c, path=None: written.setdefault("cfg", c),

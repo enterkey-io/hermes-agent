@@ -202,9 +202,9 @@ class TestResolveConfigPath:
             assert resolve_global_config_path() == fake_home / ".honcho" / "config.json"
             assert resolve_config_path() == fake_home / ".honcho" / "config.json"
 
-    def test_from_global_config_uses_default_profile_fallback(self, tmp_path, monkeypatch):
-        # Profile mode: from_global_config() reads the default-profile honcho.json
-        # via the HOME-anchored helper, not Path.home() / ".hermes".
+    def test_named_profile_does_not_use_default_profile_fallback(
+        self, tmp_path, monkeypatch,
+    ):
         fake_home = tmp_path / "fakehome"
         fake_home.mkdir()
         default_home = fake_home / ".hermes"
@@ -222,8 +222,8 @@ class TestResolveConfigPath:
 
         config = HonchoClientConfig.from_global_config()
 
-        assert config.api_key == "default-key"
-        assert config.workspace_id == "default-ws"
+        assert config.api_key is None
+        assert config.workspace_id == "hermes"
 
     def test_from_global_config_uses_local_path(self, tmp_path):
         hermes_home = tmp_path / "hermes"
@@ -358,15 +358,16 @@ class TestResolveActiveHost:
 
 class TestProfileScopedConfig:
     def test_from_env_uses_profile_host(self, tmp_path):
+        root = tmp_path / "profiles" / "coder"
+        root.mkdir(parents=True)
+        (root / ".env").write_text("HONCHO_API_KEY=key\n")
         context = HonchoProfileContext.for_profile(
-            "coder", tmp_path / "profiles" / "coder"
+            "coder", root
         )
-        with patch.dict(os.environ, {"HONCHO_API_KEY": "key"}), \
-             patch("hermes_cli.profiles.get_active_profile_name", return_value="coder"):
-            config = HonchoClientConfig.from_env(
-                host="hermes_coder",
-                context=context,
-            )
+        config = HonchoClientConfig.from_env(
+            host="hermes_coder",
+            context=context,
+        )
         assert config.host == "hermes_coder"
         assert config.workspace_id == "hermes"  # shared workspace
         assert config.ai_peer == "hermes_coder"
@@ -521,6 +522,150 @@ class TestObservationModeMigration:
 class TestGetHonchoClient:
     def teardown_method(self):
         reset_honcho_client()
+
+    @pytest.mark.skipif(
+        not importlib.util.find_spec("honcho"),
+        reason="honcho SDK not installed"
+    )
+    def test_target_profile_uses_only_context_root_fallbacks(
+        self, tmp_path, monkeypatch,
+    ):
+        default_root = tmp_path / "default"
+        alpha_root = default_root / "profiles" / "alpha"
+        alpha_root.mkdir(parents=True)
+        (default_root / ".env").write_text("HONCHO_API_KEY=default-local-key\n")
+        (default_root / "config.yaml").write_text(
+            "honcho:\n"
+            "  base_url: http://default.invalid:8100\n"
+            "  timeout: 11\n"
+        )
+        (default_root / "honcho.json").write_text(json.dumps({
+            "hosts": {
+                "hermes": {
+                    "workspace": "workspace-default",
+                    "peerName": "owner-default",
+                    "aiPeer": "ai-default",
+                }
+            }
+        }))
+        (alpha_root / ".env").write_text("HONCHO_API_KEY=alpha-local-key\n")
+        (alpha_root / "config.yaml").write_text(
+            "honcho:\n"
+            "  base_url: http://alpha.invalid:8101\n"
+            "  timeout: 71\n"
+        )
+        (alpha_root / "honcho.json").write_text(json.dumps({
+            "hosts": {
+                "hermes_alpha": {
+                    "workspace": "workspace-alpha",
+                    "peerName": "owner-alpha",
+                    "aiPeer": "ai-alpha",
+                }
+            }
+        }))
+        default_context = HonchoProfileContext.for_profile(
+            "default",
+            default_root,
+        )
+        context = HonchoProfileContext.for_profile(
+            "alpha",
+            alpha_root,
+            default_root=default_root,
+        )
+        monkeypatch.setenv("HONCHO_API_KEY", "ambient-default-key")
+        default_client = MagicMock(name="default-client")
+        alpha_client = MagicMock(name="alpha-client")
+
+        with patch(
+            "hermes_cli.config.load_config_readonly",
+            return_value={"honcho": {"timeout": 9}},
+        ), patch(
+            "hermes_cli.config.load_config",
+            return_value={
+                "honcho": {
+                    "base_url": "http://ambient.invalid:8199",
+                    "timeout": 9,
+                }
+            },
+        ), patch(
+            "honcho.Honcho",
+            side_effect=[default_client, alpha_client],
+        ) as sdk:
+            default_config = HonchoClientConfig.from_global_config(
+                context=default_context,
+            )
+            assert get_honcho_client(default_config) is default_client
+            alpha_config = HonchoClientConfig.from_global_config(context=context)
+            assert get_honcho_client(alpha_config) is alpha_client
+
+        assert default_config.api_key == "default-local-key"
+        assert alpha_config.api_key == "alpha-local-key"
+        assert sdk.call_args_list[0].kwargs == {
+            "workspace_id": "workspace-default",
+            "api_key": "default-local-key",
+            "environment": "production",
+            "base_url": "http://default.invalid:8100",
+            "timeout": 11.0,
+        }
+        assert sdk.call_args_list[1].kwargs == {
+            "workspace_id": "workspace-alpha",
+            "api_key": "alpha-local-key",
+            "environment": "production",
+            "base_url": "http://alpha.invalid:8101",
+            "timeout": 71.0,
+        }
+
+    @pytest.mark.parametrize("profile", ["default", "custom"])
+    @pytest.mark.skipif(
+        not importlib.util.find_spec("honcho"),
+        reason="honcho SDK not installed"
+    )
+    def test_explicit_default_and_custom_roots_ignore_ambient_fallbacks(
+        self, tmp_path, monkeypatch, profile,
+    ):
+        root = tmp_path / f"{profile}-root"
+        root.mkdir()
+        (root / ".env").write_text(f"HONCHO_API_KEY={profile}-local-key\n")
+        (root / "config.yaml").write_text(
+            "honcho:\n"
+            f"  base_url: http://{profile}.invalid:8201\n"
+            "  timeout: 82\n"
+        )
+        (root / "honcho.json").write_text(json.dumps({
+            "hosts": {
+                "hermes": {
+                    "workspace": f"workspace-{profile}",
+                    "peerName": f"owner-{profile}",
+                    "aiPeer": f"ai-{profile}",
+                }
+            }
+        }))
+        context = HonchoProfileContext.for_profile(profile, root)
+        monkeypatch.setenv("HONCHO_API_KEY", "ambient-default-key")
+        expected_client = MagicMock(name=f"{profile}-client")
+
+        with patch(
+            "hermes_cli.config.load_config_readonly",
+            return_value={"honcho": {"timeout": 12}},
+        ), patch(
+            "hermes_cli.config.load_config",
+            return_value={
+                "honcho": {
+                    "base_url": "http://ambient.invalid:8200",
+                    "timeout": 12,
+                }
+            },
+        ), patch("honcho.Honcho", return_value=expected_client) as sdk:
+            config = HonchoClientConfig.from_global_config(context=context)
+            client = get_honcho_client(config)
+
+        assert client is expected_client
+        assert config.api_key == f"{profile}-local-key"
+        assert sdk.call_args.kwargs["base_url"] == (
+            f"http://{profile}.invalid:8201"
+        )
+        assert sdk.call_args.kwargs["timeout"] == 82.0
+        assert sdk.call_args.kwargs["api_key"] == f"{profile}-local-key"
 
     @pytest.mark.skipif(
         not importlib.util.find_spec("honcho"),
@@ -738,6 +883,73 @@ class TestGetHonchoClient:
         mock_honcho.assert_called_once()
         assert mock_honcho.call_args.kwargs["timeout"] == 91.0
 
+    @pytest.mark.skipif(
+        not importlib.util.find_spec("honcho"),
+        reason="honcho SDK not installed"
+    )
+    def test_hermes_config_timeout_override_used_when_config_timeout_missing(
+        self, tmp_path,
+    ):
+        fake_honcho = MagicMock(name="Honcho")
+        (tmp_path / "config.yaml").write_text("honcho:\n  timeout: 88\n")
+        cfg = HonchoClientConfig(
+            api_key="test-key",
+            workspace_id="hermes",
+            environment="production",
+            profile_context=HonchoProfileContext.for_profile("custom", tmp_path),
+        )
+
+        with patch("honcho.Honcho", return_value=fake_honcho) as mock_honcho:
+            client = get_honcho_client(cfg)
+
+        assert client is fake_honcho
+        mock_honcho.assert_called_once()
+        assert mock_honcho.call_args.kwargs["timeout"] == 88.0
+
+    @pytest.mark.skipif(
+        not importlib.util.find_spec("honcho"),
+        reason="honcho SDK not installed"
+    )
+    def test_defaults_to_30s_when_no_timeout_configured(self):
+        from plugins.memory.honcho.client import _DEFAULT_HTTP_TIMEOUT
+
+        fake_honcho = MagicMock(name="Honcho")
+        cfg = HonchoClientConfig(
+            api_key="test-key",
+            workspace_id="hermes",
+            environment="production",
+        )
+
+        with patch("honcho.Honcho", return_value=fake_honcho) as mock_honcho, \
+             patch("hermes_cli.config.load_config", return_value={}):
+            client = get_honcho_client(cfg)
+
+        assert client is fake_honcho
+        mock_honcho.assert_called_once()
+        assert mock_honcho.call_args.kwargs["timeout"] == _DEFAULT_HTTP_TIMEOUT
+
+    @pytest.mark.skipif(
+        not importlib.util.find_spec("honcho"),
+        reason="honcho SDK not installed"
+    )
+    def test_hermes_request_timeout_alias_used(self, tmp_path):
+        fake_honcho = MagicMock(name="Honcho")
+        (tmp_path / "config.yaml").write_text(
+            "honcho:\n  request_timeout: 77.5\n"
+        )
+        cfg = HonchoClientConfig(
+            api_key="test-key",
+            workspace_id="hermes",
+            environment="production",
+            profile_context=HonchoProfileContext.for_profile("custom", tmp_path),
+        )
+
+        with patch("honcho.Honcho", return_value=fake_honcho) as mock_honcho:
+            client = get_honcho_client(cfg)
+
+        assert client is fake_honcho
+        mock_honcho.assert_called_once()
+        assert mock_honcho.call_args.kwargs["timeout"] == 77.5
 
     @pytest.mark.skipif(
         not importlib.util.find_spec("honcho"),
@@ -914,7 +1126,7 @@ class TestResetHonchoClient:
     def test_reset_clears_singleton(self):
         import plugins.memory.honcho.client as mod
 
-        cache_key = ("/synthetic", "default", "hermes")
+        cache_key = ("/synthetic", "default", "hermes", False)
         mod._honcho_client_cache[cache_key] = (MagicMock(), 30.0)
         assert mod._honcho_client_cache
         reset_honcho_client()

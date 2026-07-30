@@ -65,6 +65,7 @@ class HonchoProfileContext:
     root: Path
     host: str
     default_root: Path
+    allow_ambient_fallback: bool = False
 
     def __post_init__(self) -> None:
         expected_host = profile_host_key(self.profile)
@@ -98,6 +99,7 @@ class HonchoProfileContext:
         root: Path | str,
         *,
         default_root: Path | str | None = None,
+        allow_ambient_fallback: bool = False,
     ) -> "HonchoProfileContext":
         host = profile_host_key(profile)
         resolved_root = Path(root).expanduser().resolve()
@@ -120,11 +122,17 @@ class HonchoProfileContext:
             root=resolved_root,
             host=host,
             default_root=resolved_default,
+            allow_ambient_fallback=allow_ambient_fallback,
         )
 
     @property
-    def cache_key(self) -> tuple[str, str, str]:
-        return (str(self.root), self.profile, self.host)
+    def cache_key(self) -> tuple[str, str, str, bool]:
+        return (
+            str(self.root),
+            self.profile,
+            self.host,
+            self.allow_ambient_fallback,
+        )
 
 
 def resolve_profile_context() -> HonchoProfileContext:
@@ -134,6 +142,7 @@ def resolve_profile_context() -> HonchoProfileContext:
         profile,
         get_hermes_home(),
         default_root=_get_default_hermes_home(),
+        allow_ambient_fallback=profile == "default",
     )
     explicit = os.environ.get("HERMES_HONCHO_HOST", "").strip()
     if explicit:
@@ -208,6 +217,10 @@ def resolve_config_path(context: HonchoProfileContext | None = None) -> Path:
     if local_path.exists():
         return local_path
 
+    if context is not None:
+        if context.profile != "default" or not context.allow_ambient_fallback:
+            return local_path
+
     # Default profile's config — host blocks accumulate here via setup/clone
     default_path = (
         context.default_root / "honcho.json"
@@ -218,6 +231,85 @@ def resolve_config_path(context: HonchoProfileContext | None = None) -> Path:
         return default_path
 
     return resolve_global_config_path()
+
+
+_HONCHO_ENV_KEYS = (
+    "HONCHO_API_KEY",
+    "HONCHO_BASE_URL",
+    "HONCHO_TIMEOUT",
+    "HONCHO_ENVIRONMENT",
+)
+
+
+def _context_environment(context: HonchoProfileContext) -> dict[str, str]:
+    """Read Honcho environment values from one profile root without mutation."""
+    values: dict[str, str] = {}
+    env_path = context.root / ".env"
+    if env_path.exists():
+        try:
+            from dotenv import dotenv_values
+
+            parsed = dotenv_values(env_path, encoding="utf-8")
+            values.update(
+                {
+                    key: str(value)
+                    for key, value in parsed.items()
+                    if key in _HONCHO_ENV_KEYS and value is not None
+                }
+            )
+        except Exception:
+            logger.warning("Failed to read Honcho environment from %s", env_path)
+    if context.allow_ambient_fallback:
+        for key in _HONCHO_ENV_KEYS:
+            if key in values:
+                continue
+            if key == "HONCHO_API_KEY":
+                value = get_secret(key)
+            else:
+                value = os.environ.get(key)
+            if value is not None:
+                values[key] = value
+    return values
+
+
+def _expand_context_value(value: Any, env: dict[str, str]) -> Any:
+    if not isinstance(value, str):
+        return value
+    match = re.fullmatch(r"\$\{(?:(?:env):)?([A-Za-z_][A-Za-z0-9_]*)\}", value)
+    if match:
+        return env.get(match.group(1), value)
+    return value
+
+
+def _context_honcho_config(
+    context: HonchoProfileContext,
+    env: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Read the Honcho section from this context's config.yaml only."""
+    path = context.root / "config.yaml"
+    try:
+        from utils import fast_safe_load
+
+        raw = (
+            fast_safe_load(path.read_text(encoding="utf-8")) or {}
+            if path.exists()
+            else {}
+        )
+        if context.allow_ambient_fallback:
+            from hermes_cli.managed_scope import apply_managed_overlay
+
+            raw = apply_managed_overlay(raw)
+        honcho = raw.get("honcho", {}) if isinstance(raw, dict) else {}
+        if not isinstance(honcho, dict):
+            return {}
+        context_env = env if env is not None else _context_environment(context)
+        return {
+            str(key): _expand_context_value(value, context_env)
+            for key, value in honcho.items()
+        }
+    except Exception:
+        logger.warning("Failed to read Honcho config from %s", path)
+        return {}
 
 
 _RECALL_MODE_ALIASES = {"auto": "hybrid"}
@@ -591,20 +683,45 @@ class HonchoClientConfig:
                     f"{resolved_context.host!r}"
                 )
         resolved_host = resolved_context.host
-        api_key = get_secret("HONCHO_API_KEY")
-        base_url = os.environ.get("HONCHO_BASE_URL", "").strip() or None
-        timeout = _resolve_optional_float(os.environ.get("HONCHO_TIMEOUT"))
+        context_env = _context_environment(resolved_context)
+        yaml_config = _context_honcho_config(resolved_context, context_env)
+        api_key = (
+            yaml_config.get("apiKey")
+            or yaml_config.get("api_key")
+            or context_env.get("HONCHO_API_KEY")
+        )
+        base_url = (
+            yaml_config.get("baseUrl")
+            or yaml_config.get("base_url")
+            or context_env.get("HONCHO_BASE_URL", "").strip()
+            or None
+        )
+        timeout = _resolve_optional_float(
+            yaml_config.get("timeout"),
+            yaml_config.get("request_timeout"),
+            context_env.get("HONCHO_TIMEOUT"),
+        )
+        resolved_workspace = (
+            yaml_config.get("workspace")
+            or yaml_config.get("workspace_id")
+            or workspace_id
+        )
         return cls(
             host=resolved_host,
             profile_context=resolved_context,
             config_path=config_path,
-            workspace_id=workspace_id,
+            workspace_id=resolved_workspace,
             api_key=api_key,
-            environment=os.environ.get("HONCHO_ENVIRONMENT", "production"),
+            environment=(
+                yaml_config.get("environment")
+                or context_env.get("HONCHO_ENVIRONMENT", "production")
+            ),
             base_url=base_url,
             timeout=timeout,
             ai_peer=resolved_host,
-            enabled=bool(api_key or base_url),
+            enabled=bool(
+                yaml_config.get("enabled", bool(api_key or base_url))
+            ),
         )
 
     @classmethod
@@ -648,6 +765,8 @@ class HonchoClientConfig:
                 config_path=path,
             )
 
+        context_env = _context_environment(resolved_context)
+        yaml_config = _context_honcho_config(resolved_context, context_env)
         host_block = _host_block(raw, resolved_host)
         # A hosts.hermes block or explicit enabled flag means the user
         # intentionally configured Honcho for this host.
@@ -657,6 +776,8 @@ class HonchoClientConfig:
         workspace = (
             host_block.get("workspace")
             or raw.get("workspace")
+            or yaml_config.get("workspace")
+            or yaml_config.get("workspace_id")
             or resolved_host
         )
         ai_peer = (
@@ -667,18 +788,24 @@ class HonchoClientConfig:
         api_key = (
             host_block.get("apiKey")
             or raw.get("apiKey")
-            or get_secret("HONCHO_API_KEY")
+            or yaml_config.get("apiKey")
+            or yaml_config.get("api_key")
+            or context_env.get("HONCHO_API_KEY")
         )
 
         environment = (
             host_block.get("environment")
-            or raw.get("environment", "production")
+            or raw.get("environment")
+            or yaml_config.get("environment")
+            or context_env.get("HONCHO_ENVIRONMENT", "production")
         )
 
         base_url = (
             raw.get("baseUrl")
             or raw.get("base_url")
-            or os.environ.get("HONCHO_BASE_URL", "").strip()
+            or yaml_config.get("baseUrl")
+            or yaml_config.get("base_url")
+            or context_env.get("HONCHO_BASE_URL", "").strip()
             or None
         )
         # Host config wins over flat/global config and environment.
@@ -687,7 +814,9 @@ class HonchoClientConfig:
             host_block.get("requestTimeout"),
             raw.get("timeout"),
             raw.get("requestTimeout"),
-            os.environ.get("HONCHO_TIMEOUT"),
+            yaml_config.get("timeout"),
+            yaml_config.get("request_timeout"),
+            context_env.get("HONCHO_TIMEOUT"),
         )
 
         # Auto-enable when API key or base_url is present (unless explicitly disabled)
@@ -1007,81 +1136,35 @@ class HonchoClientConfig:
 
 
 _honcho_client_cache: dict[
-    tuple[str, str, str],
+    tuple[str, str, str, bool],
     tuple["Honcho", float],
 ] = {}
 _honcho_client_cache_lock = threading.RLock()
-# Memo for the honcho.json-derived timeout, keyed on the file's mtime_ns so
-# the staleness check on every get_honcho_client() call costs one stat()
-# instead of a JSON parse. mtime -1 = file absent; (None, None) = not yet
-# populated. config.yaml needs no such memo: load_config_readonly() is
-# internally cached on both the user and managed files' signatures, and a
-# bespoke key here would have to duplicate that invalidation logic.
-_honcho_json_timeout_memo: tuple[int | None, float | None] = (None, None)
 
 
-def _config_yaml_timeout() -> float | None:
-    """Read honcho.timeout / honcho.request_timeout via the cached config loader."""
-    try:
-        from hermes_cli.config import load_config_readonly
-
-        honcho_cfg = load_config_readonly().get("honcho", {})
-        if isinstance(honcho_cfg, dict):
-            return _resolve_optional_float(
-                honcho_cfg.get("timeout"),
-                honcho_cfg.get("request_timeout"),
-            )
-        return None
-    except Exception:
-        return None
+def _config_yaml_timeout(
+    context: HonchoProfileContext,
+) -> float | None:
+    """Read timeout from the owning profile's config.yaml."""
+    honcho_cfg = _context_honcho_config(context)
+    return _resolve_optional_float(
+        honcho_cfg.get("timeout"),
+        honcho_cfg.get("request_timeout"),
+    )
 
 
-def _honcho_json_timeout() -> float | None:
-    """Read timeout/requestTimeout from honcho.json (host block wins), memoized on mtime."""
-    global _honcho_json_timeout_memo
-    try:
-        path = resolve_config_path()
-        try:
-            mtime_ns: int = path.stat().st_mtime_ns
-        except OSError:
-            mtime_ns = -1
-        if _honcho_json_timeout_memo[0] == mtime_ns:
-            return _honcho_json_timeout_memo[1]
-
-        timeout = None
-        if mtime_ns != -1:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            host_block = _host_block(raw, resolve_active_host())
-            timeout = _resolve_optional_float(
-                host_block.get("timeout"),
-                host_block.get("requestTimeout"),
-                raw.get("timeout"),
-                raw.get("requestTimeout"),
-            )
-        _honcho_json_timeout_memo = (mtime_ns, timeout)
-        return timeout
-    except Exception:
-        return None
-
-
-def _resolve_timeout_from_sources(config: HonchoClientConfig | None) -> float:
+def _resolve_timeout_from_sources(config: HonchoClientConfig) -> float:
     """Mirror the build path's timeout resolution so the staleness check agrees with it.
 
-    With an explicit config this matches ``_build`` (config.timeout, then
-    config.yaml, then default).  With no config it matches what
-    ``from_global_config`` + ``_build`` would produce: honcho.json host
-    block/root keys, then HONCHO_TIMEOUT, then config.yaml, then default.
-    Any source skew here makes the check disagree with the built client
-    forever and rebuild it on every call.
+    The resolved config wins, followed by its owning context's config.yaml
+    and the hard default. Any source skew here makes the check disagree with
+    the built client forever and rebuild it on every call.
     """
-    if config is not None:
-        timeout = config.timeout
-    else:
-        timeout = _honcho_json_timeout()
-        if timeout is None:
-            timeout = _resolve_optional_float(os.environ.get("HONCHO_TIMEOUT"))
+    timeout = config.timeout
     if timeout is None:
-        timeout = _config_yaml_timeout()
+        if config.profile_context is None:
+            raise ValueError("Honcho config has no profile context")
+        timeout = _config_yaml_timeout(config.profile_context)
     return timeout if timeout is not None else _DEFAULT_HTTP_TIMEOUT
 
 
@@ -1106,7 +1189,7 @@ def _apply_fresh_oauth_token(config: HonchoClientConfig) -> None:
 def _refresh_cached_oauth(
     client: "Honcho",
     config: HonchoClientConfig,
-    cache_key: tuple[str, str, str],
+    cache_key: tuple[str, str, str, bool],
 ) -> None:
     """Rotate the cached client's Bearer in place when its OAuth token is stale.
 
@@ -1148,6 +1231,7 @@ def get_honcho_client(config: HonchoClientConfig | None = None) -> Honcho:
         # Hand-built configs remain strict to the current runtime profile.
         context = resolve_profile_context()
         _validate_profile_host(config.host, context.profile)
+        config.profile_context = context
 
     cache_key = context.cache_key
     new_timeout = _resolve_timeout_from_sources(config)
@@ -1188,20 +1272,24 @@ def get_honcho_client(config: HonchoClientConfig | None = None) -> Honcho:
         resolved_base_url = config.base_url
         resolved_timeout = config.timeout
         if not resolved_base_url or resolved_timeout is None:
-            try:
-                from hermes_cli.config import load_config
-                hermes_cfg = load_config()
-                honcho_cfg = hermes_cfg.get("honcho", {})
-                if isinstance(honcho_cfg, dict):
-                    if not resolved_base_url:
-                        resolved_base_url = honcho_cfg.get("base_url", "").strip() or None
-                    if resolved_timeout is None:
-                        resolved_timeout = _resolve_optional_float(
-                            honcho_cfg.get("timeout"),
-                            honcho_cfg.get("request_timeout"),
-                        )
-            except Exception:
-                pass
+            if config.profile_context is None:
+                raise ValueError("Honcho config has no profile context")
+            honcho_cfg = _context_honcho_config(config.profile_context)
+            if isinstance(honcho_cfg, dict):
+                if not resolved_base_url:
+                    resolved_base_url = (
+                        str(
+                            honcho_cfg.get("base_url")
+                            or honcho_cfg.get("baseUrl")
+                            or ""
+                        ).strip()
+                        or None
+                    )
+                if resolved_timeout is None:
+                    resolved_timeout = _resolve_optional_float(
+                        honcho_cfg.get("timeout"),
+                        honcho_cfg.get("request_timeout"),
+                    )
 
         # Fall back to the default so an unconfigured install cannot hang
         # indefinitely on a stalled Honcho request.
@@ -1274,7 +1362,5 @@ def get_honcho_client(config: HonchoClientConfig | None = None) -> Honcho:
 
 def reset_honcho_client() -> None:
     """Reset every cached Honcho client (useful for testing)."""
-    global _honcho_json_timeout_memo
     with _honcho_client_cache_lock:
         _honcho_client_cache.clear()
-    _honcho_json_timeout_memo = (None, None)
