@@ -252,6 +252,76 @@ def _make_fake_mautrix():
 # ---------------------------------------------------------------------------
 
 class TestMatrixConfigLoading:
+    def test_matrix_store_permissions_repair_private_paths_only(self, tmp_path):
+        from plugins.platforms.matrix.adapter import _normalize_matrix_store_permissions
+
+        store_dir = tmp_path / "matrix" / "store"
+        crypto_db = store_dir / "crypto.db"
+        store_dir.mkdir(parents=True)
+        crypto_db.write_bytes(b"sqlite contents")
+        sidecar_contents = {
+            "crypto.db-wal": b"wal contents",
+            "crypto.db-shm": b"shm contents",
+        }
+        for name, contents in sidecar_contents.items():
+            (store_dir / name).write_bytes(contents)
+        unrelated = store_dir / "unrelated.txt"
+        unrelated.write_bytes(b"leave me alone")
+        outside = tmp_path / "outside.txt"
+        outside.write_bytes(b"outside")
+        linked_sidecar = store_dir / "crypto.db-wal-link"
+        linked_sidecar.symlink_to(outside)
+
+        store_dir.chmod(0o775)
+        crypto_db.chmod(0o664)
+        for name in sidecar_contents:
+            (store_dir / name).chmod(0o664)
+        unrelated.chmod(0o664)
+        outside.chmod(0o664)
+
+        _normalize_matrix_store_permissions(store_dir, crypto_db)
+
+        assert stat.S_IMODE(store_dir.stat().st_mode) == 0o700
+        assert stat.S_IMODE(crypto_db.stat().st_mode) == 0o600
+        for name, contents in sidecar_contents.items():
+            path = store_dir / name
+            assert stat.S_IMODE(path.stat().st_mode) == 0o600
+            assert path.read_bytes() == contents
+        assert stat.S_IMODE(unrelated.stat().st_mode) == 0o664
+        assert stat.S_IMODE(outside.stat().st_mode) == 0o664
+        assert linked_sidecar.is_symlink()
+
+    def test_matrix_store_permissions_skip_symlinked_database(self, tmp_path):
+        from plugins.platforms.matrix.adapter import _normalize_matrix_store_permissions
+
+        store_dir = tmp_path / "matrix" / "store"
+        store_dir.mkdir(parents=True)
+        outside = tmp_path / "outside.db"
+        outside.write_bytes(b"outside database")
+        crypto_db = store_dir / "crypto.db"
+        crypto_db.symlink_to(outside)
+        store_dir.chmod(0o775)
+        outside.chmod(0o664)
+
+        _normalize_matrix_store_permissions(store_dir, crypto_db)
+
+        assert stat.S_IMODE(store_dir.stat().st_mode) == 0o700
+        assert outside.stat().st_mode & 0o777 == 0o664
+        assert crypto_db.is_symlink()
+
+    def test_apply_env_overrides_with_access_token(self, monkeypatch):
+        monkeypatch.setenv("MATRIX_ACCESS_TOKEN", "syt_abc123")
+        monkeypatch.setenv("MATRIX_HOMESERVER", "https://matrix.example.org")
+
+        from gateway.config import GatewayConfig, _apply_env_overrides
+        config = GatewayConfig()
+        _apply_env_overrides(config)
+
+        assert Platform.MATRIX in config.platforms
+        mc = config.platforms[Platform.MATRIX]
+        assert mc.enabled is True
+        assert mc.token == "syt_abc123"
+        assert mc.extra.get("homeserver") == "https://matrix.example.org"
 
     def test_apply_env_overrides_with_password(self, monkeypatch):
         monkeypatch.delenv("MATRIX_ACCESS_TOKEN", raising=False)

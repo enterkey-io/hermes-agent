@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import stat
 import threading
 import uuid
 from contextlib import contextmanager
@@ -24,8 +25,39 @@ _lock = threading.RLock()
 _PROCESS_ID = uuid.uuid4().hex
 
 
+def _normalize_execution_store_permissions(executions_file: Path) -> None:
+    """Repair cron private-state modes without following symlinks."""
+    cron_dir = executions_file.parent
+    try:
+        cron_stat = os.lstat(cron_dir)
+    except OSError:
+        return
+    if stat.S_ISLNK(cron_stat.st_mode):
+        return
+
+    paths = [
+        (cron_dir, 0o700),
+        (executions_file, 0o600),
+        (executions_file.with_name(executions_file.name + "-wal"), 0o600),
+        (executions_file.with_name(executions_file.name + "-shm"), 0o600),
+        (cron_dir / ".tick.lock", 0o600),
+        (cron_dir / ".jobs.lock", 0o600),
+    ]
+    for path, mode in paths:
+        try:
+            path_stat = os.lstat(path)
+            if stat.S_ISLNK(path_stat.st_mode):
+                continue
+            if not (stat.S_ISDIR(path_stat.st_mode) or stat.S_ISREG(path_stat.st_mode)):
+                continue
+            os.chmod(path, mode, follow_symlinks=False)
+        except (OSError, NotImplementedError):
+            continue
+
+
 def _connect() -> sqlite3.Connection:
     EXECUTIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _normalize_execution_store_permissions(EXECUTIONS_FILE)
     return sqlite3.connect(EXECUTIONS_FILE, timeout=5)
 
 
@@ -60,6 +92,7 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_executions_status_claimed "
         "ON executions(status, claimed_at DESC, id DESC)"
     )
+    _normalize_execution_store_permissions(EXECUTIONS_FILE)
 
 
 @contextmanager

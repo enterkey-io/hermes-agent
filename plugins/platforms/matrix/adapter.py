@@ -71,6 +71,7 @@ import mimetypes
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -612,6 +613,33 @@ from hermes_constants import get_hermes_dir as _get_hermes_dir
 
 _STORE_DIR = _get_hermes_dir("platforms/matrix/store", "matrix/store")
 _CRYPTO_DB_PATH = _STORE_DIR / "crypto.db"
+
+
+def _normalize_matrix_store_permissions(store_dir: Path, crypto_db: Path) -> None:
+    """Repair modes on Matrix's private store without following symlinks."""
+    try:
+        store_stat = os.lstat(store_dir)
+    except OSError:
+        return
+    if stat.S_ISLNK(store_stat.st_mode):
+        return
+
+    paths = [
+        (store_dir, 0o700),
+        (crypto_db, 0o600),
+        (crypto_db.with_name(crypto_db.name + "-wal"), 0o600),
+        (crypto_db.with_name(crypto_db.name + "-shm"), 0o600),
+    ]
+    for path, mode in paths:
+        try:
+            path_stat = os.lstat(path)
+            if stat.S_ISLNK(path_stat.st_mode):
+                continue
+            if not (stat.S_ISDIR(path_stat.st_mode) or stat.S_ISREG(path_stat.st_mode)):
+                continue
+            os.chmod(path, mode, follow_symlinks=False)
+        except (OSError, NotImplementedError):
+            continue
 
 # Grace period: ignore messages older than this many seconds before startup.
 _STARTUP_GRACE_SECONDS = 5
@@ -1831,6 +1859,7 @@ class MatrixAdapter(BasePlatformAdapter):
 
         # Ensure store dir exists for E2EE key persistence.
         _STORE_DIR.mkdir(parents=True, exist_ok=True)
+        _normalize_matrix_store_permissions(_STORE_DIR, _CRYPTO_DB_PATH)
 
         # Create the HTTP API layer.
         client_session = _create_matrix_session(self._proxy_url)
@@ -2036,6 +2065,7 @@ class MatrixAdapter(BasePlatformAdapter):
                         db=crypto_db,
                     )
                     await crypto_store.open()
+                    _normalize_matrix_store_permissions(_STORE_DIR, _CRYPTO_DB_PATH)
 
                     if client.device_id:
                         _store_was_reset = await self._reset_crypto_store_if_device_changed(

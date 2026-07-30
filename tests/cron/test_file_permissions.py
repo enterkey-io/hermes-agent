@@ -20,6 +20,92 @@ class TestCronFilePermissions(unittest.TestCase):
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
+    def test_execution_store_permissions_repair_private_paths_only(self):
+        import cron.executions as executions
+
+        cron_dir = Path(self.tmpdir) / "cron"
+        executions_db = cron_dir / "executions.db"
+        cron_dir.mkdir(parents=True)
+        executions_db.write_bytes(b"sqlite contents")
+        sidecar_contents = {
+            "executions.db-wal": b"wal contents",
+            "executions.db-shm": b"shm contents",
+        }
+        for name, contents in sidecar_contents.items():
+            (cron_dir / name).write_bytes(contents)
+        for name in (".tick.lock", ".jobs.lock"):
+            (cron_dir / name).write_bytes(b"lock contents")
+        unrelated = cron_dir / "unrelated.txt"
+        unrelated.write_bytes(b"leave me alone")
+        outside = Path(self.tmpdir) / "outside.txt"
+        outside.write_bytes(b"outside")
+        linked_lock = cron_dir / ".tick.lock-link"
+        linked_lock.symlink_to(outside)
+
+        cron_dir.chmod(0o775)
+        executions_db.chmod(0o664)
+        for name in sidecar_contents:
+            (cron_dir / name).chmod(0o664)
+        for name in (".tick.lock", ".jobs.lock"):
+            (cron_dir / name).chmod(0o664)
+        unrelated.chmod(0o664)
+        outside.chmod(0o664)
+
+        with patch.object(executions, "EXECUTIONS_FILE", executions_db):
+            connection = executions._connect()
+            connection.close()
+
+        self.assertEqual(stat.S_IMODE(cron_dir.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(executions_db.stat().st_mode), 0o600)
+        for name, contents in sidecar_contents.items():
+            path = cron_dir / name
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            self.assertEqual(path.read_bytes(), contents)
+        for name in (".tick.lock", ".jobs.lock"):
+            self.assertEqual(stat.S_IMODE((cron_dir / name).stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(unrelated.stat().st_mode), 0o664)
+        self.assertEqual(stat.S_IMODE(outside.stat().st_mode), 0o664)
+        self.assertTrue(linked_lock.is_symlink())
+
+    def test_new_execution_database_is_created_owner_only(self):
+        import cron.executions as executions
+
+        executions_db = Path(self.tmpdir) / "cron" / "executions.db"
+        previous_umask = os.umask(0)
+        try:
+            with patch.object(executions, "EXECUTIONS_FILE", executions_db):
+                executions.create_execution("new-store", source="builtin")
+        finally:
+            os.umask(previous_umask)
+
+        self.assertEqual(stat.S_IMODE(executions_db.stat().st_mode), 0o600)
+
+    def test_execution_store_permissions_skip_symlinked_lock(self):
+        import cron.executions as executions
+
+        cron_dir = Path(self.tmpdir) / "cron"
+        cron_dir.mkdir(parents=True)
+        executions_db = cron_dir / "executions.db"
+        executions_db.write_bytes(b"sqlite contents")
+        outside = Path(self.tmpdir) / "outside.lock"
+        outside.write_bytes(b"outside lock")
+        tick_lock = cron_dir / ".tick.lock"
+        tick_lock.symlink_to(outside)
+        jobs_lock = cron_dir / ".jobs.lock"
+        jobs_lock.write_bytes(b"jobs lock")
+        cron_dir.chmod(0o775)
+        executions_db.chmod(0o664)
+        outside.chmod(0o664)
+        jobs_lock.chmod(0o664)
+
+        executions._normalize_execution_store_permissions(executions_db)
+
+        self.assertEqual(stat.S_IMODE(cron_dir.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(executions_db.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(jobs_lock.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(outside.stat().st_mode), 0o664)
+        self.assertTrue(tick_lock.is_symlink())
+
     @patch("cron.jobs.CRON_DIR")
     @patch("cron.jobs.OUTPUT_DIR")
     @patch("cron.jobs.JOBS_FILE")
