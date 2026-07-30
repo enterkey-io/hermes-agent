@@ -510,7 +510,7 @@ def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = Non
 
     sanitized = _scrub_delegated_child_kanban_env(sanitized)
 
-    return sanitized
+    return _final_scrub_ordinary_subprocess_env(sanitized)
 
 
 def _scrub_delegated_child_kanban_env(env: dict[str, str]) -> dict[str, str]:
@@ -577,6 +577,18 @@ _ALWAYS_STRIP_KEYS: frozenset[str] = frozenset({
     "AUTH_TOKEN",
     "CT0",
 })
+
+
+def _final_scrub_ordinary_subprocess_env(
+    environment: dict[str, str],
+) -> dict[str, str]:
+    """Reapply unconditional stripping after context and home env merges."""
+    for key in _ALWAYS_STRIP_KEYS:
+        environment.pop(key, None)
+    for key in list(environment):
+        if _is_hermes_internal_secret(key):
+            environment.pop(key, None)
+    return environment
 
 
 def hermes_subprocess_env(*, inherit_credentials: bool = False) -> dict[str, str]:
@@ -661,7 +673,7 @@ def hermes_subprocess_env(*, inherit_credentials: bool = False) -> dict[str, str
     # still see the parent's HERMES_HOME but lose the DB mutation guard.
     env = _scrub_delegated_child_kanban_env(env)
 
-    return env
+    return _final_scrub_ordinary_subprocess_env(env)
 
 
 def build_subprocess_env(
@@ -1333,7 +1345,7 @@ def _make_run_env(env: dict) -> dict:
 
     run_env = _scrub_delegated_child_kanban_env(run_env)
 
-    return run_env
+    return _final_scrub_ordinary_subprocess_env(run_env)
 
 
 def _read_terminal_shell_init_config() -> tuple[list[str], bool]:

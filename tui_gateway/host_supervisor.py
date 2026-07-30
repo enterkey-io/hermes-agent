@@ -67,6 +67,24 @@ def _sanitize_compute_host_environment(environment: dict[str, str]) -> dict[str,
     }
 
 
+def _probe_environment() -> dict[str, str]:
+    """Return the minimal ambient environment needed by git and ps probes."""
+    environment = {
+        name: os.environ[name]
+        for name in (
+            "HOME",
+            "LANG",
+            "LC_ALL",
+            "LC_CTYPE",
+            "PATH",
+            "SYSTEMROOT",
+            "TMPDIR",
+        )
+        if name in os.environ
+    }
+    return _sanitize_compute_host_environment(environment)
+
+
 def append_log_record(path: str | Path, record: str) -> None:
     """Append one log record using O_APPEND and exactly one os.write call."""
     p = Path(path)
@@ -94,6 +112,7 @@ def _build_sha() -> str:
             errors="replace",
             stderr=subprocess.DEVNULL,
             timeout=2,
+            env=_probe_environment(),
         ).strip()
     except Exception:
         return "unknown"
@@ -136,6 +155,7 @@ def _pid_command(pid: int) -> str:
             errors="replace",
             stderr=subprocess.DEVNULL,
             timeout=2,
+            env=_probe_environment(),
         ).strip()
     except Exception:
         return ""

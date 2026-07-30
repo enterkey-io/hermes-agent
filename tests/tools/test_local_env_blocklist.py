@@ -96,6 +96,70 @@ class TestProviderEnvBlocklist:
         ):
             assert var not in result_env, f"{var} leaked into terminal child"
 
+    def test_rostered_op_service_account_token_is_preserved(self):
+        result_env = _run_with_env(
+            extra_os_env={
+                "OP_SERVICE_ACCOUNT_TOKEN": "rostered-op-token",
+                "OP_USER": "rostered-op-user",
+            }
+        )
+
+        assert result_env["OP_SERVICE_ACCOUNT_TOKEN"] == "rostered-op-token"
+        assert result_env["OP_USER"] == "rostered-op-user"
+
+    @pytest.mark.parametrize(
+        "builder",
+        ("sanitize_subprocess_env", "hermes_subprocess_env", "make_run_env"),
+    )
+    def test_photo_and_static_auth_keys_are_scrubbed_after_late_home_merge(
+        self, monkeypatch, builder
+    ):
+        import hermes_constants
+        from tools.environments.local import (
+            _make_run_env,
+            _sanitize_subprocess_env,
+            hermes_subprocess_env,
+        )
+
+        protected = {
+            "GEMINI_API_KEY": "late-gemini-key",
+            "NOVITA_API_KEY": "late-novita-key",
+            "XAI_API_KEY": "late-xai-key",
+            "AUTH_TOKEN": "late-auth-token",
+            "CT0": "late-ct0",
+        }
+
+        def inject_late_environment(environment):
+            environment.update(protected)
+            environment["OP_SERVICE_ACCOUNT_TOKEN"] = "late-rostered-op-token"
+
+        monkeypatch.setattr(
+            hermes_constants,
+            "apply_subprocess_home_env",
+            inject_late_environment,
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "PATH": "/usr/bin:/bin",
+                "HOME": "/home/user",
+                "OP_SERVICE_ACCOUNT_TOKEN": "ambient-rostered-op-token",
+            },
+            clear=True,
+        ):
+            if builder == "sanitize_subprocess_env":
+                result_env = _sanitize_subprocess_env(dict(os.environ))
+            elif builder == "hermes_subprocess_env":
+                result_env = hermes_subprocess_env(inherit_credentials=True)
+            else:
+                result_env = _make_run_env({})
+
+        assert protected.keys().isdisjoint(result_env)
+        assert (
+            result_env["OP_SERVICE_ACCOUNT_TOKEN"]
+            == "late-rostered-op-token"
+        )
+
     def test_registry_derived_vars_are_stripped(self):
         """Vars from the provider registry (ANTHROPIC_TOKEN, ZAI_API_KEY, etc.)
         must also be blocked — not just the hand-written extras."""

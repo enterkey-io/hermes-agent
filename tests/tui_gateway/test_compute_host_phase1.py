@@ -165,6 +165,58 @@ def test_supervisor_spawn_strips_protected_environment_after_all_merges(
     assert {"AUTH_TOKEN", "CT0", "GEMINI_API_KEY", "NOVITA_API_KEY", "XAI_API_KEY"}.isdisjoint(captured)
 
 
+def test_supervisor_git_and_ps_probes_use_minimal_protected_environment(
+    monkeypatch,
+):
+    from tui_gateway import host_supervisor
+
+    protected = {
+        "OP_SERVICE_ACCOUNT_TOKEN": "op-token",
+        "OP_USER": "op-user",
+        "AUTH_TOKEN": "auth-token",
+        "CT0": "ct0",
+        "GEMINI_API_KEY": "gemini-key",
+        "NOVITA_API_KEY": "novita-key",
+        "XAI_API_KEY": "xai-key",
+    }
+    for name, value in protected.items():
+        monkeypatch.setenv(name, value)
+
+    calls = []
+
+    def capture_check_output(command, **kwargs):
+        calls.append((command, kwargs.get("env")))
+        if command[0] == "git":
+            return "test-sha\n"
+        return "python -m tui_gateway.compute_host\n"
+
+    def refuse_proc_read(_path):
+        raise OSError("force ps fallback")
+
+    monkeypatch.setattr(
+        host_supervisor.subprocess,
+        "check_output",
+        capture_check_output,
+    )
+    monkeypatch.setattr(host_supervisor.Path, "read_bytes", refuse_proc_read)
+
+    assert host_supervisor._build_sha() == "test-sha"
+    assert "tui_gateway.compute_host" in host_supervisor._pid_command(999999)
+    assert [command[0] for command, _environment in calls] == ["git", "ps"]
+    for _command, environment in calls:
+        assert environment is not None
+        assert protected.keys().isdisjoint(environment)
+        assert set(environment) <= {
+            "HOME",
+            "LANG",
+            "LC_ALL",
+            "LC_CTYPE",
+            "PATH",
+            "SYSTEMROOT",
+            "TMPDIR",
+        }
+
+
 def test_supervisor_crash_emits_turn_error_and_respawns(tmp_path):
     script = tmp_path / "fake_host.py"
     script.write_text(
