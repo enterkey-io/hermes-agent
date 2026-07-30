@@ -80,6 +80,68 @@ def test_preview_does_not_require_paid_approval(monkeypatch, capsys, generate, t
     assert "BUILT PROMPT" in capsys.readouterr().out
 
 
+def test_authorized_no_op_fallback_refuses_missing_key_without_running_op(
+    monkeypatch, generate
+):
+    attempted_commands = []
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    def unexpected_subprocess(command, **_kwargs):
+        attempted_commands.append(command)
+        raise AssertionError("authorized generation must not invoke op")
+
+    monkeypatch.setattr(generate.subprocess, "run", unexpected_subprocess)
+
+    with pytest.raises(RuntimeError, match="authorized credential.*not injected"):
+        generate._get_api_key("gemini", allow_op_fallback=False)
+
+    assert attempted_commands == []
+
+
+def test_standalone_key_lookup_keeps_1password_fallback(monkeypatch, generate):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    class Result:
+        returncode = 0
+        stdout = "standalone-key\n"
+
+    monkeypatch.setattr(generate.subprocess, "run", lambda *_args, **_kwargs: Result())
+
+    assert generate._get_api_key("gemini") == "standalone-key"
+
+
+def test_no_op_fallback_cli_mode_never_runs_op(monkeypatch, generate, tmp_path):
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    seed = profile / "seed.png"
+    seed.write_bytes(b"seed")
+    attempted_commands = []
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setattr(generate, "resolve_profile_dir", lambda: profile)
+    monkeypatch.setattr(
+        generate,
+        "load_workspace_agent",
+        lambda: ({"name": "Test Agent"}, seed, "test-agent"),
+    )
+    monkeypatch.setattr(generate, "build_prompt", lambda **_kwargs: "prompt")
+    monkeypatch.setattr(
+        generate.subprocess,
+        "run",
+        lambda command, **_kwargs: attempted_commands.append(command),
+    )
+
+    def provider(**_kwargs):
+        return [generate._get_api_key("gemini")]
+
+    result = generate.main(
+        ["--approved", "--no-op-fallback", "at a desk"],
+        providers={"gemini": provider},
+    )
+
+    assert result == 1
+    assert attempted_commands == []
+
+
 def test_paid_generation_refuses_without_current_request_approval(generate, capsys):
     called = False
 

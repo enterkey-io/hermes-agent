@@ -47,6 +47,24 @@ MUTATOR_ROUTE_TABLE: dict[str, str] = {
 _REGISTRY_NAME = "dashboard-compute-host.json"
 _RESPAWN_WINDOW_SECS = 300.0
 _SHUTDOWN_TIMEOUT_SECS = 10.0
+_COMPUTE_HOST_PROTECTED_ENV_NAMES = frozenset(
+    {
+        "AUTH_TOKEN",
+        "CT0",
+        "GEMINI_API_KEY",
+        "NOVITA_API_KEY",
+        "XAI_API_KEY",
+    }
+)
+
+
+def _sanitize_compute_host_environment(environment: dict[str, str]) -> dict[str, str]:
+    """Keep control-plane and photo credentials out of the compute host."""
+    return {
+        name: value
+        for name, value in environment.items()
+        if not name.startswith("OP_") and name not in _COMPUTE_HOST_PROTECTED_ENV_NAMES
+    }
 
 
 def append_log_record(path: str | Path, record: str) -> None:
@@ -316,9 +334,9 @@ class HostSupervisor:
         self._hello_event.clear()
         self._hello = {}
         env = hermes_subprocess_env(inherit_credentials=True)
-        env.update(os.environ)
         if self.env:
             env.update(self.env)
+        env = _sanitize_compute_host_environment(env)
         env["HERMES_COMPUTE_HOST_HEARTBEAT_SECS"] = str(self.heartbeat_secs)
         env.setdefault("PYTHONPATH", str(_repo_root()))
         if str(_repo_root()) not in env["PYTHONPATH"].split(os.pathsep):

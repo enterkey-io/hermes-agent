@@ -9,6 +9,7 @@ import sys
 import argparse
 import subprocess
 import shutil
+from contextvars import ContextVar
 from pathlib import Path
 from datetime import datetime
 import base64
@@ -36,13 +37,22 @@ _OP_ITEMS = {
     "novita": "op://Assistant/Novita API Credentials/credential",
 }
 
-def _get_api_key(provider: str) -> str:
+_NO_OP_FALLBACK = ContextVar("agent_photo_no_op_fallback", default=False)
+
+
+def _get_api_key(provider: str, *, allow_op_fallback: bool | None = None) -> str:
     """Get API key from env var or 1Password CLI."""
     env_map = {"xai": "XAI_API_KEY", "gemini": "GEMINI_API_KEY", "novita": "NOVITA_API_KEY"}
     env_name = env_map.get(provider, "")
     key = os.environ.get(env_name, "")
     if key:
         return key
+    if allow_op_fallback is None:
+        allow_op_fallback = not _NO_OP_FALLBACK.get()
+    if not allow_op_fallback:
+        raise RuntimeError(
+            f"authorized credential for {provider} was not injected into the photo child."
+        )
     op_ref = _OP_ITEMS.get(provider)
     if op_ref:
         commands = (
@@ -595,6 +605,11 @@ You just provide the scene (pose, outfit, location, lighting, expression).
         action='store_true',
         help='Allow paid calls to alternate providers after a failure; requires separate user authorization',
     )
+    parser.add_argument(
+        '--no-op-fallback',
+        action='store_true',
+        help=argparse.SUPPRESS,
+    )
     return parser
 
 
@@ -666,29 +681,33 @@ def main(argv: list[str] | None = None, providers: dict | None = None) -> int:
         print(f"Model: {args.model}")
         print(f"Prompt profile: {args.prompt_profile}")
         saved_paths: list = []
-        for index, provider_name in enumerate(sequence):
-            provider = provider_registry.get(provider_name)
-            if provider is None:
-                print(f"Provider is unavailable: {provider_name}")
-                continue
-            print(f"Trying {provider_name}...")
-            try:
-                saved_paths = provider(
-                    prompt=prompt,
-                    seed_image=seed,
-                    output_path=output_path,
-                    sources=sources,
-                    size=args.size,
-                    n=args.num_images,
-                    aspect_ratio=args.aspect_ratio,
-                ) or []
-            except Exception as e:
-                print(f"{provider_name} failed with exception: {e}")
-                saved_paths = []
-            if saved_paths:
-                break
-            if index < len(sequence) - 1:
-                print("Authorized fallback to the next provider...")
+        no_op_fallback_token = _NO_OP_FALLBACK.set(args.no_op_fallback)
+        try:
+            for index, provider_name in enumerate(sequence):
+                provider = provider_registry.get(provider_name)
+                if provider is None:
+                    print(f"Provider is unavailable: {provider_name}")
+                    continue
+                print(f"Trying {provider_name}...")
+                try:
+                    saved_paths = provider(
+                        prompt=prompt,
+                        seed_image=seed,
+                        output_path=output_path,
+                        sources=sources,
+                        size=args.size,
+                        n=args.num_images,
+                        aspect_ratio=args.aspect_ratio,
+                    ) or []
+                except Exception as e:
+                    print(f"{provider_name} failed with exception: {e}")
+                    saved_paths = []
+                if saved_paths:
+                    break
+                if index < len(sequence) - 1:
+                    print("Authorized fallback to the next provider...")
+        finally:
+            _NO_OP_FALLBACK.reset(no_op_fallback_token)
 
         if saved_paths:
             media_paths = mirror_to_media([Path(path) for path in saved_paths], profile_dir)

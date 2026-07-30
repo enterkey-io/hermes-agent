@@ -100,6 +100,122 @@ def test_supervisor_startup_reconcile_pid_reuse_guard(tmp_path, monkeypatch):
     assert not registry.exists()
 
 
+def test_supervisor_spawn_strips_protected_environment_after_all_merges(
+    tmp_path, monkeypatch
+):
+    from tui_gateway import host_supervisor
+
+    hermes_home = tmp_path / "profile"
+    hermes_home.mkdir()
+    captured: dict[str, str] = {}
+    supervisor = HostSupervisor(
+        registry_path=tmp_path / "dashboard-compute-host.json",
+        env={
+            "HERMES_HOME": str(hermes_home),
+            "OP_SERVICE_ACCOUNT_TOKEN": "caller-op-token",
+            "AUTH_TOKEN": "caller-auth-token",
+            "CT0": "caller-ct0",
+            "GEMINI_API_KEY": "caller-gemini-key",
+            "NOVITA_API_KEY": "caller-novita-key",
+            "XAI_API_KEY": "caller-xai-key",
+            "ORDINARY_CHILD_SETTING": "preserved",
+        },
+        expected_build_sha="unknown",
+        expected_hermes_home=str(hermes_home),
+        autostart=False,
+    )
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("OP_USER", "ambient-op-user")
+    monkeypatch.setenv("AUTH_TOKEN", "ambient-auth-token")
+    monkeypatch.setenv("CT0", "ambient-ct0")
+    monkeypatch.setenv("GEMINI_API_KEY", "ambient-gemini-key")
+    monkeypatch.setenv("NOVITA_API_KEY", "ambient-novita-key")
+    monkeypatch.setenv("XAI_API_KEY", "ambient-xai-key")
+
+    class FakePopen:
+        def __init__(self, _argv, **kwargs):
+            captured.update(kwargs["env"])
+            self.pid = 12345
+            self.stdin = None
+            self.stdout = ()
+            self.stderr = ()
+            supervisor._hello = {
+                "hermes_home": str(hermes_home),
+                "build_sha": "unknown",
+            }
+            supervisor._hello_event.set()
+
+        def poll(self):
+            return 0
+
+    class FakeThread:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(host_supervisor.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(host_supervisor, "_Thread", FakeThread)
+
+    supervisor._spawn_locked(reason="test")
+
+    assert captured["ORDINARY_CHILD_SETTING"] == "preserved"
+    assert not any(name.startswith("OP_") for name in captured)
+    assert {"AUTH_TOKEN", "CT0", "GEMINI_API_KEY", "NOVITA_API_KEY", "XAI_API_KEY"}.isdisjoint(captured)
+
+
+def test_supervisor_crash_emits_turn_error_and_respawns(tmp_path):
+    script = tmp_path / "fake_host.py"
+    script.write_text(
+        """
+import json, os, sys
+print(json.dumps({'type':'hello','host_pid':os.getpid(),'boot_id':'boot-1','build_sha':'test','hermes_home':os.environ.get('HERMES_HOME','')}), flush=True)
+for raw in sys.stdin:
+    frame=json.loads(raw)
+    if frame.get('type') == 'shutdown':
+        print(json.dumps({'type':'shutdown.ack','request_id':frame.get('request_id')}), flush=True)
+        break
+    if frame.get('type') == 'turn.start':
+        print(json.dumps({'type':'turn.started','sid':frame.get('sid'),'request_id':frame.get('request_id')}), flush=True)
+        sys.stdout.flush()
+        os._exit(7)
+""".strip(),
+        encoding="utf-8",
+    )
+    registry = tmp_path / "dashboard-compute-host.json"
+    completions: list[dict] = []
+    rpc_events: list[dict] = []
+    supervisor = HostSupervisor(
+        registry_path=registry,
+        argv=[sys.executable, str(script)],
+        rpc_sink=rpc_events.append,
+        respawn_max=2,
+        heartbeat_secs=1,
+        expected_build_sha="test",
+        autostart=False,
+    )
+    try:
+        supervisor.start()
+        supervisor.submit_turn(
+            {"type": "turn.start", "sid": "sid-1", "request_id": "turn-1", "text": "hello"},
+            on_complete=completions.append,
+        )
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not completions:
+            time.sleep(0.02)
+        assert completions, "host crash did not complete pending turn"
+        assert completions[0]["type"] == "turn.error"
+        assert completions[0]["reason"] == "crash"
+
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not supervisor.is_running():
+            time.sleep(0.02)
+        assert supervisor.is_running()
+    finally:
+        supervisor.shutdown()
+
+
 def _make_compress_host_session(events: list) -> dict:
     class _Agent:
         model = "host-model"
