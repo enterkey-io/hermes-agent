@@ -399,6 +399,9 @@ class ValidatedExecutionRuntime(_NonTransferable):
                 state.uncertain_operations.add(
                     str(record.get("reconciliation_key") or "unknown")
                 )
+                state.closing = True
+                state.active = False
+                state.fingerprint = ""
             state.condition.notify_all()
             return uncertain
 
@@ -529,7 +532,8 @@ def _finalize_execution_context(
                 )
         state.active = False
         state.fingerprint = ""
-        state.owner = None
+        if not state.uncertain_operations:
+            state.owner = None
         return ExecutionSettlement(
             settled=active == 0,
             reconciliation_required=bool(state.uncertain_operations),
@@ -582,6 +586,23 @@ def execution_context_fingerprint(
         ):
             return ""
         return state.fingerprint
+
+
+def execution_context_requires_reconciliation(
+    context: object | None,
+    *,
+    owner: object,
+) -> bool:
+    """Return whether this exact owner has a terminal uncertain mutation."""
+    if not isinstance(context, CronJobExecutionContext):
+        return False
+    state = context._state()
+    with state.lock:
+        return (
+            state.pid == os.getpid()
+            and state.owner is owner
+            and bool(state.uncertain_operations)
+        )
 
 
 def _issue_tool_invocation_grant(
@@ -655,7 +676,7 @@ def _consume_tool_invocation_grant(
             "tool_name": name,
             "mutation_started": False,
             "mutation_resolved": False,
-            "reconciliation_key": None,
+            "reconciliation_key": f"invocation:{invocation_id}",
         }
         return ValidatedExecutionRuntime(
             _ISSUER,

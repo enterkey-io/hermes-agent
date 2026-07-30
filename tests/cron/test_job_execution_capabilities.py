@@ -396,3 +396,148 @@ def test_scheduler_waits_for_protected_handler_settlement_on_timeout(
     assert done.is_set()
     assert success is False
     assert "timeouterror" in str(error).lower()
+
+
+def _patch_run_one_job_pipeline(monkeypatch, *, run_result, events):
+    monkeypatch.setattr(scheduler, "claim_dispatch", lambda _job_id: True)
+    monkeypatch.setattr(
+        scheduler,
+        "mark_execution_running",
+        lambda execution_id: events.append(("running", execution_id)),
+    )
+
+    def fake_run_job(job, *, defer_agent_teardown=None):
+        events.append(("run", job["id"]))
+        return run_result
+
+    monkeypatch.setattr(scheduler, "run_job", fake_run_job)
+    monkeypatch.setattr(
+        scheduler,
+        "save_job_output",
+        lambda job_id, output: events.append(("save", job_id)) or "/tmp/output",
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "_deliver_result",
+        lambda job, content, **kwargs: events.append(("deliver", job["id"])),
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "mark_job_run",
+        lambda job_id, success, error=None, **kwargs: events.append(
+            ("mark", job_id, success, error)
+        ),
+    )
+
+    def finish(execution_id, *, success, error=None, **kwargs):
+        events.append(("persist", execution_id, success, error))
+        return {
+            "id": execution_id,
+            "status": "completed" if success else "failed",
+            "error": error,
+        }
+
+    monkeypatch.setattr(scheduler, "finish_execution", finish)
+
+
+def test_uncooperative_protected_handler_persists_then_fail_stops_once(
+    monkeypatch,
+    caplog,
+):
+    events = []
+    reconciliation_key = "issue-create-persist-before-exit"
+    failure = scheduler.ProtectedMutationFailure(
+        reconciliation_keys=(reconciliation_key,),
+        uncooperative=True,
+    )
+    _patch_run_one_job_pipeline(
+        monkeypatch,
+        run_result=(False, "failed output", "", failure),
+        events=events,
+    )
+    monkeypatch.setattr(scheduler, "_protected_fail_stop", threading.Event())
+
+    def fatal_restart(recorded_failure):
+        persisted = [event for event in events if event[0] == "persist"]
+        assert persisted
+        assert reconciliation_key in persisted[-1][3]
+        assert scheduler._protected_fail_stop.is_set()
+        assert recorded_failure is failure
+        assert "Fail-stopping the gateway" in caplog.text
+        events.append(("fatal_restart", str(recorded_failure)))
+
+    job = {
+        "id": JOB_ID,
+        "name": "bounded",
+        "execution_id": "execution-uncooperative",
+    }
+    with pytest.raises(scheduler.GatewayFailStopRequired):
+        scheduler.run_one_job(job, _fatal_restart_hook=fatal_restart)
+
+    with pytest.raises(scheduler.GatewayFailStopRequired):
+        scheduler.run_one_job(job, _fatal_restart_hook=fatal_restart)
+
+    event_names = [event[0] for event in events]
+    assert event_names == ["running", "run", "persist", "fatal_restart"]
+    assert reconciliation_key not in caplog.text
+
+
+def test_fail_stop_hook_is_not_called_for_cooperative_or_ordinary_failures(
+    monkeypatch,
+):
+    hook_calls = []
+
+    for index, error in enumerate(
+        (
+            scheduler.ProtectedMutationFailure(
+                reconciliation_keys=("issue-create-cooperative",),
+                uncooperative=False,
+            ),
+            "TimeoutError: ordinary cron timeout",
+        )
+    ):
+        events = []
+        monkeypatch.setattr(scheduler, "_protected_fail_stop", threading.Event())
+        _patch_run_one_job_pipeline(
+            monkeypatch,
+            run_result=(False, "failed output", "", error),
+            events=events,
+        )
+
+        assert scheduler.run_one_job(
+            {
+                "id": f"job-{index}",
+                "name": "bounded",
+                "execution_id": f"execution-{index}",
+            },
+            _fatal_restart_hook=hook_calls.append,
+        ) is True
+        assert [event[0] for event in events].count("persist") == 1
+
+    assert hook_calls == []
+
+
+def test_gateway_fail_stop_exits_nonzero_only_under_systemd(monkeypatch):
+    failure = scheduler.ProtectedMutationFailure(
+        reconciliation_keys=("issue-create-systemd",),
+        uncooperative=True,
+    )
+    exits = []
+
+    class ExitCalled(BaseException):
+        pass
+
+    def fake_exit(code):
+        exits.append(code)
+        raise ExitCalled
+
+    monkeypatch.setattr(scheduler.os, "_exit", fake_exit)
+    monkeypatch.delenv("INVOCATION_ID", raising=False)
+    with pytest.raises(scheduler.GatewayFailStopRequired):
+        scheduler._systemd_gateway_fail_stop(failure)
+    assert exits == []
+
+    monkeypatch.setenv("INVOCATION_ID", "systemd-test")
+    with pytest.raises(ExitCalled):
+        scheduler._systemd_gateway_fail_stop(failure)
+    assert exits == [70]

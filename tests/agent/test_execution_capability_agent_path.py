@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import types
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import model_tools
 from agent.agent_runtime_helpers import invoke_tool
@@ -13,6 +15,7 @@ from agent.execution_capabilities import (
     _issue_trusted_cron_dispatch,
     cron_job_capability,
 )
+from run_agent import AIAgent
 from tools import mcp_tool
 from tools.registry import registry
 
@@ -214,3 +217,129 @@ def test_mcp_refresh_preserves_exact_execution_context_and_owner(monkeypatch):
 
     assert seen["execution_context"] is agent.execution_context
     assert seen["execution_owner"] is agent
+
+
+def test_uncertain_invocation_closes_context_before_second_protected_call(tmp_path):
+    home = tmp_path / "profiles" / "emily"
+    home.mkdir(parents=True)
+    calls = []
+
+    def handler(args, *, execution_runtime, **kwargs):
+        calls.append(args)
+        execution_runtime.mark_external_mutation_started("issue-create-uncertain")
+        raise TimeoutError("response not received")
+
+    _register(home, handler)
+    agent = _Agent()
+    context = _context(home, owner=agent)
+    agent.execution_context = context
+    try:
+        first = json.loads(
+            invoke_tool(
+                agent,
+                TOOL_NAME,
+                {"attempt": 1},
+                effective_task_id="agent-path",
+                tool_call_id="call-1",
+                skip_tool_request_middleware=True,
+            )
+        )
+        refreshed = model_tools.get_tool_definitions(
+            enabled_toolsets=["test-capability"],
+            quiet_mode=True,
+            execution_context=context,
+            execution_owner=agent,
+        )
+        second = json.loads(
+            invoke_tool(
+                agent,
+                TOOL_NAME,
+                {"attempt": 2},
+                effective_task_id="agent-path",
+                tool_call_id="call-2",
+                skip_tool_request_middleware=True,
+            )
+        )
+    finally:
+        registry.deregister(TOOL_NAME)
+        model_tools._clear_tool_defs_cache()
+
+    names = {item["function"]["name"] for item in refreshed}
+    assert first["error_type"] == "protected_mutation_uncertain"
+    assert first["reconciliation_required"] is True
+    assert TOOL_NAME not in names
+    assert second["error_type"] == "execution_capability_unavailable"
+    assert calls == [{"attempt": 1}]
+
+
+def test_run_conversation_stops_after_protected_mutation_becomes_uncertain(tmp_path):
+    home = tmp_path / "profiles" / "emily"
+    home.mkdir(parents=True)
+    handler_calls = []
+
+    def handler(args, *, execution_runtime, **kwargs):
+        handler_calls.append(args)
+        execution_runtime.mark_external_mutation_started("issue-create-conversation")
+        raise TimeoutError("response not received")
+
+    _register(home, handler)
+    context = _context(home)
+    tool_call = SimpleNamespace(
+        id="call-uncertain",
+        type="function",
+        function=SimpleNamespace(name=TOOL_NAME, arguments="{}"),
+    )
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content=None, tool_calls=[tool_call]),
+                finish_reason="tool_calls",
+            )
+        ],
+        usage=None,
+        model="test-model",
+    )
+    model_calls = []
+
+    def model_call(_kwargs):
+        model_calls.append(True)
+        if len(model_calls) > 1:
+            raise AssertionError("run_conversation made another model request")
+        return response
+
+    try:
+        with (
+            patch("run_agent.OpenAI", return_value=MagicMock()),
+            patch("agent.model_metadata.get_model_context_length", return_value=200000),
+        ):
+            agent = AIAgent(
+                api_key="test-key",
+                base_url="https://example.invalid/v1",
+                provider="custom",
+                model="test-model",
+                max_iterations=3,
+                enabled_toolsets=["test-capability"],
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+                execution_context=context,
+            )
+
+        with (
+            patch.object(agent, "_interruptible_api_call", side_effect=model_call),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+            patch("agent.model_metadata.get_model_context_length", return_value=200000),
+        ):
+            result = agent.run_conversation("create the issue")
+    finally:
+        registry.deregister(TOOL_NAME)
+        model_tools._clear_tool_defs_cache()
+
+    assert model_calls == [True]
+    assert handler_calls == [{}]
+    assert result["failed"] is True
+    assert result["completed"] is False
+    assert result["turn_exit_reason"] == "protected_mutation_uncertain"
+    assert "reconciliation required" in result["final_response"].lower()

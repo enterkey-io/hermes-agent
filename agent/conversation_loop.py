@@ -6774,6 +6774,26 @@ def run_conversation(
                     failed = True
                     break
 
+                from agent.execution_capabilities import (
+                    execution_context_requires_reconciliation,
+                )
+
+                if execution_context_requires_reconciliation(
+                    getattr(agent, "execution_context", None),
+                    owner=agent,
+                ):
+                    failed = True
+                    _turn_exit_reason = "protected_mutation_uncertain"
+                    final_response = (
+                        "Protected mutation outcome is uncertain; "
+                        "reconciliation required."
+                    )
+                    messages.append({
+                        "role": "assistant",
+                        "content": final_response,
+                    })
+                    break
+
                 if agent._tool_guardrail_halt_decision is not None:
                     decision = agent._tool_guardrail_halt_decision
                     _turn_exit_reason = "guardrail_halt"

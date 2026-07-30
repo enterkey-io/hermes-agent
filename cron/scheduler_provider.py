@@ -194,7 +194,10 @@ class InProcessCronScheduler(CronScheduler):
         profile_homes=None,
     ):
         import logging
-        from cron.scheduler import tick as cron_tick
+        from cron.scheduler import (
+            _systemd_gateway_fail_stop,
+            tick as cron_tick,
+        )
         from cron.jobs import (
             clear_ticker_error,
             record_ticker_error,
@@ -244,6 +247,7 @@ class InProcessCronScheduler(CronScheduler):
                         loop=loop,
                         sync=False,
                         can_dispatch=can_dispatch,
+                        fatal_restart_hook=_systemd_gateway_fail_stop,
                     )
                 ok = True
             except BaseException as e:
@@ -289,7 +293,10 @@ class InProcessCronScheduler(CronScheduler):
         ``web_server.py`` scopes per-profile cron API calls.
         """
         import logging
-        from cron.scheduler import tick as cron_tick
+        from cron.scheduler import (
+            _systemd_gateway_fail_stop,
+            tick as cron_tick,
+        )
         from cron.jobs import (
             clear_ticker_error,
             record_ticker_error,
@@ -339,6 +346,7 @@ class InProcessCronScheduler(CronScheduler):
                                     loop=loop,
                                     sync=False,
                                     can_dispatch=can_dispatch,
+                                    fatal_restart_hook=_systemd_gateway_fail_stop,
                                 )
                         finally:
                             reset_hermes_home_override(home_token)

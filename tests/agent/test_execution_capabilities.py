@@ -203,6 +203,52 @@ def test_unknown_external_response_is_terminal_and_requires_reconciliation(
     assert settlement.uncertain_operations == ("issue-create-1",)
 
 
+def test_uncooperative_handler_closes_with_unique_owner_bound_reconciliation_key(
+    tmp_path,
+):
+    context, owner = _bound_context(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def handler(args, *, execution_runtime, **kwargs):
+        entered.set()
+        release.wait(timeout=2)
+        return '{"ok": true}'
+
+    worker = threading.Thread(
+        target=lambda: _dispatch(_registry(tmp_path, handler), context, owner)
+    )
+    worker.start()
+    assert entered.wait(timeout=1)
+
+    settlement = capabilities._finalize_execution_context(
+        context,
+        timeout_seconds=0.01,
+    )
+
+    assert settlement.settled is False
+    assert settlement.reconciliation_required is True
+    assert len(settlement.uncertain_operations) == 1
+    assert settlement.uncertain_operations[0].startswith("invocation:")
+    assert not capabilities.execution_context_allows(
+        context,
+        _requirement(tmp_path),
+        owner=owner,
+    )
+    assert capabilities.execution_context_requires_reconciliation(
+        context,
+        owner=owner,
+    )
+    assert not capabilities.execution_context_requires_reconciliation(
+        context,
+        owner=object(),
+    )
+
+    release.set()
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+
+
 def test_context_fails_closed_across_process_boundary(tmp_path, monkeypatch):
     context, owner = _bound_context(tmp_path)
     original_pid = capabilities.os.getpid()

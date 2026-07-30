@@ -312,6 +312,64 @@ _PROTECTED_SETTLEMENT_TIMEOUT_SECONDS = 11.0
 class ProtectedMutationUncertainError(RuntimeError):
     """A protected external mutation may have completed and needs reconciliation."""
 
+    def __init__(
+        self,
+        *,
+        reconciliation_keys: tuple[str, ...],
+        uncooperative: bool,
+    ) -> None:
+        self.failure = ProtectedMutationFailure(
+            reconciliation_keys=reconciliation_keys,
+            uncooperative=uncooperative,
+        )
+        super().__init__(str(self.failure))
+
+
+class ProtectedMutationFailure(str):
+    """Redacted runtime error carrying durable reconciliation metadata."""
+
+    def __new__(
+        cls,
+        *,
+        reconciliation_keys: tuple[str, ...],
+        uncooperative: bool,
+    ):
+        obj = super().__new__(
+            cls,
+            "Protected mutation outcome is uncertain; reconciliation required.",
+        )
+        obj.reconciliation_keys = tuple(sorted(set(reconciliation_keys)))
+        obj.uncooperative = bool(uncooperative)
+        return obj
+
+    def durable_error(self) -> str:
+        return json.dumps(
+            {
+                "error_type": "protected_mutation_uncertain",
+                "reconciliation_required": True,
+                "reconciliation_keys": list(self.reconciliation_keys),
+                "uncooperative_handler": self.uncooperative,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+
+class GatewayFailStopRequired(RuntimeError):
+    """The scheduler process is poisoned and must not dispatch more work."""
+
+
+_protected_fail_stop = threading.Event()
+
+
+def _systemd_gateway_fail_stop(_failure: ProtectedMutationFailure) -> None:
+    """Terminate only a systemd-hosted gateway after durable failure recording."""
+    if not os.environ.get("INVOCATION_ID"):
+        raise GatewayFailStopRequired(
+            "Gateway fail-stop required; refusing to terminate a non-systemd host."
+        )
+    os._exit(70)
+
 # Canonical silence tokens recognized in cron output.  Cron's contract is
 # intentionally looser than the gateway's exact-whole-response rule: the cron
 # system prompt *instructs* the agent to emit "[SILENT]", and real agents often
@@ -3580,10 +3638,11 @@ def run_job(
         if settlement is None:
             return
         if not settlement.settled or settlement.reconciliation_required:
-            operations = ", ".join(settlement.uncertain_operations) or "in-flight"
             raise ProtectedMutationUncertainError(
-                "Protected mutation outcome is uncertain; reconciliation required "
-                f"before retry ({operations})."
+                reconciliation_keys=(
+                    settlement.uncertain_operations or ("in-flight",)
+                ),
+                uncooperative=not settlement.settled,
             )
 
     # Use ContextVars for per-job session/delivery state so parallel jobs
@@ -4466,8 +4525,16 @@ def run_job(
                 _raise_for_uncertain_settlement()
             except ProtectedMutationUncertainError as settlement_error:
                 e = settlement_error
-        error_msg = f"{type(e).__name__}: {str(e)}"
-        logger.exception("Job '%s' failed: %s", job_name, error_msg)
+        if isinstance(e, ProtectedMutationUncertainError):
+            error_msg = e.failure
+            logger.error(
+                "Job '%s' failed: protected mutation outcome is uncertain; "
+                "reconciliation required",
+                job_name,
+            )
+        else:
+            error_msg = f"{type(e).__name__}: {str(e)}"
+            logger.exception("Job '%s' failed: %s", job_name, error_msg)
         # Best-effort audit write on failure path. _audit_fire_id
         # may be unset if the exception fired before submit() — guard
         # with a None check so the audit write itself never raises.
@@ -4651,6 +4718,53 @@ def _teardown_cron_agent(agent, job_id: str) -> None:
         logger.debug("Job '%s': failed to reap stale auxiliary clients: %s", job_id, e)
 
 
+def _fail_stop_after_uncooperative_handler(
+    *,
+    execution_id: str,
+    failure: ProtectedMutationFailure,
+    fatal_restart_hook,
+) -> None:
+    """Persist reconciliation state, poison dispatch, then restart the gateway."""
+    durable_error = failure.durable_error()
+    terminal_record = finish_execution(
+        execution_id,
+        success=False,
+        error=durable_error,
+    )
+    _protected_fail_stop.set()
+    if (
+        not isinstance(terminal_record, dict)
+        or terminal_record.get("status") != "failed"
+        or terminal_record.get("error") != durable_error
+    ):
+        logger.critical(
+            "Protected handler did not settle and durable failure persistence "
+            "could not be confirmed; cron dispatch is disabled."
+        )
+        raise GatewayFailStopRequired(
+            "Protected handler did not settle and durable failure persistence "
+            "could not be confirmed."
+        )
+
+    logger.critical(
+        "Protected handler did not settle; durable reconciliation is required. "
+        "Fail-stopping the gateway before any further cron dispatch."
+    )
+    if fatal_restart_hook is not None:
+        try:
+            fatal_restart_hook(failure)
+        except GatewayFailStopRequired:
+            raise
+        except BaseException as hook_error:
+            raise GatewayFailStopRequired(
+                "Gateway fail-stop hook failed after durable protected "
+                "mutation persistence."
+            ) from hook_error
+    raise GatewayFailStopRequired(
+        "Gateway restart required after an uncooperative protected handler."
+    )
+
+
 def run_one_job(
     job: dict,
     *,
@@ -4659,6 +4773,7 @@ def run_one_job(
     verbose: bool = False,
     extra_prompt: Optional[str] = None,
     _trusted_dispatch=None,
+    _fatal_restart_hook=None,
 ) -> bool:
     """Run ONE due job end-to-end: execute → save output → deliver → mark.
 
@@ -4674,6 +4789,11 @@ def run_one_job(
     Returns True if the job was processed (even if the job itself failed —
     failure is recorded via ``mark_job_run``), False only if processing raised.
     """
+    if _protected_fail_stop.is_set():
+        raise GatewayFailStopRequired(
+            "Cron dispatch is disabled until the poisoned scheduler process restarts."
+        )
+
     execution_id = job.get("execution_id")
     if not execution_id:
         execution_id = create_execution(job["id"], source="direct")["id"]
@@ -4726,10 +4846,9 @@ def run_one_job(
         # interpreter-shutdown guard in _deliver_result.
         _deferred_agents: list = []
         try:
-            _run_kwargs = {
-                "defer_agent_teardown": _deferred_agents,
-                "extra_prompt": extra_prompt,
-            }
+            _run_kwargs = {"defer_agent_teardown": _deferred_agents}
+            if extra_prompt is not None:
+                _run_kwargs["extra_prompt"] = extra_prompt
             if _trusted_dispatch is not None:
                 _run_kwargs["_trusted_dispatch"] = _trusted_dispatch
             success, output, final_response, error = run_job(job, **_run_kwargs)
@@ -4744,6 +4863,13 @@ def run_one_job(
             raise
         finally:
             reset_secret_scope(_scope_token)
+
+        if isinstance(error, ProtectedMutationFailure) and error.uncooperative:
+            _fail_stop_after_uncooperative_handler(
+                execution_id=execution_id,
+                failure=error,
+                fatal_restart_hook=_fatal_restart_hook,
+            )
 
         # Everything from here through delivery runs with the agent still live
         # (deferred teardown). Wrap it ALL in a try/finally so that if any step
@@ -4863,6 +4989,11 @@ def run_one_job(
                 )
             else:
                 mark_job_run(job["id"], success, error, delivery_error=delivery_error)
+        durable_error = (
+            error.durable_error()
+            if isinstance(error, ProtectedMutationFailure)
+            else error
+        )
         normalized_deliver = _normalize_deliver_value(job.get("deliver", "local"))
         if delivery_error:
             delivery_outcome = "failed"
@@ -4875,11 +5006,13 @@ def run_one_job(
         finish_execution(
             execution_id,
             success=success,
-            error=error,
+            error=durable_error,
             delivery_outcome=delivery_outcome,
         )
         return True
 
+    except GatewayFailStopRequired:
+        raise
     except BaseException as e:  # noqa: BLE001 — deliberate: see below
         # BaseException, not Exception (#73973): the inner run_job handler
         # re-raises CancelledError / KeyboardInterrupt / SystemExit after agent
@@ -4983,6 +5116,7 @@ def tick(
     sync: bool = True,
     *,
     can_dispatch=None,
+    fatal_restart_hook=None,
 ):
     """
     Check and run all due jobs.
@@ -4996,6 +5130,8 @@ def tick(
         loop: Optional asyncio event loop (from gateway) for live adapter sends
         can_dispatch: Optional synchronous gate; false leaves due jobs untouched
             for the next allowed tick
+        fatal_restart_hook: Gateway-only fail-stop hook for poisoned protected
+            handler processes. Standalone callers leave this unset.
 
     Returns:
         Number of jobs executed (0 if another tick is already running)
@@ -5107,6 +5243,8 @@ def tick(
             }
             if trusted_dispatch is not None:
                 _run_kwargs["_trusted_dispatch"] = trusted_dispatch
+            if fatal_restart_hook is not None:
+                _run_kwargs["_fatal_restart_hook"] = fatal_restart_hook
             return run_one_job(job, **_run_kwargs)
 
         # Partition due jobs: those with a per-job workdir mutate
