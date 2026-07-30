@@ -455,6 +455,19 @@ def test_uncooperative_protected_handler_persists_then_fail_stops_once(
         run_result=(False, "failed output", "", failure),
         events=events,
     )
+    deferred_agent = object()
+
+    def run_with_deferred_agent(job, *, defer_agent_teardown=None):
+        events.append(("run", job["id"]))
+        defer_agent_teardown.append(deferred_agent)
+        return False, "failed output", "", failure
+
+    monkeypatch.setattr(scheduler, "run_job", run_with_deferred_agent)
+    monkeypatch.setattr(
+        scheduler,
+        "_teardown_cron_agent",
+        lambda agent, job_id: events.append(("teardown", job_id, agent)),
+    )
     monkeypatch.setattr(scheduler, "_protected_fail_stop", threading.Event())
 
     def fatal_restart(recorded_failure):
@@ -464,6 +477,7 @@ def test_uncooperative_protected_handler_persists_then_fail_stops_once(
         assert scheduler._protected_fail_stop.is_set()
         assert recorded_failure is failure
         assert "Fail-stopping the gateway" in caplog.text
+        assert events[-1] == ("teardown", JOB_ID, deferred_agent)
         events.append(("fatal_restart", str(recorded_failure)))
 
     job = {
@@ -478,8 +492,128 @@ def test_uncooperative_protected_handler_persists_then_fail_stops_once(
         scheduler.run_one_job(job, _fatal_restart_hook=fatal_restart)
 
     event_names = [event[0] for event in events]
-    assert event_names == ["running", "run", "persist", "fatal_restart"]
+    assert event_names == ["running", "run", "persist", "teardown", "fatal_restart"]
     assert reconciliation_key not in caplog.text
+
+
+def test_uncooperative_persistence_failure_still_tears_down_before_raising(
+    monkeypatch,
+):
+    events = []
+    failure = scheduler.ProtectedMutationFailure(
+        reconciliation_keys=("issue-create-persistence-uncertain",),
+        uncooperative=True,
+    )
+    deferred_agent = object()
+    monkeypatch.setattr(scheduler, "claim_dispatch", lambda _job_id: True)
+    monkeypatch.setattr(scheduler, "mark_execution_running", lambda _id: None)
+
+    def run_with_deferred_agent(job, *, defer_agent_teardown=None):
+        defer_agent_teardown.append(deferred_agent)
+        events.append("run")
+        return False, "", "", failure
+
+    monkeypatch.setattr(scheduler, "run_job", run_with_deferred_agent)
+    monkeypatch.setattr(
+        scheduler,
+        "finish_execution",
+        lambda *_args, **_kwargs: events.append("persist-unconfirmed") or None,
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "_teardown_cron_agent",
+        lambda agent, _job_id: events.append(("teardown", agent)),
+    )
+    monkeypatch.setattr(scheduler, "_protected_fail_stop", threading.Event())
+
+    with pytest.raises(scheduler.GatewayFailStopRequired):
+        scheduler.run_one_job(
+            {"id": JOB_ID, "execution_id": "execution-persist-uncertain"},
+            _fatal_restart_hook=lambda _failure: events.append("fatal"),
+        )
+
+    assert events == [
+        "run",
+        "persist-unconfirmed",
+        ("teardown", deferred_agent),
+    ]
+    assert scheduler._protected_fail_stop.is_set()
+
+
+def test_uncooperative_non_systemd_failure_tears_down_before_fatal_error(
+    monkeypatch,
+):
+    events = []
+    failure = scheduler.ProtectedMutationFailure(
+        reconciliation_keys=("issue-create-cli",),
+        uncooperative=True,
+    )
+    deferred_agent = object()
+    _patch_run_one_job_pipeline(
+        monkeypatch,
+        run_result=(False, "", "", failure),
+        events=events,
+    )
+
+    def run_with_deferred_agent(job, *, defer_agent_teardown=None):
+        defer_agent_teardown.append(deferred_agent)
+        events.append(("run", job["id"]))
+        return False, "", "", failure
+
+    monkeypatch.setattr(scheduler, "run_job", run_with_deferred_agent)
+    monkeypatch.setattr(
+        scheduler,
+        "_teardown_cron_agent",
+        lambda agent, job_id: events.append(("teardown", job_id, agent)),
+    )
+    monkeypatch.setattr(scheduler, "_protected_fail_stop", threading.Event())
+    monkeypatch.delenv("INVOCATION_ID", raising=False)
+
+    with pytest.raises(scheduler.GatewayFailStopRequired):
+        scheduler.run_one_job(
+            {"id": JOB_ID, "execution_id": "execution-cli"},
+            _fatal_restart_hook=scheduler._systemd_gateway_fail_stop,
+        )
+
+    assert [event[0] for event in events] == [
+        "running",
+        "run",
+        "persist",
+        "teardown",
+    ]
+
+
+def test_poisoned_tick_touches_no_lock_schedule_execution_or_handler(monkeypatch):
+    events = []
+    poison = threading.Event()
+    poison.set()
+    monkeypatch.setattr(scheduler, "_protected_fail_stop", poison)
+    monkeypatch.setattr(
+        scheduler,
+        "_get_lock_paths",
+        lambda: events.append("lock-path") or (Path("/unused"), Path("/unused/lock")),
+    )
+    monkeypatch.setattr(
+        scheduler, "get_due_jobs", lambda: events.append("read-schedules") or []
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "advance_next_runs",
+        lambda _job_ids: events.append("advance-schedule"),
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "create_execution",
+        lambda *_args, **_kwargs: events.append("create-execution"),
+    )
+    monkeypatch.setattr(
+        scheduler, "run_one_job", lambda *_args, **_kwargs: events.append("handler")
+    )
+
+    with pytest.raises(scheduler.GatewayFailStopRequired):
+        scheduler.tick(verbose=False, sync=True)
+
+    assert events == []
 
 
 def test_fail_stop_hook_is_not_called_for_cooperative_or_ordinary_failures(

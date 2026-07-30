@@ -22,7 +22,9 @@ from hermes_time import now as _hermes_now
 EXECUTIONS_FILE = get_hermes_home().resolve() / "cron" / "executions.db"
 MAX_TERMINAL_EXECUTIONS = 1000
 _TERMINAL_STATES = ("completed", "failed", "unknown")
-_lock = threading.RLock()
+_IMPORT_EXECUTIONS_FILE = EXECUTIONS_FILE
+_locks_guard = threading.Lock()
+_locks: Dict[Path, threading.RLock] = {}
 _PROCESS_ID = uuid.uuid4().hex
 
 
@@ -314,12 +316,37 @@ def _open_private_cron_lock(lock_path: Path) -> int:
         raise
 
 
-def _connect() -> sqlite3.Connection:
-    _normalize_execution_store_permissions(EXECUTIONS_FILE)
-    return sqlite3.connect(EXECUTIONS_FILE, timeout=5)
+def _current_executions_file() -> Path:
+    """Resolve the ledger once from the active immutable profile context."""
+    configured = Path(
+        os.path.abspath(os.fspath(Path(EXECUTIONS_FILE).expanduser()))
+    )
+    if configured != _IMPORT_EXECUTIONS_FILE:
+        return configured
+    return Path(
+        os.path.abspath(
+            os.fspath(
+                get_hermes_home().expanduser() / "cron" / "executions.db"
+            )
+        )
+    )
 
 
-def _initialize_schema(conn: sqlite3.Connection) -> None:
+def _lock_for(path: Path) -> threading.RLock:
+    with _locks_guard:
+        return _locks.setdefault(path, threading.RLock())
+
+
+def _connect(path: Path | None = None) -> sqlite3.Connection:
+    path = _current_executions_file() if path is None else path
+    _normalize_execution_store_permissions(path)
+    return sqlite3.connect(path, timeout=5)
+
+
+def _initialize_schema(
+    conn: sqlite3.Connection,
+    executions_file: Path,
+) -> None:
     from hermes_state import apply_wal_with_fallback
 
     conn.row_factory = sqlite3.Row
@@ -351,7 +378,7 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
         "ON executions(status, claimed_at DESC, id DESC)"
     )
     _normalize_execution_store_permissions(
-        EXECUTIONS_FILE,
+        executions_file,
         require_database=True,
     )
 
@@ -367,10 +394,15 @@ def _transaction() -> Iterator[sqlite3.Connection]:
     inside the ``try`` too, so a PRAGMA/DDL failure after a successful
     ``connect()`` still closes the connection instead of leaking it.
     """
-    with _lock:
-        conn = _connect()
+    executions_file = _current_executions_file()
+    with _lock_for(executions_file):
+        conn = _connect(executions_file)
         try:
-            _initialize_schema(conn)
+            _initialize_schema(conn, executions_file)
+            try:
+                os.chmod(executions_file, 0o600)
+            except OSError:
+                pass
             with conn:
                 yield conn
         finally:

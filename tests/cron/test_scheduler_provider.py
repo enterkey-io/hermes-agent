@@ -20,6 +20,8 @@ import threading
 import time
 from unittest.mock import patch
 
+import pytest
+
 
 def _wait_until(predicate, timeout=10.0, interval=0.005):
     """Block until ``predicate()`` is truthy or ``timeout`` elapses.
@@ -225,16 +227,15 @@ def test_hooks_did_not_change_required_surface():
     assert set(CronScheduler.__abstractmethods__) == {"name", "start"}
 
 
-def test_builtin_inherits_hook_defaults():
-    """The built-in inherits no-op defaults for the new hooks (it never needs
-    to override them)."""
+def test_builtin_keeps_noop_hooks_and_overrides_trusted_fire_due():
+    """Only the built-in provider owns the trusted fire_due implementation."""
+    from cron.scheduler_provider import CronScheduler
     from cron.scheduler_provider import InProcessCronScheduler
 
     p = InProcessCronScheduler()
     assert p.on_jobs_changed() is None
     assert p.reconcile() is None
-    # built-in does not override fire_due; it simply isn't called for built-in.
-    assert hasattr(p, "fire_due")
+    assert type(p).fire_due is not CronScheduler.fire_due
 
 
 def test_fire_due_default_claims_then_runs(monkeypatch):
@@ -252,6 +253,147 @@ def test_fire_due_default_claims_then_runs(monkeypatch):
     assert InProcessCronScheduler().fire_due("j1") is True
     assert ran == ["j1"]
 
+
+def test_builtin_fire_due_carries_exact_trusted_dispatch_and_fatal_hook(
+    monkeypatch,
+    tmp_path,
+):
+    import cron.executions as executions
+    import cron.jobs as jobs
+    import cron.scheduler as sched
+    from cron.scheduler_provider import InProcessCronScheduler
+
+    home = tmp_path / "profiles" / "emily"
+    permit = object()
+    captured = {}
+    monkeypatch.setattr(jobs, "claim_job_for_fire", lambda _job_id: True)
+    monkeypatch.setattr(jobs, "get_job", lambda job_id: {"id": job_id, "name": "t"})
+    monkeypatch.setattr(
+        executions,
+        "create_execution",
+        lambda job_id, *, source: {"id": f"execution-{job_id}"},
+    )
+    monkeypatch.setattr(sched, "_get_hermes_home", lambda: home)
+    monkeypatch.setattr(sched, "_profile_identity_for_home", lambda _home: "emily")
+
+    def issue(job, **kwargs):
+        captured["issued"] = (job, kwargs)
+        return permit
+
+    def run(job, **kwargs):
+        captured["run"] = (job, kwargs)
+        return True
+
+    monkeypatch.setattr(sched, "_issue_registered_cron_dispatch", issue)
+    monkeypatch.setattr(sched, "run_one_job", run)
+
+    assert InProcessCronScheduler().fire_due("j1") is True
+    issued_job, issued_kwargs = captured["issued"]
+    run_job, run_kwargs = captured["run"]
+    assert issued_job is run_job
+    assert issued_kwargs == {
+        "profile_name": "emily",
+        "hermes_home": home,
+        "execution_id": "execution-j1",
+    }
+    assert run_kwargs["_trusted_dispatch"] is permit
+    assert run_kwargs["_fatal_restart_hook"] is sched._systemd_gateway_fail_stop
+
+
+def test_external_provider_fire_due_remains_untrusted(monkeypatch):
+    import cron.executions as executions
+    import cron.jobs as jobs
+    import cron.scheduler as sched
+    from cron.scheduler_provider import CronScheduler
+
+    class External(CronScheduler):
+        @property
+        def name(self):
+            return "external"
+
+        def start(self, stop_event, **kwargs):
+            pass
+
+    captured = []
+    monkeypatch.setattr(jobs, "claim_job_for_fire", lambda _job_id: True)
+    monkeypatch.setattr(jobs, "get_job", lambda job_id: {"id": job_id})
+    monkeypatch.setattr(
+        executions,
+        "create_execution",
+        lambda job_id, *, source: {"id": f"execution-{job_id}"},
+    )
+    monkeypatch.setattr(
+        sched,
+        "run_one_job",
+        lambda job, **kwargs: captured.append((job, kwargs)) or True,
+    )
+
+    assert External().fire_due("j1") is True
+    assert captured[0][1] == {"adapters": None, "loop": None}
+
+
+def test_poisoned_fire_due_touches_no_claim_job_execution_or_handler(monkeypatch):
+    import cron.executions as executions
+    import cron.jobs as jobs
+    import cron.scheduler as sched
+    from cron.scheduler_provider import InProcessCronScheduler
+
+    events = []
+    poison = threading.Event()
+    poison.set()
+    monkeypatch.setattr(sched, "_protected_fail_stop", poison)
+    monkeypatch.setattr(
+        jobs,
+        "claim_job_for_fire",
+        lambda _job_id: events.append("claim") or True,
+    )
+    monkeypatch.setattr(
+        jobs, "get_job", lambda _job_id: events.append("get-job") or {"id": "j1"}
+    )
+    monkeypatch.setattr(
+        executions,
+        "create_execution",
+        lambda *_args, **_kwargs: events.append("create-execution"),
+    )
+    monkeypatch.setattr(
+        sched, "run_one_job", lambda *_args, **_kwargs: events.append("handler")
+    )
+
+    with pytest.raises(sched.GatewayFailStopRequired):
+        InProcessCronScheduler().fire_due("j1")
+
+    assert events == []
+
+
+def test_fire_due_lost_claim_does_not_run(monkeypatch):
+    """If the CAS claim is lost (another machine/retry won), fire_due returns
+    False and never runs the job."""
+    import cron.jobs as jobs
+    import cron.scheduler as sched
+    from cron.scheduler_provider import InProcessCronScheduler
+
+    ran = []
+    monkeypatch.setattr(jobs, "claim_job_for_fire", lambda jid: False, raising=False)
+    monkeypatch.setattr(sched, "run_one_job", lambda job, **kw: ran.append(job["id"]) or True)
+
+    assert InProcessCronScheduler().fire_due("j1") is False
+    assert ran == []
+
+
+def test_fire_due_missing_job_does_not_run(monkeypatch):
+    """If the job vanished between arm and fire (e.g. repeat-N exhausted),
+    fire_due returns False without running."""
+    import cron.jobs as jobs
+    import cron.scheduler as sched
+    from cron.scheduler_provider import InProcessCronScheduler
+
+    ran = []
+    monkeypatch.setattr(jobs, "claim_job_for_fire", lambda jid: True, raising=False)
+    monkeypatch.setattr(jobs, "get_job", lambda jid: None)
+    monkeypatch.setattr(sched, "run_one_job", lambda job, **kw: ran.append(job["id"]) or True)
+
+    assert InProcessCronScheduler().fire_due("gone") is False
+    assert ran == []
 
 # ── F2a: ticker liveness — survival, heartbeat, honest status (#32612, #32895) ──
 
@@ -412,5 +554,4 @@ def test_multiplex_ticker_ticks_each_profile_once(tmp_path, monkeypatch):
     # With 2 profiles and multiple iterations, we should have seen at least 2 calls.
     assert len(tick_count) >= len(profile_homes), \
         f"Expected >= {len(profile_homes)} tick calls, got {len(tick_count)}"
-
 

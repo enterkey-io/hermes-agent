@@ -5,8 +5,11 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import stat
 import subprocess
 import sys
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -15,6 +18,19 @@ def _point_ledger(monkeypatch, tmp_path):
 
     monkeypatch.setattr(executions, "EXECUTIONS_FILE", tmp_path / "cron" / "executions.db")
     return executions
+
+
+@contextmanager
+def _profile_cron_scope(home):
+    from cron.jobs import use_cron_store
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    token = set_hermes_home_override(home)
+    try:
+        with use_cron_store(home):
+            yield
+    finally:
+        reset_hermes_home_override(token)
 
 
 def test_execution_transitions_are_durable(monkeypatch, tmp_path):
@@ -87,6 +103,136 @@ def test_cron_runs_cli_prints_execution_history(monkeypatch, tmp_path, capsys):
     assert row["id"] in output
     assert "failed" in output
     assert "boom" in output
+
+
+def test_two_profiles_persist_recover_and_list_only_their_own_ledgers(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    import cron.executions as executions
+    from hermes_cli.cron import cron_runs
+
+    profile_a = tmp_path / "profiles" / "emily"
+    profile_b = tmp_path / "profiles" / "maggie"
+    with _profile_cron_scope(profile_a):
+        record_a = executions.create_execution("job-a", source="builtin")
+    with _profile_cron_scope(profile_b):
+        record_b = executions.create_execution("job-b", source="builtin")
+
+    ledger_a = profile_a / "cron" / "executions.db"
+    ledger_b = profile_b / "cron" / "executions.db"
+    assert ledger_a.is_file()
+    assert ledger_b.is_file()
+    assert ledger_a != ledger_b
+
+    with sqlite3.connect(ledger_a) as conn:
+        conn.execute(
+            "UPDATE executions SET process_id=?, pid=? WHERE id=?",
+            ("dead-a", -1, record_a["id"]),
+        )
+    with sqlite3.connect(ledger_b) as conn:
+        conn.execute(
+            "UPDATE executions SET process_id=?, pid=? WHERE id=?",
+            ("dead-b", -1, record_b["id"]),
+        )
+
+    before_b = ledger_b.read_bytes()
+    with _profile_cron_scope(profile_a):
+        assert executions.recover_interrupted_executions() == 1
+        assert executions.latest_execution("job-a")["status"] == "unknown"
+        assert executions.latest_execution("job-b") is None
+        cron_runs(limit=10)
+    output_a = capsys.readouterr().out
+    assert record_a["id"] in output_a
+    assert record_b["id"] not in output_a
+    assert ledger_b.read_bytes() == before_b
+
+    before_a = ledger_a.read_bytes()
+    with _profile_cron_scope(profile_b):
+        assert executions.latest_execution("job-a") is None
+        assert executions.latest_execution("job-b")["status"] == "claimed"
+        assert executions.recover_interrupted_executions() == 1
+        cron_runs(limit=10)
+    output_b = capsys.readouterr().out
+    assert record_b["id"] in output_b
+    assert record_a["id"] not in output_b
+    assert ledger_a.read_bytes() == before_a
+
+
+def test_multiplex_provider_recovers_each_profiles_own_execution_ledger(
+    monkeypatch,
+    tmp_path,
+):
+    import cron.executions as executions
+    from cron.scheduler_provider import InProcessCronScheduler
+
+    profile_a = tmp_path / "profiles" / "emily"
+    profile_b = tmp_path / "profiles" / "maggie"
+    records = {}
+    for name, home in (("emily", profile_a), ("maggie", profile_b)):
+        with _profile_cron_scope(home):
+            records[name] = executions.create_execution(
+                f"job-{name}", source="builtin"
+            )
+        with sqlite3.connect(home / "cron" / "executions.db") as conn:
+            conn.execute(
+                "UPDATE executions SET process_id=?, pid=? WHERE id=?",
+                (f"dead-{name}", -1, records[name]["id"]),
+            )
+
+    monkeypatch.setattr("cron.jobs.record_ticker_heartbeat", lambda **_kwargs: None)
+    stopped = threading.Event()
+    stopped.set()
+    InProcessCronScheduler().start(
+        stopped,
+        profile_homes=[("emily", profile_a), ("maggie", profile_b)],
+    )
+
+    for name, home, other_name in (
+        ("emily", profile_a, "maggie"),
+        ("maggie", profile_b, "emily"),
+    ):
+        with _profile_cron_scope(home):
+            assert executions.latest_execution(f"job-{name}")["status"] == "unknown"
+            assert executions.latest_execution(f"job-{other_name}") is None
+
+
+def test_late_profile_context_does_not_write_import_time_execution_ledger(
+    monkeypatch,
+    tmp_path,
+):
+    import cron.executions as executions
+
+    active_home = tmp_path / "profiles" / "active"
+    import_time_ledger = executions.EXECUTIONS_FILE
+    import_time_bytes = (
+        import_time_ledger.read_bytes() if import_time_ledger.exists() else None
+    )
+
+    with _profile_cron_scope(active_home):
+        executions.create_execution("profile-only", source="builtin")
+
+    active_ledger = active_home / "cron" / "executions.db"
+    assert active_ledger.is_file()
+    assert executions.EXECUTIONS_FILE == import_time_ledger
+    if import_time_bytes is None:
+        assert not import_time_ledger.exists()
+    else:
+        assert import_time_ledger.read_bytes() == import_time_bytes
+
+
+def test_profile_execution_ledger_is_owner_only(tmp_path):
+    import cron.executions as executions
+
+    profile_home = tmp_path / "profiles" / "private"
+    with _profile_cron_scope(profile_home):
+        executions.create_execution("private-job", source="builtin")
+
+    cron_dir = profile_home / "cron"
+    ledger = cron_dir / "executions.db"
+    assert stat.S_IMODE(cron_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE(ledger.stat().st_mode) == 0o600
 
 
 def test_quick_backup_includes_execution_ledger():

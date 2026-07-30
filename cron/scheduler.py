@@ -362,6 +362,13 @@ class GatewayFailStopRequired(RuntimeError):
 _protected_fail_stop = threading.Event()
 
 
+def _raise_if_scheduler_poisoned() -> None:
+    if _protected_fail_stop.is_set():
+        raise GatewayFailStopRequired(
+            "Cron dispatch is disabled until the poisoned scheduler process restarts."
+        )
+
+
 def _systemd_gateway_fail_stop(_failure: ProtectedMutationFailure) -> None:
     """Terminate only a systemd-hosted gateway after durable failure recording."""
     if not os.environ.get("INVOCATION_ID"):
@@ -4718,25 +4725,37 @@ def _teardown_cron_agent(agent, job_id: str) -> None:
         logger.debug("Job '%s': failed to reap stale auxiliary clients: %s", job_id, e)
 
 
-def _fail_stop_after_uncooperative_handler(
+def _prepare_fail_stop_after_uncooperative_handler(
     *,
     execution_id: str,
     failure: ProtectedMutationFailure,
     fatal_restart_hook,
-) -> None:
-    """Persist reconciliation state, poison dispatch, then restart the gateway."""
+) -> tuple[ProtectedMutationFailure, Any, bool]:
+    """Persist reconciliation state and poison before deferred teardown."""
     durable_error = failure.durable_error()
-    terminal_record = finish_execution(
-        execution_id,
-        success=False,
-        error=durable_error,
-    )
+    try:
+        terminal_record = finish_execution(
+            execution_id,
+            success=False,
+            error=durable_error,
+        )
+    except BaseException:
+        terminal_record = None
     _protected_fail_stop.set()
-    if (
-        not isinstance(terminal_record, dict)
-        or terminal_record.get("status") != "failed"
-        or terminal_record.get("error") != durable_error
-    ):
+    persisted = (
+        isinstance(terminal_record, dict)
+        and terminal_record.get("status") == "failed"
+        and terminal_record.get("error") == durable_error
+    )
+    return failure, fatal_restart_hook, persisted
+
+
+def _complete_fail_stop_after_teardown(
+    pending: tuple[ProtectedMutationFailure, Any, bool],
+) -> None:
+    """Invoke the gateway fail-stop only after all agent resources are closed."""
+    failure, fatal_restart_hook, persisted = pending
+    if not persisted:
         logger.critical(
             "Protected handler did not settle and durable failure persistence "
             "could not be confirmed; cron dispatch is disabled."
@@ -4765,6 +4784,21 @@ def _fail_stop_after_uncooperative_handler(
     )
 
 
+def _fail_stop_after_uncooperative_handler(
+    *,
+    execution_id: str,
+    failure: ProtectedMutationFailure,
+    fatal_restart_hook,
+) -> None:
+    """Compatibility helper for callers without deferred resources."""
+    pending = _prepare_fail_stop_after_uncooperative_handler(
+        execution_id=execution_id,
+        failure=failure,
+        fatal_restart_hook=fatal_restart_hook,
+    )
+    _complete_fail_stop_after_teardown(pending)
+
+
 def run_one_job(
     job: dict,
     *,
@@ -4789,10 +4823,7 @@ def run_one_job(
     Returns True if the job was processed (even if the job itself failed —
     failure is recorded via ``mark_job_run``), False only if processing raised.
     """
-    if _protected_fail_stop.is_set():
-        raise GatewayFailStopRequired(
-            "Cron dispatch is disabled until the poisoned scheduler process restarts."
-        )
+    _raise_if_scheduler_poisoned()
 
     execution_id = job.get("execution_id")
     if not execution_id:
@@ -4865,11 +4896,14 @@ def run_one_job(
             reset_secret_scope(_scope_token)
 
         if isinstance(error, ProtectedMutationFailure) and error.uncooperative:
-            _fail_stop_after_uncooperative_handler(
+            pending_fail_stop = _prepare_fail_stop_after_uncooperative_handler(
                 execution_id=execution_id,
                 failure=error,
                 fatal_restart_hook=_fatal_restart_hook,
             )
+            for _deferred_agent in _deferred_agents:
+                _teardown_cron_agent(_deferred_agent, job["id"])
+            _complete_fail_stop_after_teardown(pending_fail_stop)
 
         # Everything from here through delivery runs with the agent still live
         # (deferred teardown). Wrap it ALL in a try/finally so that if any step
@@ -5136,6 +5170,7 @@ def tick(
     Returns:
         Number of jobs executed (0 if another tick is already running)
     """
+    _raise_if_scheduler_poisoned()
     lock_dir, lock_file = _get_lock_paths()
     # Cross-platform file locking: fcntl on Unix, msvcrt on Windows
     lock_fd = None

@@ -112,8 +112,9 @@ class CronScheduler(ABC):
         """
         from cron.jobs import claim_job_for_fire, get_job
         from cron.executions import create_execution
-        from cron.scheduler import run_one_job
+        from cron.scheduler import _raise_if_scheduler_poisoned, run_one_job
 
+        _raise_if_scheduler_poisoned()
         if not claim_job_for_fire(job_id):
             return False  # another machine already claimed this fire
         job = get_job(job_id)
@@ -182,6 +183,42 @@ class InProcessCronScheduler(CronScheduler):
     @property
     def name(self) -> str:
         return "builtin"
+
+    def fire_due(self, job_id: str, *, adapters: Any = None, loop: Any = None) -> bool:
+        """Fire through the built-in trusted scheduler capability boundary."""
+        from cron.executions import create_execution
+        from cron.jobs import claim_job_for_fire, get_job
+        from cron.scheduler import (
+            _get_hermes_home,
+            _issue_registered_cron_dispatch,
+            _profile_identity_for_home,
+            _raise_if_scheduler_poisoned,
+            _systemd_gateway_fail_stop,
+            run_one_job,
+        )
+
+        _raise_if_scheduler_poisoned()
+        if not claim_job_for_fire(job_id):
+            return False
+        job = get_job(job_id)
+        if job is None:
+            return False
+        execution = create_execution(job_id, source=self.name)
+        dispatched_job = dict(job, execution_id=execution["id"])
+        hermes_home = _get_hermes_home().expanduser().resolve()
+        trusted_dispatch = _issue_registered_cron_dispatch(
+            dispatched_job,
+            profile_name=_profile_identity_for_home(hermes_home),
+            hermes_home=hermes_home,
+            execution_id=execution["id"],
+        )
+        return run_one_job(
+            dispatched_job,
+            adapters=adapters,
+            loop=loop,
+            _trusted_dispatch=trusted_dispatch,
+            _fatal_restart_hook=_systemd_gateway_fail_stop,
+        )
 
     def start(
         self,
