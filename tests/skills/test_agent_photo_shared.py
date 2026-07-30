@@ -91,6 +91,37 @@ def test_generator_reports_no_op_fallback_wrapper_contract(
         ).hexdigest()
 
 
+def test_credential_probe_reports_only_injected_provider_names(
+    monkeypatch, capsys, generate
+):
+    monkeypatch.setenv("GEMINI_API_KEY", "test-gemini")
+    monkeypatch.setenv("NOVITA_API_KEY", "test-novita")
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    monkeypatch.setattr(
+        generate.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail(
+            "credential probe must not invoke 1Password or a provider"
+        ),
+    )
+
+    result = generate.main(
+        [
+            "--credential-probe",
+            "gemini",
+            "--credential-probe",
+            "novita",
+        ]
+    )
+
+    assert result == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "availableNames": ["GEMINI_API_KEY", "NOVITA_API_KEY"],
+        "missingNames": [],
+        "status": "pass",
+    }
+
+
 def test_profile_root_prefers_hermes_home(monkeypatch, tmp_path, identity_parser):
     profile = tmp_path / "profiles" / "grace"
     profile.mkdir(parents=True)

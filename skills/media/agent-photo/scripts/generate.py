@@ -39,6 +39,11 @@ _OP_ITEMS = {
     "gemini": "op://Assistant/Gemini API Credentials/credential",
     "novita": "op://Assistant/Novita API Credentials/credential",
 }
+_PROVIDER_ENV_NAMES = {
+    "xai": "XAI_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "novita": "NOVITA_API_KEY",
+}
 
 _NO_OP_FALLBACK = ContextVar("agent_photo_no_op_fallback", default=False)
 WRAPPER_CONTRACT = "hermes-agent-photo/no-op-fallback/v2"
@@ -54,8 +59,7 @@ WRAPPER_CONTRACT_FILES = (
 
 def _get_api_key(provider: str, *, allow_op_fallback: bool | None = None) -> str:
     """Get API key from env var or 1Password CLI."""
-    env_map = {"xai": "XAI_API_KEY", "gemini": "GEMINI_API_KEY", "novita": "NOVITA_API_KEY"}
-    env_name = env_map.get(provider, "")
+    env_name = _PROVIDER_ENV_NAMES.get(provider, "")
     key = os.environ.get(env_name, "")
     if key:
         return key
@@ -599,7 +603,11 @@ The script builds a complete 15-part prompt including:
 You just provide the scene (pose, outfit, location, lighting, expression).
         '''
     )
-    parser.add_argument('scene', help='Scene description: pose, outfit, location, lighting, expression')
+    parser.add_argument(
+        'scene',
+        nargs='?',
+        help='Scene description: pose, outfit, location, lighting, expression',
+    )
     parser.add_argument('--output', help='Output filename (default: auto-generated)')
     parser.add_argument('--model', choices=['gemini', 'grok', 'seedream'], default='gemini',
                         help='Paid image provider (default: gemini)')
@@ -646,6 +654,12 @@ You just provide the scene (pose, outfit, location, lighting, expression).
         action='store_true',
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        '--credential-probe',
+        action='append',
+        choices=sorted(_PROVIDER_ENV_NAMES),
+        help=argparse.SUPPRESS,
+    )
     return parser
 
 
@@ -685,6 +699,33 @@ def main(argv: list[str] | None = None, providers: dict | None = None) -> int:
         except Exception as exc:
             print(f"Wrapper contract probe failed: {exc}", file=sys.stderr)
             return 1
+
+    if args.credential_probe:
+        available: list[str] = []
+        missing: list[str] = []
+        for provider in args.credential_probe:
+            name = _PROVIDER_ENV_NAMES[provider]
+            try:
+                _get_api_key(provider, allow_op_fallback=False)
+            except RuntimeError:
+                missing.append(name)
+            else:
+                available.append(name)
+        print(
+            json.dumps(
+                {
+                    "availableNames": available,
+                    "missingNames": missing,
+                    "status": "pass" if not missing else "fail",
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        return 0 if not missing else 1
+
+    if not args.scene:
+        parser.error("scene is required unless a probe is used")
 
     if not args.preview_prompt and not args.approved:
         print(
