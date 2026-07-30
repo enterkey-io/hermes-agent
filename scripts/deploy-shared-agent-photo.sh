@@ -13,8 +13,14 @@ fixed_runbook="/home/elliott/hermes-runbooks/scripts/run-hermes-agent-photo.py"
 archive_local=false
 snapshot_stage=""
 launcher_stage=""
+snapshot_transaction_root=""
+launcher_transaction_root=""
+snapshot_transaction_owned=false
+launcher_transaction_owned=false
 snapshot_mode=""
 launcher_mode=""
+archived_sources=()
+archived_destinations=()
 
 atomic_exchange() {
   "$fixed_python" - "$1" "$2" <<'PY'
@@ -67,6 +73,113 @@ rollback_published_snapshot() {
   elif [[ "$mode" == "create" && -e "$target" ]]; then
     mv -T "$target" "$staged"
   fi
+}
+
+write_recovery_status() {
+  local recovery_root="$1"
+  local component="$2"
+  local live_path="$3"
+  local prior_path="$4"
+  local rollback_status="${5:-failed}"
+  local status_path="$recovery_root/STATUS"
+  local record_status=written
+
+  if ! chmod 0700 "$recovery_root" 2>/dev/null; then
+    record_status=failed
+  fi
+  if printf \
+    'rollback_status=%s\ncomponent=%s\nlive_status=unverified\nlive_path=%s\nprior_path=%s\n' \
+    "$rollback_status" "$component" "$live_path" "$prior_path" \
+    >"$status_path" 2>/dev/null; then
+    if ! chmod 0600 "$status_path" 2>/dev/null; then
+      record_status=failed
+    fi
+  else
+    record_status=failed
+  fi
+  printf 'rollback_status=%s\n' "$rollback_status" >&2
+  printf 'component=%s\n' "$component" >&2
+  printf 'live_status=unverified\n' >&2
+  printf 'live_path=%s\n' "$live_path" >&2
+  printf 'prior_path=%s\n' "$prior_path" >&2
+  printf 'recovery_record_status=%s\n' "$record_status" >&2
+  printf 'recovery_status_path=%s\n' "$status_path" >&2
+}
+
+restore_archived_skills() {
+  local restore_failed=0
+  local index source_path archive_path
+
+  for ((index=${#archived_sources[@]} - 1; index >= 0; index--)); do
+    source_path="${archived_sources[$index]}"
+    archive_path="${archived_destinations[$index]}"
+    if [[ -e "$source_path" && ! -e "$archive_path" ]]; then
+      continue
+    fi
+    if [[ ! -e "$source_path" && -e "$archive_path" ]]; then
+      if mv -T "$archive_path" "$source_path" 2>/dev/null; then
+        continue
+      fi
+    fi
+    restore_failed=1
+    printf 'archive_restore_status=failed\n' >&2
+    printf 'source_path=%s\n' "$source_path" >&2
+    printf 'archive_path=%s\n' "$archive_path" >&2
+  done
+
+  return "$restore_failed"
+}
+
+cleanup() {
+  local status=$?
+  local snapshot_recovery_failed=false
+  local launcher_recovery_failed=false
+  local archive_recovery_failed=false
+  trap - EXIT
+  set +e
+
+  if [[ $status -ne 0 ]]; then
+    if [[ -n "${launcher_mode:-}" ]]; then
+      if ! rollback_published_snapshot \
+        "$launcher_stage" "$launcher_path" "$launcher_mode" 2>/dev/null; then
+        launcher_recovery_failed=true
+        write_recovery_status \
+          "$launcher_transaction_root" launcher "$launcher_path" "$launcher_stage"
+      fi
+    fi
+    if [[ -n "${snapshot_mode:-}" ]]; then
+      if [[ "$launcher_recovery_failed" == true ]]; then
+        snapshot_recovery_failed=true
+        write_recovery_status \
+          "$snapshot_transaction_root" snapshot "$target_dir" "$snapshot_stage" \
+          blocked
+      elif ! rollback_published_snapshot \
+        "$snapshot_stage" "$target_dir" "$snapshot_mode" 2>/dev/null; then
+        snapshot_recovery_failed=true
+        write_recovery_status \
+          "$snapshot_transaction_root" snapshot "$target_dir" "$snapshot_stage"
+      fi
+    fi
+    if ! restore_archived_skills; then
+      archive_recovery_failed=true
+    fi
+  fi
+
+  if [[ "$snapshot_transaction_owned" == true \
+    && "$snapshot_recovery_failed" != true ]]; then
+    rm -rf "$snapshot_transaction_root"
+  fi
+  if [[ "$launcher_transaction_owned" == true \
+    && "$launcher_recovery_failed" != true ]]; then
+    rm -rf "$launcher_transaction_root"
+  fi
+
+  if [[ "$snapshot_recovery_failed" == true \
+    || "$launcher_recovery_failed" == true \
+    || "$archive_recovery_failed" == true ]]; then
+    status=1
+  fi
+  exit "$status"
 }
 
 verify_snapshot_tree() {
@@ -184,12 +297,35 @@ if (
 PY
 }
 
+archive_profile_skill() {
+  local skill_md="$1"
+  local timestamp="$2"
+  local skill_dir profile_dir relative_dir archive_root archive_dir
+
+  skill_dir="${skill_md%/SKILL.md}"
+  profile_dir="${skill_dir%%/skills/*}"
+  relative_dir="${skill_dir#"$profile_dir/skills/"}"
+  archive_root="$profile_dir/skills/.archive/shared-agent-photo-$timestamp"
+  archive_dir="$archive_root/$relative_dir"
+  if [[ -e "$archive_dir" ]]; then
+    printf 'archive_status=refused\n' >&2
+    printf 'archive_path=%s\n' "$archive_dir" >&2
+    return 1
+  fi
+  mkdir -p "$(dirname "$archive_dir")"
+  chmod 0700 "$profile_dir/skills/.archive" "$archive_root"
+  archived_sources+=("$skill_dir")
+  archived_destinations+=("$archive_dir")
+  mv -T "$skill_dir" "$archive_dir"
+  printf 'Archived local skill: %s -> %s\n' "$skill_dir" "$archive_dir"
+}
+
 handle_profile_shadows() {
   mapfile -d '' local_skills < <(
     find "$profiles_dir" -type f -path '*/skills/*/agent-photo/SKILL.md' \
       ! -path '*/skills/.archive/*' \
       ! -path '*/skills/.curator_backups/*' \
-      -print0 2>/dev/null
+      -print0 2>/dev/null | sort -z
   )
 
   if (( ${#local_skills[@]} > 0 )) && [[ "$archive_local" != true ]]; then
@@ -203,14 +339,7 @@ handle_profile_shadows() {
     local timestamp
     timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
     for skill_md in "${local_skills[@]}"; do
-      local skill_dir profile_dir relative_dir archive_dir
-      skill_dir="${skill_md%/SKILL.md}"
-      profile_dir="${skill_dir%%/skills/*}"
-      relative_dir="${skill_dir#"$profile_dir/skills/"}"
-      archive_dir="$profile_dir/skills/.archive/shared-agent-photo-$timestamp/$relative_dir"
-      mkdir -p "$(dirname "$archive_dir")"
-      mv "$skill_dir" "$archive_dir"
-      printf 'Archived local skill: %s -> %s\n' "$skill_dir" "$archive_dir"
+      archive_profile_skill "$skill_md" "$timestamp"
     done
   fi
 
@@ -228,6 +357,9 @@ handle_profile_shadows() {
 }
 
 main() {
+  trap cleanup EXIT
+  umask 077
+
   if [[ "${1:-}" == "--archive-local" ]]; then
     archive_local=true
   elif [[ $# -gt 0 ]]; then
@@ -240,33 +372,26 @@ main() {
     return 1
   fi
 
+  snapshot_transaction_root="$shared_root/.agent-photo.transaction"
+  launcher_transaction_root="$launcher_root/.hermes-agent-photo.transaction"
+  snapshot_stage="$snapshot_transaction_root/snapshot"
+  launcher_stage="$launcher_transaction_root/launcher"
+  if [[ -e "$snapshot_transaction_root" || -e "$launcher_transaction_root" ]]; then
+    printf 'deployment_status=recovery_required\n' >&2
+    printf 'snapshot_recovery_path=%s\n' "$snapshot_transaction_root" >&2
+    printf 'launcher_recovery_path=%s\n' "$launcher_transaction_root" >&2
+    return 1
+  fi
+
   handle_profile_shadows
   mkdir -p "$shared_root" "$launcher_root"
   chmod 0755 "$shared_root" "$launcher_root"
 
-  snapshot_stage="$(mktemp -d "$shared_root/.agent-photo.stage.XXXXXX")"
-  launcher_stage="$(mktemp "$launcher_root/.hermes-agent-photo.stage.XXXXXX")"
-
-  cleanup() {
-    local status=$?
-    trap - EXIT
-    if [[ $status -ne 0 ]]; then
-      if [[ -n "${launcher_mode:-}" ]]; then
-        rollback_published_snapshot "$launcher_stage" "$launcher_path" "$launcher_mode" || true
-      fi
-      if [[ -n "${snapshot_mode:-}" ]]; then
-        rollback_published_snapshot "$snapshot_stage" "$target_dir" "$snapshot_mode" || true
-      fi
-    fi
-    if [[ -n "${snapshot_stage:-}" ]]; then
-      rm -rf "$snapshot_stage"
-    fi
-    if [[ -n "${launcher_stage:-}" ]]; then
-      rm -f "$launcher_stage"
-    fi
-    exit "$status"
-  }
-  trap cleanup EXIT
+  mkdir -m 0700 "$snapshot_transaction_root"
+  snapshot_transaction_owned=true
+  mkdir -m 0700 "$launcher_transaction_root"
+  launcher_transaction_owned=true
+  mkdir -m 0700 "$snapshot_stage"
 
   cp -a "$source_dir/." "$snapshot_stage/"
   rm -rf "$snapshot_stage/.venv" "$snapshot_stage/scripts/__pycache__"
