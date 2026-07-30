@@ -112,9 +112,15 @@ class CronScheduler(ABC):
         """
         from cron.jobs import claim_job_for_fire, get_job
         from cron.executions import create_execution
-        from cron.scheduler import _raise_if_scheduler_poisoned, run_one_job
+        from cron.scheduler import (
+            _raise_if_scheduler_poisoned,
+            _untrusted_cron_job_requires_capability,
+            run_one_job,
+        )
 
         _raise_if_scheduler_poisoned()
+        if _untrusted_cron_job_requires_capability(job_id):
+            return False
         if not claim_job_for_fire(job_id):
             return False  # another machine already claimed this fire
         job = get_job(job_id)
@@ -184,42 +190,6 @@ class InProcessCronScheduler(CronScheduler):
     def name(self) -> str:
         return "builtin"
 
-    def fire_due(self, job_id: str, *, adapters: Any = None, loop: Any = None) -> bool:
-        """Fire through the built-in trusted scheduler capability boundary."""
-        from cron.executions import create_execution
-        from cron.jobs import claim_job_for_fire, get_job
-        from cron.scheduler import (
-            _get_hermes_home,
-            _issue_registered_cron_dispatch,
-            _profile_identity_for_home,
-            _raise_if_scheduler_poisoned,
-            _systemd_gateway_fail_stop,
-            run_one_job,
-        )
-
-        _raise_if_scheduler_poisoned()
-        if not claim_job_for_fire(job_id):
-            return False
-        job = get_job(job_id)
-        if job is None:
-            return False
-        execution = create_execution(job_id, source=self.name)
-        dispatched_job = dict(job, execution_id=execution["id"])
-        hermes_home = _get_hermes_home().expanduser().resolve()
-        trusted_dispatch = _issue_registered_cron_dispatch(
-            dispatched_job,
-            profile_name=_profile_identity_for_home(hermes_home),
-            hermes_home=hermes_home,
-            execution_id=execution["id"],
-        )
-        return run_one_job(
-            dispatched_job,
-            adapters=adapters,
-            loop=loop,
-            _trusted_dispatch=trusted_dispatch,
-            _fatal_restart_hook=_systemd_gateway_fail_stop,
-        )
-
     def start(
         self,
         stop_event,
@@ -230,11 +200,53 @@ class InProcessCronScheduler(CronScheduler):
         can_dispatch=None,
         profile_homes=None,
     ):
-        import logging
-        from cron.scheduler import (
-            _systemd_gateway_fail_stop,
-            tick as cron_tick,
+        from cron.scheduler import tick as cron_tick
+
+        return self._start_with_tick(
+            stop_event,
+            cron_tick=cron_tick,
+            adapters=adapters,
+            loop=loop,
+            interval=interval,
+            can_dispatch=can_dispatch,
+            profile_homes=profile_homes,
         )
+
+    def _start_gateway(
+        self,
+        stop_event,
+        *,
+        adapters=None,
+        loop=None,
+        interval=60,
+        can_dispatch=None,
+        profile_homes=None,
+    ):
+        """Run the private gateway-owned loop that may issue capabilities."""
+        from cron.scheduler import _trusted_scheduler_tick
+
+        return self._start_with_tick(
+            stop_event,
+            cron_tick=_trusted_scheduler_tick,
+            adapters=adapters,
+            loop=loop,
+            interval=interval,
+            can_dispatch=can_dispatch,
+            profile_homes=profile_homes,
+        )
+
+    def _start_with_tick(
+        self,
+        stop_event,
+        *,
+        cron_tick,
+        adapters=None,
+        loop=None,
+        interval=60,
+        can_dispatch=None,
+        profile_homes=None,
+    ):
+        import logging
         from cron.jobs import (
             clear_ticker_error,
             record_ticker_error,
@@ -259,6 +271,7 @@ class InProcessCronScheduler(CronScheduler):
                 loop=loop,
                 interval=interval,
                 can_dispatch=can_dispatch,
+                cron_tick=cron_tick,
             )
             return
 
@@ -284,7 +297,6 @@ class InProcessCronScheduler(CronScheduler):
                         loop=loop,
                         sync=False,
                         can_dispatch=can_dispatch,
-                        fatal_restart_hook=_systemd_gateway_fail_stop,
                     )
                 ok = True
             except BaseException as e:
@@ -320,6 +332,7 @@ class InProcessCronScheduler(CronScheduler):
         loop=None,
         interval=60,
         can_dispatch=None,
+        cron_tick=None,
     ):
         """Tick every served profile's cron store when multiplex_profiles is on.
 
@@ -330,10 +343,6 @@ class InProcessCronScheduler(CronScheduler):
         ``web_server.py`` scopes per-profile cron API calls.
         """
         import logging
-        from cron.scheduler import (
-            _systemd_gateway_fail_stop,
-            tick as cron_tick,
-        )
         from cron.jobs import (
             clear_ticker_error,
             record_ticker_error,
@@ -383,7 +392,6 @@ class InProcessCronScheduler(CronScheduler):
                                     loop=loop,
                                     sync=False,
                                     can_dispatch=can_dispatch,
-                                    fatal_restart_hook=_systemd_gateway_fail_stop,
                                 )
                         finally:
                             reset_hermes_home_override(home_token)

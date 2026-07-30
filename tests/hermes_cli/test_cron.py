@@ -218,6 +218,93 @@ def test_cron_tick_invokes_scheduler_tick_with_verbose(monkeypatch):
     assert calls == [True]
 
 
+def test_cron_tick_cannot_issue_protected_dispatch_or_mutate_state(monkeypatch):
+    from agent.execution_capabilities import ExecutionCapabilityError
+    from cron import scheduler
+
+    events = []
+    monkeypatch.setattr(
+        scheduler,
+        "_untrusted_cron_profile_has_capabilities",
+        lambda: True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "_get_lock_paths",
+        lambda: events.append("lock"),
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "advance_next_runs",
+        lambda _job_ids: events.append("advance"),
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "create_execution",
+        lambda *_args, **_kwargs: events.append("execution"),
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "_issue_registered_cron_dispatch",
+        lambda *_args, **_kwargs: events.append("issue"),
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "run_one_job",
+        lambda *_args, **_kwargs: events.append("handler"),
+    )
+
+    with pytest.raises(ExecutionCapabilityError):
+        cron_cli.cron_tick()
+
+    assert events == []
+
+
+def test_cron_create_success_prints_job_details(monkeypatch, capsys):
+    monkeypatch.setattr(
+        cron_cli,
+        "_cron_api",
+        lambda **kwargs: {
+            "success": True,
+            "job_id": "job-1",
+            "name": "Nightly docs",
+            "schedule": "every day",
+            "skills": ["docs"],
+            "next_run_at": "2026-06-01T00:00:00Z",
+            "job": {
+                "script": "scripts/build_docs.py",
+                "no_agent": True,
+                "workdir": "/tmp/repo",
+            },
+        },
+    )
+    monkeypatch.setattr(cron_cli, "_warn_if_gateway_not_running", lambda: None)
+
+    args = SimpleNamespace(
+        schedule="every day",
+        prompt="refresh docs",
+        name="Nightly docs",
+        deliver=None,
+        repeat=None,
+        skill="docs",
+        skills=None,
+        script="scripts/build_docs.py",
+        workdir="/tmp/repo",
+        no_agent=True,
+    )
+
+    rc = cron_cli.cron_create(args)
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Created job: job-1" in out
+    assert "Skills: docs" in out
+    assert "Script: scripts/build_docs.py" in out
+    assert "Mode: no-agent" in out
+    assert "Workdir: /tmp/repo" in out
+    assert "Next run: 2026-06-01T00:00:00Z" in out
+
 def test_cron_create_failure_returns_nonzero(monkeypatch, capsys):
     monkeypatch.setattr(cron_cli, "_cron_api", lambda **kwargs: {"success": False, "error": "boom"})
 

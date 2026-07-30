@@ -170,6 +170,54 @@ def test_dashboard_create_reports_saved_but_unregistered(
     assert "private callback URL and token" not in str(exc_info.value.detail)
 
 
+def test_dashboard_fire_cannot_issue_protected_dispatch_or_mutate_state(
+    isolated_profiles,
+    monkeypatch,
+):
+    from cron import scheduler
+    from cron.scheduler_provider import InProcessCronScheduler
+    from hermes_cli import web_server
+
+    events = []
+    monkeypatch.setattr(
+        "cron.scheduler_provider.resolve_cron_scheduler",
+        lambda: InProcessCronScheduler(),
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "_untrusted_cron_job_requires_capability",
+        lambda _job_id: True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "cron.jobs.claim_job_for_fire",
+        lambda _job_id: events.append("claim") or True,
+    )
+    monkeypatch.setattr(
+        "cron.executions.create_execution",
+        lambda *_args, **_kwargs: events.append("execution"),
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "_issue_registered_cron_dispatch",
+        lambda *_args, **_kwargs: events.append("issue"),
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "run_one_job",
+        lambda *_args, **_kwargs: events.append("handler"),
+    )
+
+    assert (
+        web_server._fire_cron_job_for_profile(
+            "worker_alpha",
+            "protected-job",
+        )
+        is False
+    )
+    assert events == []
+
+
 def test_profile_call_cannot_retarget_ticker_store_mid_write(
     isolated_profiles,
     monkeypatch,

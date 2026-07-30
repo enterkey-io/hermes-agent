@@ -227,15 +227,15 @@ def test_hooks_did_not_change_required_surface():
     assert set(CronScheduler.__abstractmethods__) == {"name", "start"}
 
 
-def test_builtin_keeps_noop_hooks_and_overrides_trusted_fire_due():
-    """Only the built-in provider owns the trusted fire_due implementation."""
+def test_builtin_keeps_noop_hooks_and_inherits_untrusted_fire_due():
+    """The public built-in fire path has the same untrusted base behavior."""
     from cron.scheduler_provider import CronScheduler
     from cron.scheduler_provider import InProcessCronScheduler
 
     p = InProcessCronScheduler()
     assert p.on_jobs_changed() is None
     assert p.reconcile() is None
-    assert type(p).fire_due is not CronScheduler.fire_due
+    assert type(p).fire_due is CronScheduler.fire_due
 
 
 def test_fire_due_default_claims_then_runs(monkeypatch):
@@ -254,50 +254,97 @@ def test_fire_due_default_claims_then_runs(monkeypatch):
     assert ran == ["j1"]
 
 
-def test_builtin_fire_due_carries_exact_trusted_dispatch_and_fatal_hook(
+def test_builtin_fire_due_rejects_protected_job_before_any_cron_state(
     monkeypatch,
-    tmp_path,
 ):
     import cron.executions as executions
     import cron.jobs as jobs
     import cron.scheduler as sched
     from cron.scheduler_provider import InProcessCronScheduler
 
-    home = tmp_path / "profiles" / "emily"
-    permit = object()
-    captured = {}
-    monkeypatch.setattr(jobs, "claim_job_for_fire", lambda _job_id: True)
-    monkeypatch.setattr(jobs, "get_job", lambda job_id: {"id": job_id, "name": "t"})
+    events = []
+    monkeypatch.setattr(
+        sched,
+        "_untrusted_cron_job_requires_capability",
+        lambda _job_id: True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        jobs,
+        "claim_job_for_fire",
+        lambda _job_id: events.append("claim") or True,
+    )
+    monkeypatch.setattr(
+        jobs,
+        "get_job",
+        lambda job_id: events.append("get-job") or {"id": job_id, "name": "t"},
+    )
     monkeypatch.setattr(
         executions,
         "create_execution",
-        lambda job_id, *, source: {"id": f"execution-{job_id}"},
+        lambda *_args, **_kwargs: events.append("create-execution"),
     )
-    monkeypatch.setattr(sched, "_get_hermes_home", lambda: home)
-    monkeypatch.setattr(sched, "_profile_identity_for_home", lambda _home: "emily")
+    monkeypatch.setattr(
+        sched,
+        "_issue_registered_cron_dispatch",
+        lambda *_args, **_kwargs: events.append("issue"),
+    )
+    monkeypatch.setattr(
+        sched, "run_one_job", lambda *_args, **_kwargs: events.append("handler")
+    )
 
-    def issue(job, **kwargs):
-        captured["issued"] = (job, kwargs)
-        return permit
+    assert InProcessCronScheduler().fire_due("j1") is False
+    assert events == []
 
-    def run(job, **kwargs):
-        captured["run"] = (job, kwargs)
-        return True
 
-    monkeypatch.setattr(sched, "_issue_registered_cron_dispatch", issue)
-    monkeypatch.setattr(sched, "run_one_job", run)
+def test_gateway_internal_provider_loop_uses_private_trusted_tick(monkeypatch):
+    from cron.scheduler_provider import InProcessCronScheduler
 
-    assert InProcessCronScheduler().fire_due("j1") is True
-    issued_job, issued_kwargs = captured["issued"]
-    run_job, run_kwargs = captured["run"]
-    assert issued_job is run_job
-    assert issued_kwargs == {
-        "profile_name": "emily",
-        "hermes_home": home,
-        "execution_id": "execution-j1",
-    }
-    assert run_kwargs["_trusted_dispatch"] is permit
-    assert run_kwargs["_fatal_restart_hook"] is sched._systemd_gateway_fail_stop
+    calls = []
+    stop = threading.Event()
+
+    def trusted_tick(**kwargs):
+        calls.append(kwargs)
+        stop.set()
+        return 0
+
+    monkeypatch.setattr(
+        "cron.scheduler._trusted_scheduler_tick",
+        trusted_tick,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "cron.scheduler.tick",
+        lambda **_kwargs: pytest.fail("gateway loop used public tick"),
+    )
+    monkeypatch.setattr(
+        "cron.jobs.record_ticker_heartbeat",
+        lambda **_kwargs: None,
+    )
+
+    InProcessCronScheduler()._start_gateway(stop, interval=0)
+
+    assert len(calls) == 1
+    assert calls[0]["sync"] is False
+
+
+def test_gateway_selects_private_builtin_start_but_not_external_start():
+    from cron.scheduler_provider import CronScheduler, InProcessCronScheduler
+    from gateway.run import _gateway_cron_start_callable
+
+    class External(CronScheduler):
+        @property
+        def name(self):
+            return "external"
+
+        def start(self, stop_event, **kwargs):
+            pass
+
+    builtin = InProcessCronScheduler()
+    external = External()
+
+    assert _gateway_cron_start_callable(builtin) == builtin._start_gateway
+    assert _gateway_cron_start_callable(external) == external.start
 
 
 def test_external_provider_fire_due_remains_untrusted(monkeypatch):

@@ -22,7 +22,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
@@ -483,6 +483,14 @@ class ToolRegistry:
             for entry in self._snapshot_entries()
             if entry.execution_capability == requirement
         }
+
+    def get_execution_capability_requirements(self) -> List[Any]:
+        """Return configured capability requirements without issuing grants."""
+        return [
+            entry.execution_capability
+            for entry in self._snapshot_entries()
+            if entry.execution_capability is not None
+        ]
 
     def get_registered_toolset_names(self) -> List[str]:
         """Return sorted unique toolset names present in the registry."""

@@ -849,6 +849,36 @@ def _issue_registered_cron_dispatch(
     )
 
 
+def _untrusted_cron_job_requires_capability(job_id: str) -> bool:
+    """Check an exact public fire target without reading or mutating cron state."""
+    from agent.execution_capabilities import cron_job_capability
+    from tools.registry import registry
+
+    hermes_home = _get_hermes_home().expanduser().resolve()
+    requirement = cron_job_capability(
+        profile_name=_profile_identity_for_home(hermes_home),
+        hermes_home=hermes_home,
+        job_id=str(job_id),
+    )
+    return bool(registry.get_execution_capability_tools(requirement))
+
+
+def _untrusted_cron_profile_has_capabilities() -> bool:
+    """Fail a public tick before its lock when this profile has protected jobs."""
+    from agent.execution_capabilities import CronJobCapabilityRequirement
+    from tools.registry import registry
+
+    hermes_home = _get_hermes_home().expanduser().resolve()
+    profile_name = _profile_identity_for_home(hermes_home)
+    canonical_home = str(hermes_home)
+    return any(
+        isinstance(requirement, CronJobCapabilityRequirement)
+        and requirement.profile_name == profile_name
+        and requirement.hermes_home == canonical_home
+        for requirement in registry.get_execution_capability_requirements()
+    )
+
+
 def _get_lock_paths() -> tuple[Path, Path]:
     """Resolve cron lock paths at call time so profile/env changes are honored."""
     hermes_home = _get_hermes_home()
@@ -5143,7 +5173,7 @@ def create_job_with_scheduler_registration(**kwargs) -> dict:
     return job
 
 
-def tick(
+def _tick_impl(
     verbose: bool = True,
     adapters=None,
     loop=None,
@@ -5151,6 +5181,7 @@ def tick(
     *,
     can_dispatch=None,
     fatal_restart_hook=None,
+    _scheduler_provenance=None,
 ):
     """
     Check and run all due jobs.
@@ -5320,12 +5351,14 @@ def tick(
             # abandoned records as unknown; it never automatically retries them.
             execution = create_execution(job_id, source="builtin")
             dispatched_job = dict(job, execution_id=execution["id"])
-            trusted_dispatch = _issue_registered_cron_dispatch(
-                dispatched_job,
-                profile_name=_profile_identity_for_home(_get_hermes_home()),
-                hermes_home=_get_hermes_home(),
-                execution_id=execution["id"],
-            )
+            trusted_dispatch = None
+            if _is_trusted_scheduler_provenance(_scheduler_provenance):
+                trusted_dispatch = _issue_registered_cron_dispatch(
+                    dispatched_job,
+                    profile_name=_profile_identity_for_home(_get_hermes_home()),
+                    hermes_home=_get_hermes_home(),
+                    execution_id=execution["id"],
+                )
             _ctx = contextvars.copy_context()
 
             def _run_and_release(
@@ -5453,6 +5486,68 @@ def tick(
             except (OSError, IOError):
                 pass
         lock_fd.close()
+
+
+def tick(
+    verbose: bool = True,
+    adapters=None,
+    loop=None,
+    sync: bool = True,
+    *,
+    can_dispatch=None,
+    fatal_restart_hook=None,
+):
+    """Run a public/manual tick without protected execution capabilities."""
+    _raise_if_scheduler_poisoned()
+    if _untrusted_cron_profile_has_capabilities():
+        from agent.execution_capabilities import ExecutionCapabilityError
+
+        raise ExecutionCapabilityError(
+            "Public cron tick cannot dispatch a profile with protected jobs."
+        )
+    return _tick_impl(
+        verbose=verbose,
+        adapters=adapters,
+        loop=loop,
+        sync=sync,
+        can_dispatch=can_dispatch,
+        fatal_restart_hook=fatal_restart_hook,
+        _scheduler_provenance=None,
+    )
+
+
+def _build_trusted_scheduler_entrypoint():
+    provenance = object()
+
+    def is_trusted(candidate) -> bool:
+        return candidate is provenance
+
+    def trusted_tick(
+        verbose: bool = True,
+        adapters=None,
+        loop=None,
+        sync: bool = True,
+        *,
+        can_dispatch=None,
+    ):
+        return _tick_impl(
+            verbose=verbose,
+            adapters=adapters,
+            loop=loop,
+            sync=sync,
+            can_dispatch=can_dispatch,
+            fatal_restart_hook=_systemd_gateway_fail_stop,
+            _scheduler_provenance=provenance,
+        )
+
+    return trusted_tick, is_trusted
+
+
+(
+    _trusted_scheduler_tick,
+    _is_trusted_scheduler_provenance,
+) = _build_trusted_scheduler_entrypoint()
+del _build_trusted_scheduler_entrypoint
 
 
 if __name__ == "__main__":

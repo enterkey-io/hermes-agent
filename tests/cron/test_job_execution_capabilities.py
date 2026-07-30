@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent.execution_capabilities import (
+    ExecutionCapabilityError,
     _bind_execution_context,
     _issue_tool_invocation_grant,
     cron_job_capability,
@@ -82,7 +83,7 @@ def test_scheduler_issues_only_for_exact_registered_profile_home_job_and_executi
     ) is None
 
 
-def test_tick_is_the_only_path_that_attaches_registered_dispatch(protected_tool):
+def test_trusted_scheduler_tick_attaches_registered_dispatch(protected_tool):
     home = protected_tool
     job = {
         "id": JOB_ID,
@@ -111,11 +112,134 @@ def test_tick_is_the_only_path_that_attaches_registered_dispatch(protected_tool)
         patch("cron.scheduler._kill_orphaned_mcp_children", create=True),
     ):
         scheduler._running_job_ids.discard(JOB_ID)
-        count = scheduler.tick(verbose=False, sync=True)
+        count = scheduler._trusted_scheduler_tick(verbose=False, sync=True)
 
     assert count == 1
     assert seen["job"]["execution_id"] == "execution-tick"
     assert seen["permit"] is not None
+
+
+def test_private_tick_impl_does_not_accept_forged_scheduler_provenance(
+    protected_tool,
+):
+    job = {
+        "id": JOB_ID,
+        "name": "bounded",
+        "schedule": {"kind": "cron", "expr": "* * * * *"},
+    }
+    events = []
+
+    with (
+        concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool,
+        patch("cron.scheduler._hermes_home", protected_tool),
+        patch("cron.scheduler.get_due_jobs", return_value=[job]),
+            patch("cron.scheduler.advance_next_runs"),
+        patch(
+            "cron.scheduler.create_execution",
+            return_value={"id": "execution-forged"},
+        ),
+        patch(
+            "cron.scheduler._issue_registered_cron_dispatch",
+            side_effect=lambda *_args, **_kwargs: events.append("issue"),
+        ),
+        patch(
+            "cron.scheduler.run_one_job",
+            side_effect=lambda *_args, **_kwargs: events.append("run") or True,
+        ),
+        patch("cron.scheduler._get_parallel_pool", return_value=pool),
+    ):
+        scheduler._running_job_ids.discard(JOB_ID)
+        assert scheduler._tick_impl(
+            verbose=False,
+            sync=True,
+            _scheduler_provenance=object(),
+        ) == 1
+
+    assert events == ["run"]
+
+
+def test_public_tick_rejects_protected_profile_before_any_cron_state(
+    protected_tool,
+    monkeypatch,
+):
+    events = []
+    monkeypatch.setattr(scheduler, "_hermes_home", protected_tool)
+    monkeypatch.setattr(
+        scheduler,
+        "_get_lock_paths",
+        lambda: events.append("lock") or (Path("/unused"), Path("/unused/lock")),
+    )
+    monkeypatch.setattr(
+        scheduler, "get_due_jobs", lambda: events.append("read-schedules") or []
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "advance_next_runs",
+        lambda _job_ids: events.append("advance-schedule"),
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "create_execution",
+        lambda *_args, **_kwargs: events.append("create-execution"),
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "_issue_registered_cron_dispatch",
+        lambda *_args, **_kwargs: events.append("issue"),
+    )
+    monkeypatch.setattr(
+        scheduler, "run_one_job", lambda *_args, **_kwargs: events.append("handler")
+    )
+
+    with pytest.raises(ExecutionCapabilityError):
+        scheduler.tick(verbose=False, sync=True)
+
+    assert events == []
+
+
+def test_public_fire_denies_exact_protected_job_but_runs_ordinary_sibling(
+    protected_tool,
+    monkeypatch,
+):
+    from cron.scheduler_provider import InProcessCronScheduler
+
+    events = []
+    monkeypatch.setattr(scheduler, "_hermes_home", protected_tool)
+    monkeypatch.setattr(
+        "cron.jobs.claim_job_for_fire",
+        lambda job_id: events.append(("claim", job_id)) or True,
+    )
+    monkeypatch.setattr(
+        "cron.jobs.get_job",
+        lambda job_id: {"id": job_id, "name": "manual"},
+    )
+    monkeypatch.setattr(
+        "cron.executions.create_execution",
+        lambda job_id, **_kwargs: {"id": f"execution-{job_id}"},
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "_issue_registered_cron_dispatch",
+        lambda *_args, **_kwargs: events.append(("issue",)),
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "run_one_job",
+        lambda job, **kwargs: events.append(
+            ("run", job["id"], kwargs.get("_trusted_dispatch"))
+        )
+        or True,
+    )
+
+    provider = InProcessCronScheduler()
+    assert provider.fire_due(JOB_ID) is False
+    assert events == []
+
+    assert provider.fire_due("ordinary-job") is True
+    assert events == [
+        ("claim", "ordinary-job"),
+        ("run", "ordinary-job", None),
+    ]
 
 
 @pytest.mark.parametrize("run_fails", [False, True])

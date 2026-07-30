@@ -27196,6 +27196,15 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
     InProcessCronScheduler().start(stop_event, adapters=adapters, loop=loop, interval=interval)
 
 
+def _gateway_cron_start_callable(provider):
+    """Select the private trusted loop only for the built-in gateway provider."""
+    from cron.scheduler_provider import InProcessCronScheduler
+
+    if isinstance(provider, InProcessCronScheduler):
+        return provider._start_gateway
+    return provider.start
+
+
 # Upper bound for cooperatively draining the cron ticker on shutdown. The cron
 # thread delivers via ``safe_schedule_threadsafe`` and blocks on
 # ``future.result(timeout=60)`` (see cron/scheduler.py::_deliver_result), so a
@@ -27805,7 +27814,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
             runner._draining or runner._external_drain_active
         )
     cron_thread = threading.Thread(
-        target=cron_provider.start,
+        target=_gateway_cron_start_callable(cron_provider),
         args=(cron_stop,),
         kwargs=cron_start_kwargs,
         daemon=True,
