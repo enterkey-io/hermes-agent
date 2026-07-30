@@ -85,8 +85,6 @@ def test_scheduler_issues_only_for_exact_registered_profile_home_job_and_executi
 
 
 def test_trusted_scheduler_tick_attaches_registered_dispatch(protected_tool):
-    from cron.scheduler_provider import InProcessCronScheduler
-
     home = protected_tool
     job = {
         "id": JOB_ID,
@@ -115,10 +113,7 @@ def test_trusted_scheduler_tick_attaches_registered_dispatch(protected_tool):
         patch("cron.scheduler._kill_orphaned_mcp_children", create=True),
     ):
         scheduler._running_job_ids.discard(JOB_ID)
-        trusted_tick = getattr(
-            InProcessCronScheduler,
-            "_InProcessCronScheduler__gateway_tick",
-        )
+        trusted_tick = scheduler._take_trusted_gateway_tick()
         count = trusted_tick(verbose=False, sync=True)
 
     assert count == 1
@@ -392,6 +387,30 @@ def test_forged_dispatch_is_rejected_before_session_db_and_wake_gate_script(
 
     assert result[0] is False
     assert "trusted cron dispatch" in str(result[3]).lower()
+    assert events == []
+
+
+def test_internal_runner_requires_one_use_opaque_admission_before_side_effects(
+    protected_tool,
+    monkeypatch,
+):
+    events = []
+    monkeypatch.setattr(scheduler, "_hermes_home", protected_tool)
+    monkeypatch.setattr(
+        scheduler,
+        "_run_job_script_with_claim_heartbeat",
+        lambda *_args, **_kwargs: events.append("script") or (True, "ran"),
+    )
+    job = {
+        "id": JOB_ID,
+        "name": "protected",
+        "no_agent": True,
+        "script": "/must-not-run",
+    }
+
+    with pytest.raises(ExecutionCapabilityError, match="admission"):
+        scheduler._run_job_after_admission(job)
+
     assert events == []
 
 
@@ -754,7 +773,7 @@ def _patch_run_one_job_pipeline(monkeypatch, *, run_result, events):
         lambda execution_id: events.append(("running", execution_id)),
     )
 
-    def fake_run_job(job, *, defer_agent_teardown=None):
+    def fake_run_job(job, *, defer_agent_teardown=None, **_kwargs):
         events.append(("run", job["id"]))
         return run_result
 
@@ -805,7 +824,7 @@ def test_uncooperative_protected_handler_persists_then_fail_stops_once(
     )
     deferred_agent = object()
 
-    def run_with_deferred_agent(job, *, defer_agent_teardown=None):
+    def run_with_deferred_agent(job, *, defer_agent_teardown=None, **_kwargs):
         events.append(("run", job["id"]))
         defer_agent_teardown.append(deferred_agent)
         return False, "failed output", "", failure
@@ -856,7 +875,7 @@ def test_uncooperative_persistence_failure_still_tears_down_before_raising(
     monkeypatch.setattr(scheduler, "claim_dispatch", lambda _job_id: True)
     monkeypatch.setattr(scheduler, "mark_execution_running", lambda _id: None)
 
-    def run_with_deferred_agent(job, *, defer_agent_teardown=None):
+    def run_with_deferred_agent(job, *, defer_agent_teardown=None, **_kwargs):
         defer_agent_teardown.append(deferred_agent)
         events.append("run")
         return False, "", "", failure
@@ -903,7 +922,7 @@ def test_uncooperative_non_systemd_failure_tears_down_before_fatal_error(
         events=events,
     )
 
-    def run_with_deferred_agent(job, *, defer_agent_teardown=None):
+    def run_with_deferred_agent(job, *, defer_agent_teardown=None, **_kwargs):
         defer_agent_teardown.append(deferred_agent)
         events.append(("run", job["id"]))
         return False, "", "", failure

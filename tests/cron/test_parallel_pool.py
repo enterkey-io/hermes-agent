@@ -115,6 +115,53 @@ class TestSyncMode:
 
         sched._shutdown_parallel_pool()
 
+    def test_sync_false_returns_immediately(self, tmp_path, monkeypatch):
+        """sync=False returns before parallel jobs finish (optimistic count)."""
+        import cron.scheduler as sched
+
+        sched._parallel_pool = None
+        sched._parallel_pool_max_workers = None
+        sched._running_job_ids.clear()
+
+        job = {
+            "id": "slow-job",
+            "name": "slow",
+            "prompt": "test",
+            "schedule": "every 5m",
+            "enabled": True,
+            "next_run_at": "2020-01-01T00:00:00",
+            "deliver": "local",
+        }
+
+        barrier = threading.Barrier(2, timeout=5)
+
+        def slow_run(
+            j,
+            *,
+            defer_agent_teardown=None,
+            _admitted_run=None,
+        ):
+            barrier.wait()  # blocks until test thread also waits
+            return True, "out", "resp", None
+
+        monkeypatch.setattr(sched, "get_due_jobs", lambda: [job])
+        monkeypatch.setattr(sched, "advance_next_runs", lambda *_a, **_kw: None)
+        monkeypatch.setattr(sched, "run_job", slow_run)
+        monkeypatch.setattr(sched, "save_job_output", lambda *_a, **_kw: "/tmp/out")
+        monkeypatch.setattr(sched, "mark_job_run", lambda *_a, **_kw: None)
+        monkeypatch.setattr(sched, "_deliver_result", lambda *_a, **_kw: None)
+
+        start = time.monotonic()
+        n = sched.tick(verbose=False, sync=False)  # opt-in: non-blocking
+        elapsed = time.monotonic() - start
+
+        assert n == 1  # optimistic count
+        assert elapsed < 1.0  # returned immediately, didn't wait for slow_run
+
+        # Let the job finish so cleanup works.
+        barrier.wait()
+        time.sleep(0.1)
+        sched._shutdown_parallel_pool()
 
 class TestSequentialPool:
     """Sequential (workdir) jobs use the persistent cron-seq pool.

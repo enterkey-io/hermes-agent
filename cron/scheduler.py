@@ -825,18 +825,47 @@ def _issue_registered_cron_dispatch(
     execution_id: str,
 ):
     """Issue only when registry configuration exactly trusts this dispatch."""
-    from agent.execution_capabilities import _issue_trusted_cron_dispatch
     from tools.registry import registry
 
-    requirements = _registered_cron_capability_requirements(
-        job_id=str(job.get("id") or ""),
+    return _issue_registered_cron_dispatch_from_registry(
+        registry,
+        job,
         profile_name=profile_name,
         hermes_home=hermes_home,
+        execution_id=execution_id,
+    )
+
+
+def _issue_registered_cron_dispatch_from_registry(
+    tool_registry,
+    job: dict,
+    *,
+    profile_name: str,
+    hermes_home: Path,
+    execution_id: str,
+):
+    """Testable issuer core; callers still need trusted scheduler provenance."""
+    from agent.execution_capabilities import (
+        CronJobCapabilityRequirement,
+        _issue_trusted_cron_dispatch,
+    )
+
+    canonical_home = str(hermes_home.expanduser().resolve())
+    requirements = sorted(
+        {
+            requirement
+            for requirement in tool_registry.get_execution_capability_requirements()
+            if isinstance(requirement, CronJobCapabilityRequirement)
+            and requirement.profile_name == profile_name
+            and requirement.hermes_home == canonical_home
+            and requirement.job_id == str(job.get("id") or "")
+        },
+        key=lambda item: item.registration_owner,
     )
     if len(requirements) != 1:
         return None
     requirement = requirements[0]
-    allowed_tools = registry.get_execution_capability_tools(requirement)
+    allowed_tools = tool_registry.get_execution_capability_tools(requirement)
     if not allowed_tools:
         return None
     return _issue_trusted_cron_dispatch(
@@ -846,7 +875,7 @@ def _issue_registered_cron_dispatch(
         execution_id=execution_id,
         allowed_tools=allowed_tools,
         protected_handler_timeout_seconds=_PROTECTED_HANDLER_TIMEOUT_SECONDS,
-        registration_owner=requirement.registration_owner,
+        requirement=requirement,
     )
 
 
@@ -3347,7 +3376,7 @@ def _run_job_after_admission(
     *,
     defer_agent_teardown: Optional[list] = None,
     extra_prompt: Optional[str] = None,
-    _execution_context=None,
+    _admitted_run=None,
 ) -> tuple[bool, str, str, Optional[str]]:
     """
     Execute a single cron job.
@@ -3369,6 +3398,12 @@ def _run_job_after_admission(
     Returns:
         Tuple of (success, full_output_doc, final_response, error_message)
     """
+    from agent.execution_capabilities import _consume_cron_run_admission
+
+    _execution_context = _consume_cron_run_admission(
+        _admitted_run,
+        job=job,
+    )
     job_id = job["id"]
     job_name = str(job.get("name") or job.get("prompt") or job_id or "cron job")
 
@@ -4749,6 +4784,7 @@ def _authorize_cron_job_entry(job: dict, trusted_dispatch):
     """Consume any required permit before a caller performs run side effects."""
     from agent.execution_capabilities import (
         ExecutionCapabilityError,
+        _issue_cron_run_admission,
         _issue_cron_job_execution_context,
     )
 
@@ -4765,18 +4801,25 @@ def _authorize_cron_job_entry(job: dict, trusted_dispatch):
             raise ExecutionCapabilityError(
                 "trusted cron dispatch does not match a protected job"
             )
-        return None
+        return _issue_cron_run_admission(
+            job=job,
+            execution_context=None,
+        )
     if len(requirements) != 1:
         raise ExecutionCapabilityError(
             "protected cron capability ownership is ambiguous"
         )
-    return _issue_cron_job_execution_context(
+    execution_context = _issue_cron_job_execution_context(
         permit=trusted_dispatch,
         job=job,
         execution_id=str(job.get("execution_id") or ""),
         profile_name=profile_name,
         hermes_home=home,
         requirement=requirements[0],
+    )
+    return _issue_cron_run_admission(
+        job=job,
+        execution_context=execution_context,
     )
 
 
@@ -4786,41 +4829,27 @@ def run_job(
     defer_agent_teardown: Optional[list] = None,
     extra_prompt: Optional[str] = None,
     _trusted_dispatch=None,
-    _admitted_execution_context=None,
+    _admitted_run=None,
 ) -> tuple[bool, str, str, Optional[str]]:
     """Authorize protected execution before entering the side-effecting runner."""
     from agent.execution_capabilities import (
         ExecutionCapabilityError,
+        AdmittedCronRun,
         _finalize_execution_context,
-        _execution_context_matches_unbound_job,
     )
 
     job_id = str(job.get("id") or "")
-    home = _get_hermes_home().expanduser().resolve()
-    profile_name = _profile_identity_for_home(home)
-    requirements = _registered_cron_capability_requirements(
-        job_id=job_id,
-        profile_name=profile_name,
-        hermes_home=home,
-    )
-    execution_context = None
     try:
-        if _admitted_execution_context is not None:
-            if len(requirements) != 1 or not _execution_context_matches_unbound_job(
-                _admitted_execution_context,
-                requirement=requirements[0],
-                execution_id=str(job.get("execution_id") or ""),
-            ):
-                raise ExecutionCapabilityError(
-                    "pre-admitted cron execution context is unavailable"
-                )
+        if _admitted_run is not None:
+            if not isinstance(_admitted_run, AdmittedCronRun):
+                raise ExecutionCapabilityError("cron run admission is unavailable")
             if _trusted_dispatch is not None:
                 raise ExecutionCapabilityError(
                     "cron execution was admitted more than once"
                 )
-            execution_context = _admitted_execution_context
+            admitted_run = _admitted_run
         else:
-            execution_context = _authorize_cron_job_entry(
+            admitted_run = _authorize_cron_job_entry(
                 job,
                 _trusted_dispatch,
             )
@@ -4833,12 +4862,13 @@ def run_job(
             job,
             defer_agent_teardown=defer_agent_teardown,
             extra_prompt=extra_prompt,
-            _execution_context=execution_context,
+            _admitted_run=admitted_run,
         )
     finally:
         # The main agent path settles inside its teardown so uncertainty can
         # affect the returned result. Early script/wake-gate returns never
         # reach that block, so this idempotent close covers every exit path.
+        execution_context = admitted_run._context()
         if execution_context is not None:
             _finalize_execution_context(
                 execution_context,
@@ -4972,7 +5002,7 @@ def run_one_job(
     _raise_if_scheduler_poisoned()
 
     try:
-        admitted_execution_context = _authorize_cron_job_entry(
+        admitted_run = _authorize_cron_job_entry(
             job,
             _trusted_dispatch,
         )
@@ -5039,10 +5069,7 @@ def run_one_job(
             _run_kwargs = {"defer_agent_teardown": _deferred_agents}
             if extra_prompt is not None:
                 _run_kwargs["extra_prompt"] = extra_prompt
-            if admitted_execution_context is not None:
-                _run_kwargs["_admitted_execution_context"] = (
-                    admitted_execution_context
-                )
+            _run_kwargs["_admitted_run"] = admitted_run
             success, output, final_response, error = run_job(job, **_run_kwargs)
         except BaseException:
             # run_job's finally still hands back the agent when it raises; tear
@@ -5240,11 +5267,12 @@ def run_one_job(
             raise
         return False
     finally:
-        if admitted_execution_context is not None:
+        execution_context = admitted_run._context()
+        if execution_context is not None:
             from agent.execution_capabilities import _finalize_execution_context
 
             _finalize_execution_context(
-                admitted_execution_context,
+                execution_context,
                 timeout_seconds=_PROTECTED_SETTLEMENT_TIMEOUT_SECONDS,
             )
 
@@ -5680,24 +5708,21 @@ def _build_trusted_scheduler_entrypoint():
             _scheduler_provenance=provenance,
         )
 
-    return trusted_tick, is_trusted
+    trusted_tick_slot = [trusted_tick]
+
+    def take_trusted_tick():
+        tick_callable = trusted_tick_slot.pop() if trusted_tick_slot else None
+        if tick_callable is None:
+            raise RuntimeError("trusted gateway ticker was already consumed")
+        return tick_callable
+
+    return take_trusted_tick, is_trusted
 
 
-_gateway_tick, _is_trusted_scheduler_provenance = (
+_take_trusted_gateway_tick, _is_trusted_scheduler_provenance = (
     _build_trusted_scheduler_entrypoint()
 )
 del _build_trusted_scheduler_entrypoint
-
-# Install the process-private closure directly on the exact built-in provider,
-# then remove the module binding. Public/manual providers cannot import or pass
-# this callable, and subclasses are rejected by both gateway selection and the
-# provider's private starter.
-from cron.scheduler_provider import InProcessCronScheduler as _BuiltinCronScheduler
-
-_BuiltinCronScheduler._InProcessCronScheduler__gateway_tick = staticmethod(
-    _gateway_tick
-)
-del _gateway_tick, _BuiltinCronScheduler
 
 
 if __name__ == "__main__":

@@ -1392,6 +1392,42 @@ class TestParallelTick:
         assert seen["tg-job"] == {"platform": "telegram", "chat_id": "111"}
         assert seen["dc-job"] == {"platform": "discord", "chat_id": "222"}
 
+    def test_max_parallel_env_var(self, monkeypatch):
+        """HERMES_CRON_MAX_PARALLEL=1 should restore serial behaviour."""
+        monkeypatch.setenv("HERMES_CRON_MAX_PARALLEL", "1")
+        call_times = []
+
+        def mock_run_job(
+            job,
+            *,
+            defer_agent_teardown=None,
+            _admitted_run=None,
+        ):
+            import time
+            call_times.append(("start", job["id"], time.monotonic()))
+            time.sleep(0.05)
+            call_times.append(("end", job["id"], time.monotonic()))
+            return (True, "output", "response", None)
+
+        jobs = [
+            {"id": "s1", "name": "s1", "deliver": "local"},
+            {"id": "s2", "name": "s2", "deliver": "local"},
+        ]
+
+        with patch("cron.scheduler.get_due_jobs", return_value=jobs), \
+             patch("cron.scheduler.advance_next_runs"), \
+             patch("cron.scheduler.run_job", side_effect=mock_run_job), \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
+             patch("cron.scheduler._deliver_result", return_value=None), \
+             patch("cron.scheduler.mark_job_run"):
+            from cron.scheduler import tick
+            result = tick(verbose=False)
+
+        assert result == 2
+        # With max_workers=1, second job starts after first ends
+        end_s1 = [t for action, jid, t in call_times if action == "end" and jid == "s1"][0]
+        start_s2 = [t for action, jid, t in call_times if action == "start" and jid == "s2"][0]
+        assert start_s2 >= end_s1, "Jobs ran concurrently despite max_parallel=1"
 
 class TestDeliverResultTimeoutCancelsFuture:
     """When future.result(timeout=60) raises TimeoutError in the live adapter

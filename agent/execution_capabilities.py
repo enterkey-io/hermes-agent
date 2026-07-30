@@ -1,4 +1,11 @@
-"""Opaque execution capabilities issued by the trusted cron dispatcher."""
+"""Opaque execution capabilities issued by the trusted cron dispatcher.
+
+Threat boundary: model input, job payloads, tool dispatch, and public/manual
+entry points are untrusted. Owner-installed Hermes and plugin Python are
+trusted; these opaque objects prevent supported-API confusion, not malicious
+same-process introspection. The external broker remains the process and
+credential isolation boundary.
+"""
 
 from __future__ import annotations
 
@@ -56,6 +63,50 @@ def _validated_tool_name(value: object) -> str:
     return value
 
 
+def _validated_owner_identity(value: object) -> str:
+    """Validate a loader diagnostic without treating it as authorization."""
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 512
+        or value != value.strip()
+        or any(
+            ord(character) <= 0x1F or 0x7F <= ord(character) <= 0x9F
+            for character in value
+        )
+    ):
+        raise ValueError(
+            "capability registration owner must be a bounded stable identity"
+        )
+    return value
+
+
+class _RegistrationOwner(_NonTransferable):
+    """Loader-minted owner for supported plugin registration APIs.
+
+    Owner-installed Python is trusted and may introspect process internals;
+    this object prevents accidental or model-driven identity substitution.
+    """
+
+    __slots__ = ("__identity",)
+
+    def __init__(self, issuer: object, identity: str) -> None:
+        if issuer is not _ISSUER:
+            raise ExecutionCapabilityError("registration owners are host-issued")
+        self.__identity = _validated_owner_identity(identity)
+
+    @property
+    def identity(self) -> str:
+        return self.__identity
+
+
+def _mint_registration_owner(identity: str) -> _RegistrationOwner:
+    return _RegistrationOwner(_ISSUER, identity)
+
+
+_HOST_REGISTRATION_OWNER = _mint_registration_owner("host")
+
+
 @dataclass(frozen=True, slots=True)
 class CronJobCapabilityRequirement:
     """Plugin-owned trust configuration for one profile and cron job."""
@@ -63,7 +114,7 @@ class CronJobCapabilityRequirement:
     profile_name: str
     hermes_home: str
     job_id: str
-    registration_owner: str = "host"
+    _owner: _RegistrationOwner
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -77,14 +128,12 @@ class CronJobCapabilityRequirement:
             "job_id",
             _validated_identifier(self.job_id, "cron job ID"),
         )
-        object.__setattr__(
-            self,
-            "registration_owner",
-            _validated_identifier(
-                self.registration_owner,
-                "capability registration owner",
-            ),
-        )
+        if not isinstance(self._owner, _RegistrationOwner):
+            raise ValueError("capability registration owner must be host-issued")
+
+    @property
+    def registration_owner(self) -> str:
+        return self._owner.identity
 
 
 class TrustedCronDispatch(_NonTransferable):
@@ -114,7 +163,7 @@ class TrustedCronDispatch(_NonTransferable):
         execution_id: str,
         allowed_tools: frozenset[str],
         handler_timeout: float,
-        registration_owner: str,
+        registration_owner: _RegistrationOwner,
     ) -> None:
         if issuer is not _ISSUER:
             raise ExecutionCapabilityError(
@@ -139,7 +188,7 @@ class TrustedCronDispatch(_NonTransferable):
         execution_id: str,
         profile_name: str,
         hermes_home: str,
-        registration_owner: str,
+        requirement: CronJobCapabilityRequirement,
     ) -> tuple:
         with self.__lock:
             if self.__pid != os.getpid():
@@ -169,7 +218,7 @@ class TrustedCronDispatch(_NonTransferable):
                 raise ExecutionCapabilityError(
                     "trusted cron dispatch does not match this execution"
                 )
-            if self.__registration_owner != registration_owner:
+            if self.__registration_owner is not requirement._owner:
                 raise ExecutionCapabilityError(
                     "trusted cron dispatch does not match this capability owner"
                 )
@@ -218,7 +267,7 @@ class _ExecutionState:
         execution_id: str,
         allowed_tools: frozenset[str],
         handler_timeout: float,
-        registration_owner: str,
+        registration_owner: _RegistrationOwner,
     ) -> None:
         self.active = True
         self.active_invocations: dict[str, dict[str, Any]] = {}
@@ -260,6 +309,87 @@ class CronJobExecutionContext(_NonTransferable):
 
     def __repr__(self) -> str:
         return "<CronJobExecutionContext opaque>"
+
+
+class AdmittedCronRun(_NonTransferable):
+    """One-use proof that the public scheduler boundary admitted this job."""
+
+    __slots__ = (
+        "__consumed",
+        "__context",
+        "__execution_id",
+        "__job",
+        "__lock",
+        "__pid",
+    )
+
+    def __init__(
+        self,
+        issuer: object,
+        *,
+        job: dict,
+        context: CronJobExecutionContext | None,
+    ) -> None:
+        if issuer is not _ISSUER:
+            raise ExecutionCapabilityError("cron run admissions are host-issued")
+        self.__consumed = False
+        self.__context = context
+        self.__execution_id = str(job.get("execution_id") or "")
+        self.__job = job
+        self.__lock = threading.Lock()
+        self.__pid = os.getpid()
+
+    def _consume(self, job: dict) -> CronJobExecutionContext | None:
+        with self.__lock:
+            if self.__pid != os.getpid():
+                raise ExecutionCapabilityError(
+                    "cron run admission cannot cross processes"
+                )
+            if self.__consumed:
+                raise ExecutionCapabilityError(
+                    "cron run admission has already been consumed"
+                )
+            if (
+                self.__job is not job
+                or self.__execution_id != str(job.get("execution_id") or "")
+            ):
+                raise ExecutionCapabilityError(
+                    "cron run admission does not match this job"
+                )
+            self.__consumed = True
+            return self.__context
+
+    def _context(self) -> CronJobExecutionContext | None:
+        return self.__context
+
+
+def _issue_cron_run_admission(
+    *,
+    job: dict,
+    execution_context: CronJobExecutionContext | None,
+) -> AdmittedCronRun:
+    if not isinstance(job, dict):
+        raise ExecutionCapabilityError("cron run admission requires a job")
+    if execution_context is not None and not isinstance(
+        execution_context,
+        CronJobExecutionContext,
+    ):
+        raise ExecutionCapabilityError("invalid cron execution context")
+    return AdmittedCronRun(
+        _ISSUER,
+        job=job,
+        context=execution_context,
+    )
+
+
+def _consume_cron_run_admission(
+    admission: object,
+    *,
+    job: dict,
+) -> CronJobExecutionContext | None:
+    if not isinstance(admission, AdmittedCronRun):
+        raise ExecutionCapabilityError("cron run admission is unavailable")
+    return admission._consume(job)
 
 
 class ToolInvocationGrant(_NonTransferable):
@@ -443,13 +573,34 @@ def cron_job_capability(
     profile_name: str,
     hermes_home: str | os.PathLike[str],
     job_id: str,
-    registration_owner: str = "host",
 ) -> CronJobCapabilityRequirement:
+    """Create a host-owned requirement for core code and tests.
+
+    Plugins use ``PluginContext.cron_job_capability`` so callers never supply
+    registration ownership through the supported API.
+    """
+    return _cron_job_capability_for_owner(
+        _HOST_REGISTRATION_OWNER,
+        profile_name=profile_name,
+        hermes_home=hermes_home,
+        job_id=job_id,
+    )
+
+
+def _cron_job_capability_for_owner(
+    owner: _RegistrationOwner,
+    *,
+    profile_name: str,
+    hermes_home: str | os.PathLike[str],
+    job_id: str,
+) -> CronJobCapabilityRequirement:
+    if not isinstance(owner, _RegistrationOwner):
+        raise ExecutionCapabilityError("capability registration owner is unavailable")
     return CronJobCapabilityRequirement(
         profile_name=profile_name,
         hermes_home=str(hermes_home),
         job_id=job_id,
-        registration_owner=registration_owner,
+        _owner=owner,
     )
 
 
@@ -461,7 +612,7 @@ def _issue_trusted_cron_dispatch(
     execution_id: str,
     allowed_tools: set[str] | frozenset[str],
     protected_handler_timeout_seconds: float,
-    registration_owner: str = "host",
+    requirement: CronJobCapabilityRequirement | None = None,
 ) -> TrustedCronDispatch:
     if not isinstance(job, dict):
         raise ValueError("trusted cron dispatch requires a job object")
@@ -469,10 +620,20 @@ def _issue_trusted_cron_dispatch(
     profile = _validated_identifier(profile_name, "profile name")
     home = _canonical_home(hermes_home)
     execution = _validated_identifier(execution_id, "execution ID")
-    owner = _validated_identifier(
-        registration_owner,
-        "capability registration owner",
-    )
+    if requirement is None:
+        requirement = cron_job_capability(
+            profile_name=profile,
+            hermes_home=home,
+            job_id=job_id,
+        )
+    if not isinstance(requirement, CronJobCapabilityRequirement):
+        raise ValueError("trusted cron dispatch requires an exact requirement")
+    if (
+        requirement.profile_name != profile
+        or requirement.hermes_home != home
+        or requirement.job_id != job_id
+    ):
+        raise ValueError("trusted cron dispatch requirement does not match scope")
     if not isinstance(allowed_tools, (set, frozenset)) or not allowed_tools:
         raise ValueError("trusted cron dispatch requires an explicit tool allowlist")
     tools = frozenset(
@@ -490,7 +651,7 @@ def _issue_trusted_cron_dispatch(
         execution_id=execution,
         allowed_tools=tools,
         handler_timeout=timeout,
-        registration_owner=owner,
+        registration_owner=requirement._owner,
     )
 
 
@@ -520,7 +681,7 @@ def _issue_cron_job_execution_context(
         execution_id=execution_id,
         profile_name=profile,
         hermes_home=home,
-        registration_owner=requirement.registration_owner,
+        requirement=requirement,
     )
     (
         profile_name,
@@ -563,30 +724,6 @@ def _bind_execution_context(
                 "execution capability is already bound to an agent"
             )
         state.owner = owner
-
-
-def _execution_context_matches_unbound_job(
-    context: object,
-    *,
-    requirement: CronJobCapabilityRequirement,
-    execution_id: str,
-) -> bool:
-    """Validate an internal pre-admission before the agent claims ownership."""
-    if not isinstance(context, CronJobExecutionContext):
-        return False
-    state = context._state()
-    with state.lock:
-        return (
-            state.active
-            and not state.closing
-            and state.pid == os.getpid()
-            and state.owner is None
-            and state.profile_name == requirement.profile_name
-            and state.hermes_home == requirement.hermes_home
-            and state.job_id == requirement.job_id
-            and state.registration_owner == requirement.registration_owner
-            and state.execution_id == execution_id
-        )
 
 
 def _finalize_execution_context(
@@ -646,7 +783,7 @@ def execution_context_allows(
             and state.profile_name == requirement.profile_name
             and state.hermes_home == requirement.hermes_home
             and state.job_id == requirement.job_id
-            and state.registration_owner == requirement.registration_owner
+            and state.registration_owner is requirement._owner
         )
 
 
@@ -740,7 +877,7 @@ def _consume_tool_invocation_grant(
             state.profile_name != requirement.profile_name
             or state.hermes_home != requirement.hermes_home
             or state.job_id != requirement.job_id
-            or state.registration_owner != requirement.registration_owner
+            or state.registration_owner is not requirement._owner
             or name not in state.allowed_tools
         ):
             raise ExecutionCapabilityError(

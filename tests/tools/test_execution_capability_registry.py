@@ -238,26 +238,99 @@ def test_second_plugin_cannot_widen_exact_capability_allowlist(tmp_path):
     assert first.registration_owner == "user:emily-paperclip-job"
 
     for name in ("search_issues", "create_backlog_issue"):
-        tool_registry.register(
+        first._register_tool_in(
+            tool_registry,
             name=name,
             toolset="paperclip",
             schema=_schema(name),
             handler=lambda args, **kwargs: "{}",
             execution_capability=first_requirement,
-            registration_owner=first.registration_owner,
         )
 
     with pytest.raises(PermissionError, match="already owned"):
-        tool_registry.register(
+        second._register_tool_in(
+            tool_registry,
             name="widened_tool",
             toolset="paperclip",
             schema=_schema("widened_tool"),
             handler=lambda args, **kwargs: "{}",
             execution_capability=second_requirement,
-            registration_owner=second.registration_owner,
         )
 
     assert tool_registry.get_execution_capability_tools(first_requirement) == {
         "search_issues",
         "create_backlog_issue",
     }
+
+
+def test_supported_plugin_api_cannot_choose_or_replace_registration_owner(
+    tmp_path,
+):
+    context = PluginContext(
+        PluginManifest(
+            name="Emily Paperclip Job",
+            key="emily-paperclip-job",
+            source="user",
+        ),
+        PluginManager(),
+    )
+
+    with pytest.raises(TypeError):
+        cron_job_capability(
+            profile_name="emily",
+            hermes_home=tmp_path,
+            job_id=JOB_ID,
+            registration_owner="user:emily-paperclip-job",
+        )
+    with pytest.raises(AttributeError):
+        context.registration_owner = "user:spoofed"
+
+    assert context.registration_owner == "user:emily-paperclip-job"
+
+
+def test_loader_owner_supports_nested_plugin_manifest_keys():
+    context = PluginContext(
+        PluginManifest(
+            name="Browser Use",
+            key="browser/browser_use",
+            source="bundled",
+        ),
+        PluginManager(),
+    )
+
+    assert context.registration_owner == "bundled:browser/browser_use"
+
+
+def test_separate_context_with_same_display_identity_cannot_reuse_requirement(
+    tmp_path,
+):
+    first = PluginContext(
+        PluginManifest(
+            name="Emily Paperclip Job",
+            key="emily-paperclip-job",
+            source="user",
+        ),
+        PluginManager(),
+    )
+    copied = PluginContext(
+        PluginManifest(
+            name="Emily Paperclip Job",
+            key="emily-paperclip-job",
+            source="user",
+        ),
+        PluginManager(),
+    )
+    requirement = first.cron_job_capability(
+        profile_name="emily",
+        hermes_home=tmp_path,
+        job_id=JOB_ID,
+    )
+
+    with pytest.raises(PermissionError, match="owner"):
+        copied.register_tool(
+            name="_test_owner_spoof",
+            toolset="test",
+            schema=_schema("_test_owner_spoof"),
+            handler=lambda args, **kwargs: "{}",
+            execution_capability=requirement,
+        )

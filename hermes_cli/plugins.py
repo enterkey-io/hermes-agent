@@ -373,7 +373,12 @@ class PluginContext:
         self._manager = manager
         source = (manifest.source or "unknown").strip()
         plugin_id = (manifest.key or manifest.name).strip()
-        self._registration_owner = f"{source}:{plugin_id}"
+        from agent.execution_capabilities import _mint_registration_owner
+
+        self.__registration_owner = _mint_registration_owner(
+            f"{source}:{plugin_id}"
+        )
+        self.__inbound_json_policy = None
         # Lazy-built host-owned LLM facade — see ctx.llm property below.
         self._llm: Any = None
         self._subagent_lifecycle: Any = None
@@ -446,17 +451,39 @@ class PluginContext:
         The contract is ``<manifest source>:<manifest key>``. User plugins
         should keep their directory/manifest key stable across upgrades.
         """
-        return self._registration_owner
+        return self.__registration_owner.identity
 
     def cron_job_capability(self, *, profile_name: str, hermes_home, job_id: str):
         """Require a tool to run only for this plugin, profile, and cron job."""
-        from agent.execution_capabilities import cron_job_capability
+        from agent.execution_capabilities import _cron_job_capability_for_owner
 
-        return cron_job_capability(
+        return _cron_job_capability_for_owner(
+            self.__registration_owner,
             profile_name=profile_name,
             hermes_home=hermes_home,
             job_id=job_id,
-            registration_owner=self.registration_owner,
+        )
+
+    def require_inbound_json_policy(
+        self,
+        *,
+        reject_duplicate_object_keys: bool,
+    ) -> None:
+        """Require strict raw JSON parsing for this context's protected tools.
+
+        The policy is attached to each subsequently registered capability tool
+        and is scoped by loader owner, requirement, and tool entry. It does not
+        change parsing for unrelated tools.
+        """
+        if reject_duplicate_object_keys is not True:
+            raise ValueError("duplicate-object-key rejection must be enabled")
+        if self.__inbound_json_policy is not None:
+            raise RuntimeError("inbound JSON policy is already configured")
+        from tools.registry import _mint_inbound_json_policy
+
+        self.__inbound_json_policy = _mint_inbound_json_policy(
+            self.__registration_owner,
+            reject_duplicate_object_keys=True,
         )
 
     def register_tool(
@@ -499,7 +526,8 @@ class PluginContext:
 
         from tools.registry import registry
 
-        registry.register(
+        self._register_tool_in(
+            registry,
             name=name,
             toolset=toolset,
             schema=schema,
@@ -510,13 +538,20 @@ class PluginContext:
             description=description,
             emoji=emoji,
             execution_capability=execution_capability,
-            registration_owner=self.registration_owner,
             override=override,
         )
         self._manager._plugin_tool_names.add(name)
         logger.debug(
             "Plugin %s registered tool: %s%s",
             self.manifest.name, name, " (override)" if override else "",
+        )
+
+    def _register_tool_in(self, target_registry, **kwargs) -> None:
+        """Internal testable registration path using this context's owner."""
+        target_registry.register(
+            **kwargs,
+            _registration_owner=self.__registration_owner,
+            _inbound_json_policy=self.__inbound_json_policy,
         )
 
     # -- override trust gate ------------------------------------------------

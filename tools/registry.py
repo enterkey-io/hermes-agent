@@ -18,6 +18,7 @@ import ast
 import importlib
 import json
 import logging
+import re
 import sys
 import threading
 import time
@@ -25,6 +26,126 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
+_INBOUND_JSON_ISSUER = object()
+
+
+class _InboundJsonPolicy:
+    __slots__ = ("owner", "reject_duplicate_object_keys")
+
+    def __init__(
+        self,
+        issuer,
+        owner,
+        *,
+        reject_duplicate_object_keys: bool,
+    ) -> None:
+        if issuer is not _INBOUND_JSON_ISSUER:
+            raise PermissionError("inbound JSON policies are host-issued")
+        self.owner = owner
+        self.reject_duplicate_object_keys = reject_duplicate_object_keys
+
+
+class _InboundJsonAdmission:
+    __slots__ = (
+        "_args_fingerprint",
+        "_consumed",
+        "_context",
+        "_entry",
+        "_lock",
+        "_owner",
+    )
+
+    def __init__(self, issuer, *, entry, args, context, owner) -> None:
+        if issuer is not _INBOUND_JSON_ISSUER:
+            raise PermissionError("inbound JSON admissions are host-issued")
+        self._args_fingerprint = _json_fingerprint(args)
+        self._consumed = False
+        self._context = context
+        self._entry = entry
+        self._lock = threading.Lock()
+        self._owner = owner
+
+    def consume(self, *, entry, args, context, owner) -> None:
+        with self._lock:
+            if self._consumed:
+                raise PermissionError("inbound JSON admission was already consumed")
+            if (
+                self._entry is not entry
+                or self._context is not context
+                or self._owner is not owner
+                or self._args_fingerprint != _json_fingerprint(args)
+            ):
+                raise PermissionError("inbound JSON admission does not match")
+            self._consumed = True
+
+
+def _json_fingerprint(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _mint_inbound_json_policy(
+    owner,
+    *,
+    reject_duplicate_object_keys: bool,
+):
+    from agent.execution_capabilities import _RegistrationOwner
+
+    if not isinstance(owner, _RegistrationOwner):
+        raise PermissionError("inbound JSON policy owner is unavailable")
+    return _InboundJsonPolicy(
+        _INBOUND_JSON_ISSUER,
+        owner,
+        reject_duplicate_object_keys=reject_duplicate_object_keys,
+    )
+
+
+def _reject_duplicate_json_pairs(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON object key")
+        value[key] = item
+    return value
+
+
+def _contains_c0_c1(value: str) -> bool:
+    return any(
+        ord(character) <= 0x1F or 0x7F <= ord(character) <= 0x9F
+        for character in value
+    )
+
+
+def _configured_string_patterns_allow(value: Any, schema: Any) -> bool:
+    """Apply configured string patterns recursively before plugin dispatch."""
+    schema = schema if isinstance(schema, dict) else {}
+    if isinstance(value, dict):
+        properties = schema.get("properties")
+        properties = properties if isinstance(properties, dict) else {}
+        for key, child in value.items():
+            if _contains_c0_c1(str(key)):
+                return False
+            if not _configured_string_patterns_allow(child, properties.get(key)):
+                return False
+        return True
+    if isinstance(value, list):
+        item_schema = schema.get("items")
+        return all(
+            _configured_string_patterns_allow(child, item_schema)
+            for child in value
+        )
+    if isinstance(value, str) and _contains_c0_c1(value):
+        pattern = schema.get("pattern")
+        if isinstance(pattern, str):
+            try:
+                return re.search(pattern, value) is not None
+            except re.error:
+                return False
+    return True
 
 # Cap on a tool error body; only trims runaway interpolated exceptions (static msgs are ~115 chars).
 _MAX_TOOL_ERROR_CHARS = 2048
@@ -206,12 +327,14 @@ class ToolEntry:
         "requires_env", "is_async", "description", "emoji",
         "max_result_size_chars", "dynamic_schema_overrides",
         "execution_capability", "registration_owner",
+        "_registration_owner", "inbound_json_policy",
     )
 
     def __init__(self, name, toolset, schema, handler, check_fn,
                  requires_env, is_async, description, emoji,
                  max_result_size_chars=None, dynamic_schema_overrides=None,
-                 execution_capability=None, registration_owner=None):
+                 execution_capability=None, registration_owner=None,
+                 registration_owner_token=None, inbound_json_policy=None):
         self.name = name
         self.toolset = toolset
         self.schema = schema
@@ -232,6 +355,8 @@ class ToolEntry:
         self.dynamic_schema_overrides = dynamic_schema_overrides
         self.execution_capability = execution_capability
         self.registration_owner = registration_owner
+        self._registration_owner = registration_owner_token
+        self.inbound_json_policy = inbound_json_policy
 
 
 # ---------------------------------------------------------------------------
@@ -477,6 +602,100 @@ class ToolRegistry:
         with self._lock:
             return self._tools.get(name)
 
+    def parse_inbound_json_arguments(
+        self,
+        name: str,
+        raw_arguments: Any,
+        *,
+        execution_context=None,
+        execution_owner=None,
+    ) -> tuple[dict, Optional[str], Any]:
+        """Parse raw model arguments and mint any required one-use admission."""
+        entry = self.get_entry(name)
+        policy = entry.inbound_json_policy if entry is not None else None
+        object_pairs_hook = None
+        if policy is not None:
+            if (
+                entry.execution_capability is None
+                or entry._registration_owner is not policy.owner
+            ):
+                return {}, self._inbound_json_error(
+                    "inbound_json_policy_unavailable",
+                    "Strict inbound JSON policy is unavailable.",
+                ), None
+            from agent.execution_capabilities import execution_context_allows
+
+            if not execution_context_allows(
+                execution_context,
+                entry.execution_capability,
+                owner=execution_owner,
+            ):
+                return {}, self._inbound_json_error(
+                    "execution_capability_unavailable",
+                    "Tool is unavailable in this execution context.",
+                ), None
+            if policy.reject_duplicate_object_keys:
+                object_pairs_hook = _reject_duplicate_json_pairs
+        try:
+            arguments = json.loads(
+                raw_arguments,
+                object_pairs_hook=object_pairs_hook,
+            )
+        except (json.JSONDecodeError, TypeError, ValueError):
+            if policy is None:
+                return {}, self._legacy_inbound_json_error(), None
+            return {}, self._inbound_json_error(
+                "inbound_json_policy",
+                "Tool arguments must be a valid JSON object.",
+            ), None
+        if not isinstance(arguments, dict):
+            if policy is None:
+                return {}, self._legacy_inbound_json_error(), None
+            return {}, self._inbound_json_error(
+                "inbound_json_policy",
+                "Tool arguments must be a valid JSON object.",
+            ), None
+        if policy is None:
+            return arguments, None, None
+        parameters = (
+            entry.schema.get("parameters", {})
+            if isinstance(entry.schema, dict)
+            else {}
+        )
+        if not _configured_string_patterns_allow(arguments, parameters):
+            return {}, self._inbound_json_error(
+                "inbound_json_policy",
+                "Tool arguments contain forbidden control characters.",
+            ), None
+        admission = _InboundJsonAdmission(
+            _INBOUND_JSON_ISSUER,
+            entry=entry,
+            args=arguments,
+            context=execution_context,
+            owner=execution_owner,
+        )
+        return arguments, None, admission
+
+    @staticmethod
+    def _inbound_json_error(error_type: str, message: str) -> str:
+        return json.dumps(
+            {"error": message, "error_type": error_type},
+            ensure_ascii=False,
+        )
+
+    @staticmethod
+    def _legacy_inbound_json_error() -> str:
+        return json.dumps(
+            {
+                "error": "Invalid tool arguments",
+                "message": (
+                    "Tool arguments must be a valid JSON object; "
+                    "tool was not executed."
+                ),
+            },
+            ensure_ascii=False,
+        )
+
     def get_execution_capability_tools(self, requirement) -> Set[str]:
         """Return the explicit tool allowlist for one exact trust requirement."""
         return {
@@ -594,7 +813,8 @@ class ToolRegistry:
         dynamic_schema_overrides: Callable = None,
         override: bool = False,
         execution_capability=None,
-        registration_owner: str | None = None,
+        _registration_owner=None,
+        _inbound_json_policy=None,
     ):
         """Register a tool.  Called at module-import time by each tool file.
 
@@ -608,6 +828,7 @@ class ToolRegistry:
             if execution_capability is not None:
                 from agent.execution_capabilities import (
                     CronJobCapabilityRequirement,
+                    _HOST_REGISTRATION_OWNER,
                 )
 
                 if not isinstance(
@@ -615,11 +836,28 @@ class ToolRegistry:
                     CronJobCapabilityRequirement,
                 ):
                     raise TypeError("invalid execution capability requirement")
-                declared_owner = execution_capability.registration_owner
-                registration_owner = registration_owner or declared_owner
-                if registration_owner != declared_owner:
+                declared_owner = execution_capability._owner
+                registration_owner = _registration_owner or declared_owner
+                if (
+                    _registration_owner is None
+                    and declared_owner is not _HOST_REGISTRATION_OWNER
+                ):
+                    raise PermissionError(
+                        "plugin execution capabilities require loader ownership"
+                    )
+                if registration_owner is not declared_owner:
                     raise PermissionError(
                         "execution capability owner does not match registration owner"
+                    )
+                if (
+                    _inbound_json_policy is not None
+                    and (
+                        not isinstance(_inbound_json_policy, _InboundJsonPolicy)
+                        or _inbound_json_policy.owner is not declared_owner
+                    )
+                ):
+                    raise PermissionError(
+                        "inbound JSON policy owner does not match registration owner"
                     )
                 scope = (
                     execution_capability.profile_name,
@@ -640,12 +878,16 @@ class ToolRegistry:
                     )
                     if (
                         existing_scope == scope
-                        and requirement.registration_owner != declared_owner
+                        and requirement._owner is not declared_owner
                     ):
                         raise PermissionError(
                             "cron capability scope is already owned by "
                             f"{requirement.registration_owner!r}"
                         )
+            elif _inbound_json_policy is not None:
+                raise PermissionError(
+                    "inbound JSON policies require an execution capability"
+                )
 
             existing = self._tools.get(name)
             if existing and existing.toolset != toolset:
@@ -697,7 +939,17 @@ class ToolRegistry:
                 max_result_size_chars=max_result_size_chars,
                 dynamic_schema_overrides=dynamic_schema_overrides,
                 execution_capability=execution_capability,
-                registration_owner=registration_owner,
+                registration_owner=(
+                    execution_capability.registration_owner
+                    if execution_capability is not None
+                    else None
+                ),
+                registration_owner_token=(
+                    registration_owner
+                    if execution_capability is not None
+                    else None
+                ),
+                inbound_json_policy=_inbound_json_policy,
             )
             # Availability is now derived per-tool (_toolset_has_exposable_tools),
             # so this map no longer gates a toolset. It is still consumed by
@@ -892,9 +1144,25 @@ class ToolRegistry:
         if not entry:
             return tool_error(f"Unknown tool: {name}")
         grant = kwargs.pop("_execution_capability_grant", None)
+        inbound_json_admission = kwargs.pop("_inbound_json_admission", None)
         execution_owner = kwargs.pop("_execution_capability_owner", None)
         execution_context = kwargs.pop("_execution_context", None)
         execution_runtime = None
+        if entry.inbound_json_policy is not None:
+            try:
+                if not isinstance(inbound_json_admission, _InboundJsonAdmission):
+                    raise PermissionError("inbound JSON admission is unavailable")
+                inbound_json_admission.consume(
+                    entry=entry,
+                    args=args,
+                    context=execution_context,
+                    owner=execution_owner,
+                )
+            except (PermissionError, TypeError, ValueError):
+                return json.dumps({
+                    "error": "Strict inbound JSON admission is unavailable",
+                    "error_type": "inbound_json_policy_unavailable",
+                })
         if entry.execution_capability is not None:
             from agent.execution_capabilities import (
                 ExecutionCapabilityError,

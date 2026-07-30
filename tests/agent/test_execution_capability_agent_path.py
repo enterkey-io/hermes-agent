@@ -12,9 +12,12 @@ from agent.agent_runtime_helpers import invoke_tool
 from agent.execution_capabilities import (
     _bind_execution_context,
     _issue_cron_job_execution_context,
+    _issue_tool_invocation_grant,
     _issue_trusted_cron_dispatch,
     cron_job_capability,
 )
+from agent.tool_executor import _parse_tool_arguments
+from hermes_cli.plugins import PluginContext, PluginManager, PluginManifest
 from run_agent import AIAgent
 from tools import mcp_tool
 from tools.registry import registry
@@ -22,6 +25,7 @@ from tools.registry import registry
 
 JOB_ID = "8ff7fa2ddb8b"
 TOOL_NAME = "_test_agent_path_protected_tool"
+POLICY_TOOL_NAME = "_test_agent_path_strict_json_tool"
 
 
 class _Agent:
@@ -193,6 +197,114 @@ def test_agent_without_execution_context_cannot_mint_protected_grant(tmp_path):
         registry.deregister(TOOL_NAME)
 
     assert result["error_type"] == "execution_capability_unavailable"
+
+
+def test_model_raw_json_policy_rejects_nested_duplicates_before_dispatch(
+    tmp_path,
+):
+    home = tmp_path / "profiles" / "emily"
+    home.mkdir(parents=True)
+    calls = []
+    plugin_context = PluginContext(
+        PluginManifest(
+            name="Emily Paperclip Job",
+            key="emily-paperclip-job",
+            source="user",
+        ),
+        PluginManager(),
+    )
+    plugin_context.require_inbound_json_policy(
+        reject_duplicate_object_keys=True,
+    )
+    requirement = plugin_context.cron_job_capability(
+        profile_name="emily",
+        hermes_home=home,
+        job_id=JOB_ID,
+    )
+    plugin_context._register_tool_in(
+        registry,
+        name=POLICY_TOOL_NAME,
+        toolset="test-capability",
+        schema={
+            "name": POLICY_TOOL_NAME,
+            "description": "Strict protected input",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "payload": {
+                        "type": "object",
+                        "properties": {
+                            "title": {
+                                "type": "string",
+                                "pattern": (
+                                    "^[^\\u0000-\\u001f"
+                                    "\\u007f-\\u009f]*$"
+                                ),
+                            }
+                        },
+                    }
+                },
+            },
+        },
+        handler=lambda args, **kwargs: calls.append(args) or '{"ok":true}',
+        execution_capability=requirement,
+    )
+    job = {"id": JOB_ID}
+    permit = _issue_trusted_cron_dispatch(
+        job=job,
+        profile_name="emily",
+        hermes_home=home,
+        execution_id="execution-strict-json",
+        allowed_tools={POLICY_TOOL_NAME},
+        protected_handler_timeout_seconds=1.0,
+        requirement=requirement,
+    )
+    execution_context = _issue_cron_job_execution_context(
+        permit=permit,
+        job=job,
+        execution_id="execution-strict-json",
+        profile_name="emily",
+        hermes_home=home,
+        requirement=requirement,
+    )
+    agent = _Agent(execution_context)
+    agent.valid_tool_names.add(POLICY_TOOL_NAME)
+    _bind_execution_context(execution_context, agent)
+
+    try:
+        parsed, duplicate_error, duplicate_admission = _parse_tool_arguments(
+            '{"payload":{"title":"first","title":"second"}}',
+            function_name=POLICY_TOOL_NAME,
+            agent=agent,
+        )
+        grant = _issue_tool_invocation_grant(
+            execution_context,
+            owner=agent,
+            tool_name=POLICY_TOOL_NAME,
+        )
+        direct_without_raw_proof = json.loads(
+            model_tools.handle_function_call(
+                POLICY_TOOL_NAME,
+                {"payload": {"title": "direct"}},
+                task_id="direct-model-dispatch",
+                skip_pre_tool_call_hook=True,
+                skip_tool_request_middleware=True,
+                _execution_capability_grant=grant,
+                _execution_capability_owner=agent,
+                _execution_context=execution_context,
+            )
+        )
+    finally:
+        registry.deregister(POLICY_TOOL_NAME)
+        model_tools._clear_tool_defs_cache()
+
+    assert parsed == {}
+    assert json.loads(duplicate_error)["error_type"] == "inbound_json_policy"
+    assert duplicate_admission is None
+    assert direct_without_raw_proof["error_type"] == (
+        "inbound_json_policy_unavailable"
+    )
+    assert calls == []
 
 
 def test_mcp_refresh_preserves_exact_execution_context_and_owner(monkeypatch):

@@ -144,22 +144,20 @@ class _BatchAbandoned(BaseException):
     """
 
 
-def _parse_tool_arguments(raw_arguments: Any) -> tuple[dict, Optional[str]]:
+def _parse_tool_arguments(
+    raw_arguments: Any,
+    *,
+    function_name: str,
+    agent,
+) -> tuple[dict, Optional[str], Any]:
     """Parse model-emitted arguments without repairing or coercing them."""
-    try:
-        arguments = json.loads(raw_arguments)
-    except (json.JSONDecodeError, TypeError):
-        arguments = None
-    if isinstance(arguments, dict):
-        return arguments, None
-    return {}, json.dumps(
-        {
-            "error": "Invalid tool arguments",
-            "message": (
-                "Tool arguments must be a valid JSON object; tool was not executed."
-            ),
-        },
-        ensure_ascii=False,
+    from tools.registry import registry
+
+    return registry.parse_inbound_json_arguments(
+        function_name,
+        raw_arguments,
+        execution_context=getattr(agent, "execution_context", None),
+        execution_owner=agent,
     )
 
 
@@ -822,11 +820,18 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     # (tool call, resolved name, parsed args, middleware trace, parse error,
     # tool-search scope block)
     parsed_calls = []
+    inbound_json_admissions = []
     for tool_call in tool_calls:
         function_name = tool_call.function.name
 
-        function_args, malformed_args_result = _parse_tool_arguments(
-            tool_call.function.arguments
+        (
+            function_args,
+            malformed_args_result,
+            inbound_json_admission,
+        ) = _parse_tool_arguments(
+            tool_call.function.arguments,
+            function_name=function_name,
+            agent=agent,
         )
 
         if malformed_args_result is not None:
@@ -840,6 +845,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                     None,
                 )
             )
+            inbound_json_admissions.append(None)
             continue
 
         # ── Tool Search unwrap ────────────────────────────────────────
@@ -885,6 +891,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
         parsed_calls.append(
             (tool_call, function_name, function_args, [], None, _ts_scope_block)
         )
+        inbound_json_admissions.append(inbound_json_admission)
 
     # ── Logging / callbacks ──────────────────────────────────────────
     tool_names_str = ", ".join(name for _, name, _, _, _, _ in parsed_calls)
@@ -986,6 +993,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
         middleware_trace,
         scope_block,
         start_order,
+        inbound_json_admission,
     ):
         """Worker function executed in a thread."""
         # Register this worker tid so the agent can fan out an interrupt
@@ -1054,6 +1062,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                         skip_tool_execution_middleware=True,
                         tool_request_middleware_trace=list(middleware_trace),
                         approval_provenance=approval_provenance_box[0],
+                        inbound_json_admission=inbound_json_admission,
                     )
 
                 managed = _run_agent_tool_execution_middleware(
@@ -1208,6 +1217,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                             parsed_calls[i][3],
                             scope_block,
                             submit_index,
+                            inbound_json_admissions[i],
                         )
                     except RuntimeError as submit_error:
                         if not _is_interpreter_shutdown_submit_error(submit_error):
@@ -1670,8 +1680,14 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
 
         function_name = tool_call.function.name
 
-        function_args, malformed_args_result = _parse_tool_arguments(
-            tool_call.function.arguments
+        (
+            function_args,
+            malformed_args_result,
+            inbound_json_admission,
+        ) = _parse_tool_arguments(
+            tool_call.function.arguments,
+            function_name=function_name,
+            agent=agent,
         )
         if malformed_args_result is not None:
             _emit_terminal_post_tool_call(
@@ -2063,6 +2079,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                         enabled_toolsets=getattr(agent, "enabled_toolsets", None),
                         disabled_toolsets=getattr(agent, "disabled_toolsets", None),
                         approval_provenance=approval_provenance_box[0],
+                        _inbound_json_admission=inbound_json_admission,
                         **_execution_capability_dispatch_kwargs(
                             agent,
                             function_name,
@@ -2150,6 +2167,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                         enabled_toolsets=getattr(agent, "enabled_toolsets", None),
                         disabled_toolsets=getattr(agent, "disabled_toolsets", None),
                         approval_provenance=approval_provenance_box[0],
+                        _inbound_json_admission=inbound_json_admission,
                         **_execution_capability_dispatch_kwargs(
                             agent,
                             function_name,

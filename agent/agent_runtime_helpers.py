@@ -2846,7 +2846,8 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
                  skip_tool_request_middleware: bool = False,
                  tool_request_middleware_trace: Optional[List[Dict[str, Any]]] = None,
                  skip_tool_execution_middleware: bool = False,
-                 approval_provenance: Any = None) -> str:
+                 approval_provenance: Any = None,
+                 inbound_json_admission: Any = None) -> str:
     """Invoke a single tool and return the result string. No display logic.
 
     Handles both agent-level tools (todo, memory, etc.) and registry-dispatched
@@ -3063,6 +3064,8 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
                     function_name,
                 ),
             )
+            if inbound_json_admission is not None:
+                dispatch_kwargs["_inbound_json_admission"] = inbound_json_admission
             if skip_tool_execution_middleware:
                 dispatch_kwargs["skip_tool_execution_middleware"] = True
             if approval_provenance is not None:

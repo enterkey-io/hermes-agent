@@ -186,8 +186,6 @@ class InProcessCronScheduler(CronScheduler):
     for the next allowed tick.
     """
 
-    __gateway_tick = None
-
     @property
     def name(self) -> str:
         return "builtin"
@@ -203,35 +201,6 @@ class InProcessCronScheduler(CronScheduler):
         profile_homes=None,
     ):
         from cron.scheduler import tick as cron_tick
-
-        return self._start_with_tick(
-            stop_event,
-            cron_tick=cron_tick,
-            adapters=adapters,
-            loop=loop,
-            interval=interval,
-            can_dispatch=can_dispatch,
-            profile_homes=profile_homes,
-        )
-
-    def _start_gateway(
-        self,
-        stop_event,
-        *,
-        adapters=None,
-        loop=None,
-        interval=60,
-        can_dispatch=None,
-        profile_homes=None,
-    ):
-        """Run the private gateway-owned loop that may issue capabilities."""
-        if type(self) is not InProcessCronScheduler:
-            raise PermissionError(
-                "only the exact built-in scheduler may start the trusted loop"
-            )
-        cron_tick = InProcessCronScheduler.__gateway_tick
-        if cron_tick is None:
-            raise RuntimeError("trusted gateway scheduler is not initialized")
 
         return self._start_with_tick(
             stop_event,

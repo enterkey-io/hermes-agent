@@ -27197,15 +27197,35 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
 
 
 def _gateway_cron_start_callable(provider):
-    """Select the private trusted loop only for the built-in gateway provider."""
+    """Public/test selector always returns the provider's untrusted start."""
+    return provider.start
+
+
+def _consume_gateway_cron_start_callable(provider):
+    """Consume the one-use trusted ticker only during gateway bootstrap.
+
+    This avoids persistent module/class storage of the issuer. It is an
+    internal trusted-code convention, not a sandbox against installed Python.
+    """
     from cron.scheduler_provider import InProcessCronScheduler
 
     if (
-        type(provider) is InProcessCronScheduler
-        and type(provider).__module__ == "cron.scheduler_provider"
+        type(provider) is not InProcessCronScheduler
+        or type(provider).__module__ != "cron.scheduler_provider"
     ):
-        return provider._start_gateway
-    return provider.start
+        return provider.start
+    from cron.scheduler import _take_trusted_gateway_tick
+
+    trusted_tick = _take_trusted_gateway_tick()
+
+    def start_builtin_gateway_scheduler(stop_event, **kwargs):
+        return provider._start_with_tick(
+            stop_event,
+            cron_tick=trusted_tick,
+            **kwargs,
+        )
+
+    return start_builtin_gateway_scheduler
 
 
 # Upper bound for cooperatively draining the cron ticker on shutdown. The cron
@@ -27817,7 +27837,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
             runner._draining or runner._external_drain_active
         )
     cron_thread = threading.Thread(
-        target=_gateway_cron_start_callable(cron_provider),
+        target=_consume_gateway_cron_start_callable(cron_provider),
         args=(cron_stop,),
         kwargs=cron_start_kwargs,
         daemon=True,

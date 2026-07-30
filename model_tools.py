@@ -1172,6 +1172,7 @@ def handle_function_call(
     _execution_capability_grant=None,
     _execution_capability_owner=None,
     _execution_context=None,
+    _inbound_json_admission=None,
 ) -> str:
     """
     Main function call dispatcher that routes calls to the tool registry.
@@ -1479,6 +1480,7 @@ def handle_function_call(
                         _execution_capability_grant=_execution_capability_grant,
                         _execution_capability_owner=_execution_capability_owner,
                         _execution_context=_execution_context,
+                        _inbound_json_admission=_inbound_json_admission,
                         **provenance_kwargs,
                     )
             else:
@@ -1498,6 +1500,7 @@ def handle_function_call(
                         _execution_capability_grant=_execution_capability_grant,
                         _execution_capability_owner=_execution_capability_owner,
                         _execution_context=_execution_context,
+                        _inbound_json_admission=_inbound_json_admission,
                         **provenance_kwargs,
                     )
             if skip_tool_execution_middleware:
