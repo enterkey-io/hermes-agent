@@ -1461,6 +1461,7 @@ def init_agent(
         disabled_toolsets=disabled_toolsets,
         quiet_mode=agent.quiet_mode,
         execution_context=agent.execution_context,
+        execution_owner=agent,
     )
     
     # Show tool configuration and store valid tool names for validation

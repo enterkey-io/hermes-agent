@@ -7201,6 +7201,8 @@ def refresh_agent_mcp_tools(
             enabled_toolsets=enabled,
             disabled_toolsets=disabled,
             quiet_mode=quiet_mode,
+            execution_context=getattr(agent, "execution_context", None),
+            execution_owner=agent,
         )
         or []
     )

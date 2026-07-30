@@ -437,11 +437,15 @@ class PluginContext:
     # -- tool registration --------------------------------------------------
 
     @staticmethod
-    def cron_job_capability(job_id: str):
-        """Require a tool to run only during one exact trusted cron job."""
+    def cron_job_capability(*, profile_name: str, hermes_home, job_id: str):
+        """Require a tool to run only for one exact profile and cron job."""
         from agent.execution_capabilities import cron_job_capability
 
-        return cron_job_capability(job_id)
+        return cron_job_capability(
+            profile_name=profile_name,
+            hermes_home=hermes_home,
+            job_id=job_id,
+        )
 
     def register_tool(
         self,

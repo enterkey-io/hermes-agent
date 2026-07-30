@@ -3,176 +3,220 @@
 from __future__ import annotations
 
 import copy
-import importlib
+import json
 import pickle
+import threading
+import time
 
 import pytest
 
+from agent import execution_capabilities as capabilities
+from tools.registry import ToolRegistry
+
 
 JOB_ID = "8ff7fa2ddb8b"
+TOOL_NAME = "bounded_tool"
 
 
-def _capabilities():
-    try:
-        return importlib.import_module("agent.execution_capabilities")
-    except ModuleNotFoundError:
-        pytest.fail(
-            "agent.execution_capabilities is required for scheduler-issued "
-            "cron job capabilities"
-        )
+def _requirement(home, *, job_id=JOB_ID, profile_name="emily"):
+    return capabilities.cron_job_capability(
+        profile_name=profile_name,
+        hermes_home=home,
+        job_id=job_id,
+    )
 
 
-def test_exact_job_requirement_and_live_context_match_only_each_other():
-    capabilities = _capabilities()
-    requirement = capabilities.cron_job_capability(JOB_ID)
-    other_requirement = capabilities.cron_job_capability("another-job")
-    context = capabilities._issue_cron_job_execution_context(JOB_ID)
-    owner = object()
-
-    capabilities._bind_execution_context(context, owner)
-
-    assert capabilities.execution_context_allows(context, requirement) is True
-    assert capabilities.execution_context_allows(context, other_requirement) is False
-    assert capabilities.execution_context_fingerprint(context) != ""
-
-
-def test_execution_context_rejects_copy_deepcopy_and_pickle():
-    capabilities = _capabilities()
-    context = capabilities._issue_cron_job_execution_context(JOB_ID)
-
-    with pytest.raises(TypeError):
-        copy.copy(context)
-    with pytest.raises(TypeError):
-        copy.deepcopy(context)
-    with pytest.raises(TypeError):
-        pickle.dumps(context)
-
-
-def test_execution_context_can_bind_to_only_one_agent_owner():
-    capabilities = _capabilities()
-    context = capabilities._issue_cron_job_execution_context(JOB_ID)
-    first_owner = object()
-    nested_owner = object()
-
-    capabilities._bind_execution_context(context, first_owner)
-
-    with pytest.raises(capabilities.ExecutionCapabilityError):
-        capabilities._bind_execution_context(context, nested_owner)
-
-
-def test_tool_invocation_grant_is_exact_one_use_and_not_copyable():
-    capabilities = _capabilities()
-    requirement = capabilities.cron_job_capability(JOB_ID)
-    context = capabilities._issue_cron_job_execution_context(JOB_ID)
+def _bound_context(home, *, timeout=1.0):
+    job = {"id": JOB_ID}
+    permit = capabilities._issue_trusted_cron_dispatch(
+        job=job,
+        profile_name="emily",
+        hermes_home=home,
+        execution_id="execution-1",
+        allowed_tools={TOOL_NAME},
+        protected_handler_timeout_seconds=timeout,
+    )
+    context = capabilities._issue_cron_job_execution_context(
+        permit=permit,
+        job=job,
+        execution_id="execution-1",
+        profile_name="emily",
+        hermes_home=home,
+    )
     owner = object()
     capabilities._bind_execution_context(context, owner)
+    return context, owner
+
+
+def _registry(home, handler):
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        name=TOOL_NAME,
+        toolset="test",
+        schema={
+            "name": TOOL_NAME,
+            "description": "protected",
+            "parameters": {"type": "object", "properties": {}},
+        },
+        handler=handler,
+        execution_capability=_requirement(home),
+    )
+    return tool_registry
+
+
+def _dispatch(tool_registry, context, owner):
     grant = capabilities._issue_tool_invocation_grant(
         context,
         owner=owner,
-        tool_name="bounded_tool",
+        tool_name=TOOL_NAME,
+    )
+    return tool_registry.dispatch(
+        TOOL_NAME,
+        {},
+        _execution_capability_grant=grant,
+        _execution_capability_owner=owner,
+        _execution_context=context,
     )
 
-    with pytest.raises(TypeError):
-        copy.copy(grant)
-    with pytest.raises(TypeError):
-        copy.deepcopy(grant)
-    with pytest.raises(TypeError):
-        pickle.dumps(grant)
-    with pytest.raises(capabilities.ExecutionCapabilityError):
-        capabilities._consume_tool_invocation_grant(
-            grant,
-            requirement=requirement,
-            tool_name="different_tool",
-        )
 
-    runtime = capabilities._consume_tool_invocation_grant(
-        grant,
-        requirement=requirement,
-        tool_name="bounded_tool",
-    )
-    assert runtime.scoped_state("plugin.test") == {}
+def test_context_and_grants_are_noncopyable_and_owner_bound(tmp_path):
+    context, owner = _bound_context(tmp_path)
 
-    with pytest.raises(capabilities.ExecutionCapabilityError):
-        capabilities._consume_tool_invocation_grant(
-            grant,
-            requirement=requirement,
-            tool_name="bounded_tool",
-        )
-
-
-def test_revocation_invalidates_context_grants_and_runtime_state():
-    capabilities = _capabilities()
-    requirement = capabilities.cron_job_capability(JOB_ID)
-    context = capabilities._issue_cron_job_execution_context(JOB_ID)
-    owner = object()
-    capabilities._bind_execution_context(context, owner)
-    grant = capabilities._issue_tool_invocation_grant(
+    for value in (
         context,
-        owner=owner,
-        tool_name="bounded_tool",
-    )
-    runtime = capabilities._consume_tool_invocation_grant(
-        grant,
-        requirement=requirement,
-        tool_name="bounded_tool",
-    )
-    state = runtime.scoped_state("plugin.test")
-    state["searched"] = True
-
-    capabilities._revoke_execution_context(context)
-
-    assert capabilities.execution_context_allows(context, requirement) is False
-    assert capabilities.execution_context_fingerprint(context) == ""
-    with pytest.raises(capabilities.ExecutionCapabilityError):
-        runtime.scoped_state("plugin.test")
-    with pytest.raises(capabilities.ExecutionCapabilityError):
         capabilities._issue_tool_invocation_grant(
             context,
             owner=owner,
-            tool_name="bounded_tool",
-        )
+            tool_name=TOOL_NAME,
+        ),
+    ):
+        with pytest.raises(TypeError):
+            copy.copy(value)
+        with pytest.raises(TypeError):
+            copy.deepcopy(value)
+        with pytest.raises(TypeError):
+            pickle.dumps(value)
+
+    with pytest.raises(capabilities.ExecutionCapabilityError):
+        capabilities._bind_execution_context(context, object())
 
 
-def test_wrong_job_grant_fails_without_consuming_valid_use():
-    capabilities = _capabilities()
-    context = capabilities._issue_cron_job_execution_context(JOB_ID)
-    owner = object()
-    capabilities._bind_execution_context(context, owner)
+def test_runtime_exposes_only_a_shorter_bounded_request_budget(tmp_path):
+    context, owner = _bound_context(tmp_path, timeout=0.5)
     grant = capabilities._issue_tool_invocation_grant(
         context,
         owner=owner,
-        tool_name="bounded_tool",
+        tool_name=TOOL_NAME,
     )
-
-    with pytest.raises(capabilities.ExecutionCapabilityError):
-        capabilities._consume_tool_invocation_grant(
-            grant,
-            requirement=capabilities.cron_job_capability("another-job"),
-            tool_name="bounded_tool",
-        )
-
     runtime = capabilities._consume_tool_invocation_grant(
         grant,
-        requirement=capabilities.cron_job_capability(JOB_ID),
-        tool_name="bounded_tool",
+        requirement=_requirement(tmp_path),
+        tool_name=TOOL_NAME,
+        owner=owner,
+        execution_context=context,
     )
-    assert runtime.scoped_state("plugin.test") == {}
+
+    remaining = runtime.remaining_seconds()
+    request_timeout = runtime.bounded_timeout(remaining)
+
+    assert 0 < request_timeout < remaining
+    runtime._settle()
 
 
-def test_execution_context_fails_closed_across_process_boundary(monkeypatch):
-    capabilities = _capabilities()
-    requirement = capabilities.cron_job_capability(JOB_ID)
-    context = capabilities._issue_cron_job_execution_context(JOB_ID)
-    owner = object()
-    capabilities._bind_execution_context(context, owner)
+def test_finalization_stops_cooperative_handler_before_mutation(tmp_path):
+    context, owner = _bound_context(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+    mutations = []
+    dispatch_result = []
+
+    def handler(args, *, execution_runtime, **kwargs):
+        entered.set()
+        release.wait(timeout=1)
+        execution_runtime.check_active()
+        mutations.append("mutated")
+        return '{"ok": true}'
+
+    tool_registry = _registry(tmp_path, handler)
+    worker = threading.Thread(
+        target=lambda: dispatch_result.append(
+            _dispatch(tool_registry, context, owner)
+        )
+    )
+    worker.start()
+    assert entered.wait(timeout=1)
+
+    settlements = []
+    finalizer = threading.Thread(
+        target=lambda: settlements.append(
+                capabilities._finalize_execution_context(
+                    context,
+                    timeout_seconds=3.0,
+            )
+        )
+    )
+    finalizer.start()
+    deadline = time.monotonic() + 1
+    while capabilities.execution_context_allows(
+        context,
+        _requirement(tmp_path),
+        owner=owner,
+    ):
+        assert time.monotonic() < deadline
+        time.sleep(0.005)
+    release.set()
+    worker.join(timeout=3)
+    finalizer.join(timeout=3)
+
+    assert not worker.is_alive()
+    assert not finalizer.is_alive()
+    assert mutations == []
+    assert settlements == [
+        capabilities.ExecutionSettlement(
+            settled=True,
+            reconciliation_required=False,
+            active_invocations=0,
+            uncertain_operations=(),
+        )
+    ]
+
+
+def test_unknown_external_response_is_terminal_and_requires_reconciliation(
+    tmp_path,
+):
+    context, owner = _bound_context(tmp_path)
+
+    def handler(args, *, execution_runtime, **kwargs):
+        execution_runtime.mark_external_mutation_started("issue-create-1")
+        raise TimeoutError("response not received")
+
+    result = json.loads(_dispatch(_registry(tmp_path, handler), context, owner))
+    settlement = capabilities._finalize_execution_context(
+        context,
+        timeout_seconds=0.1,
+    )
+
+    assert result["error_type"] == "protected_mutation_uncertain"
+    assert result["reconciliation_required"] is True
+    assert settlement.settled is True
+    assert settlement.reconciliation_required is True
+    assert settlement.uncertain_operations == ("issue-create-1",)
+
+
+def test_context_fails_closed_across_process_boundary(tmp_path, monkeypatch):
+    context, owner = _bound_context(tmp_path)
     original_pid = capabilities.os.getpid()
 
     monkeypatch.setattr(capabilities.os, "getpid", lambda: original_pid + 1)
 
-    assert capabilities.execution_context_allows(context, requirement) is False
+    assert not capabilities.execution_context_allows(
+        context,
+        _requirement(tmp_path),
+        owner=owner,
+    )
     with pytest.raises(capabilities.ExecutionCapabilityError):
         capabilities._issue_tool_invocation_grant(
             context,
             owner=owner,
-            tool_name="bounded_tool",
+            tool_name=TOOL_NAME,
         )

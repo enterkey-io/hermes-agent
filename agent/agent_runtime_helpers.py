@@ -2828,6 +2828,18 @@ def issue_execution_capability_grant(agent, function_name: str):
         return None
 
 
+def execution_capability_dispatch_kwargs(agent, function_name: str) -> dict:
+    """Return hidden dispatch proofs only for an authorized protected call."""
+    grant = issue_execution_capability_grant(agent, function_name)
+    if grant is None:
+        return {}
+    return {
+        "_execution_capability_grant": grant,
+        "_execution_capability_owner": agent,
+        "_execution_context": getattr(agent, "execution_context", None),
+    }
+
+
 def invoke_tool(agent, function_name: str, function_args: dict, effective_task_id: str,
                  tool_call_id: Optional[str] = None, messages: list = None,
                  pre_tool_block_checked: bool = False,
@@ -3046,15 +3058,11 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
                 enabled_toolsets=getattr(agent, "enabled_toolsets", None),
                 disabled_toolsets=getattr(agent, "disabled_toolsets", None),
                 tool_request_middleware_trace=list(_tool_middleware_trace),
+                **execution_capability_dispatch_kwargs(
+                    agent,
+                    function_name,
+                ),
             )
-            execution_capability_grant = issue_execution_capability_grant(
-                agent,
-                function_name,
-            )
-            if execution_capability_grant is not None:
-                dispatch_kwargs["_execution_capability_grant"] = (
-                    execution_capability_grant
-                )
             if skip_tool_execution_middleware:
                 dispatch_kwargs["skip_tool_execution_middleware"] = True
             if approval_provenance is not None:

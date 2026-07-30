@@ -476,6 +476,14 @@ class ToolRegistry:
         with self._lock:
             return self._tools.get(name)
 
+    def get_execution_capability_tools(self, requirement) -> Set[str]:
+        """Return the explicit tool allowlist for one exact trust requirement."""
+        return {
+            entry.name
+            for entry in self._snapshot_entries()
+            if entry.execution_capability == requirement
+        }
+
     def get_registered_toolset_names(self) -> List[str]:
         """Return sorted unique toolset names present in the registry."""
         return sorted({entry.toolset for entry in self._snapshot_entries()})
@@ -724,6 +732,7 @@ class ToolRegistry:
         tool_names: Set[str],
         quiet: bool = False,
         execution_context=None,
+        execution_owner=None,
     ) -> List[dict]:
         """Return OpenAI-format tool schemas for the requested tool names.
 
@@ -751,6 +760,7 @@ class ToolRegistry:
                 if not execution_context_allows(
                     execution_context,
                     entry.execution_capability,
+                    owner=execution_owner,
                 ):
                     continue
             if entry.check_fn:
@@ -829,6 +839,9 @@ class ToolRegistry:
         if not entry:
             return tool_error(f"Unknown tool: {name}")
         grant = kwargs.pop("_execution_capability_grant", None)
+        execution_owner = kwargs.pop("_execution_capability_owner", None)
+        execution_context = kwargs.pop("_execution_context", None)
+        execution_runtime = None
         if entry.execution_capability is not None:
             from agent.execution_capabilities import (
                 ExecutionCapabilityError,
@@ -836,39 +849,67 @@ class ToolRegistry:
             )
 
             try:
-                kwargs["execution_runtime"] = _consume_tool_invocation_grant(
+                execution_runtime = _consume_tool_invocation_grant(
                     grant,
                     requirement=entry.execution_capability,
                     tool_name=name,
+                    owner=execution_owner,
+                    execution_context=execution_context,
                 )
+                kwargs["execution_runtime"] = execution_runtime
             except ExecutionCapabilityError:
                 return tool_error(
                     "Tool is unavailable in this execution context",
                     error_type="execution_capability_unavailable",
                     tool=name,
                 )
+        result = None
+        error = None
         try:
             if entry.is_async:
                 from model_tools import _run_async
                 result = _run_async(entry.handler(args, **kwargs))
             else:
                 result = entry.handler(args, **kwargs)
-            return self._normalize_handler_result(name, result)
         except Exception as e:
-            # exc_info already renders the exception, so keep the message copy bounded.
-            logger.exception(
-                "Tool %s dispatch error: %s", name, _bound_error_text(str(e))
+            if execution_runtime is not None and isinstance(
+                e,
+                ExecutionCapabilityError,
+            ):
+                error = tool_error(
+                    "Protected tool execution was cancelled",
+                    error_type="execution_capability_unavailable",
+                    tool=name,
+                )
+            else:
+                # exc_info already renders the exception, so keep the message copy bounded.
+                logger.exception(
+                    "Tool %s dispatch error: %s", name, _bound_error_text(str(e))
+                )
+                # Route through the sanitizer so framing tokens / CDATA / fences
+                # in exception strings don't reach the model as structural noise.
+                # See model_tools._sanitize_tool_error for rationale.
+                raw = f"Tool execution failed: {type(e).__name__}: {e}"
+                try:
+                    from model_tools import _sanitize_tool_error
+                    sanitized = _sanitize_tool_error(raw)
+                except Exception:
+                    sanitized = raw  # defensive: never let the sanitizer block error propagation
+                error = tool_error(sanitized, tool=name)
+        finally:
+            uncertain = bool(
+                execution_runtime is not None and execution_runtime._settle()
             )
-            # Route through the sanitizer so framing tokens / CDATA / fences
-            # in exception strings don't reach the model as structural noise.
-            # See model_tools._sanitize_tool_error for rationale.
-            raw = f"Tool execution failed: {type(e).__name__}: {e}"
-            try:
-                from model_tools import _sanitize_tool_error
-                sanitized = _sanitize_tool_error(raw)
-            except Exception:
-                sanitized = raw  # defensive: never let the sanitizer block error propagation
-            return tool_error(sanitized)
+        if uncertain:
+            return tool_error(
+                "External mutation outcome is uncertain; reconciliation required",
+                error_type="protected_mutation_uncertain",
+                tool=name,
+                reconciliation_required=True,
+            )
+        if error is not None:
+            return error
+        return self._normalize_handler_result(name, result)
 
     # ------------------------------------------------------------------
     # Query helpers  (replace redundant dicts in model_tools.py)

@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import json
+import types
 
 import model_tools
 from agent.agent_runtime_helpers import invoke_tool
 from agent.execution_capabilities import (
     _bind_execution_context,
     _issue_cron_job_execution_context,
+    _issue_trusted_cron_dispatch,
     cron_job_capability,
 )
+from tools import mcp_tool
 from tools.registry import registry
 
 
@@ -32,7 +35,37 @@ class _Agent:
         self._memory_manager = None
 
 
-def test_model_tool_definitions_filter_protected_tool_by_execution_context():
+def _requirement(home):
+    return cron_job_capability(
+        profile_name="emily",
+        hermes_home=home,
+        job_id=JOB_ID,
+    )
+
+
+def _context(home, *, owner=None):
+    job = {"id": JOB_ID}
+    permit = _issue_trusted_cron_dispatch(
+        job=job,
+        profile_name="emily",
+        hermes_home=home,
+        execution_id="execution-1",
+        allowed_tools={TOOL_NAME},
+        protected_handler_timeout_seconds=1.0,
+    )
+    context = _issue_cron_job_execution_context(
+        permit=permit,
+        job=job,
+        execution_id="execution-1",
+        profile_name="emily",
+        hermes_home=home,
+    )
+    if owner is not None:
+        _bind_execution_context(context, owner)
+    return context
+
+
+def _register(home, handler):
     registry.register(
         name=TOOL_NAME,
         toolset="test-capability",
@@ -41,49 +74,64 @@ def test_model_tool_definitions_filter_protected_tool_by_execution_context():
             "description": "Protected",
             "parameters": {"type": "object", "properties": {}},
         },
-        handler=lambda args, **kwargs: '{"ok": true}',
-        execution_capability=cron_job_capability(JOB_ID),
+        handler=handler,
+        execution_capability=_requirement(home),
     )
-    exact_context = _issue_cron_job_execution_context(JOB_ID)
+
+
+def test_model_tool_definitions_require_exact_context_and_owner(tmp_path):
+    home = tmp_path / "profiles" / "emily"
+    home.mkdir(parents=True)
+    _register(home, lambda args, **kwargs: '{"ok": true}')
     exact_owner = object()
-    _bind_execution_context(exact_context, exact_owner)
+    exact_context = _context(home, owner=exact_owner)
     try:
         absent = model_tools.get_tool_definitions(
             enabled_toolsets=["test-capability"],
             quiet_mode=True,
         )
+        copied_without_owner = model_tools.get_tool_definitions(
+            enabled_toolsets=["test-capability"],
+            quiet_mode=True,
+            execution_context=exact_context,
+        )
+        wrong_owner = model_tools.get_tool_definitions(
+            enabled_toolsets=["test-capability"],
+            quiet_mode=True,
+            execution_context=exact_context,
+            execution_owner=object(),
+        )
         present = model_tools.get_tool_definitions(
             enabled_toolsets=["test-capability"],
             quiet_mode=True,
             execution_context=exact_context,
+            execution_owner=exact_owner,
         )
     finally:
         registry.deregister(TOOL_NAME)
         model_tools._clear_tool_defs_cache()
 
-    assert TOOL_NAME not in {item["function"]["name"] for item in absent}
-    assert TOOL_NAME in {item["function"]["name"] for item in present}
+    names = lambda defs: {item["function"]["name"] for item in defs}
+    assert TOOL_NAME not in names(absent)
+    assert TOOL_NAME not in names(copied_without_owner)
+    assert TOOL_NAME not in names(wrong_owner)
+    assert TOOL_NAME in names(present)
 
 
-def test_real_agent_helper_mints_grant_but_direct_model_dispatch_fails():
+def test_real_agent_helper_mints_grant_but_direct_and_nested_dispatch_fail(tmp_path):
+    home = tmp_path / "profiles" / "emily"
+    home.mkdir(parents=True)
     calls = []
-    registry.register(
-        name=TOOL_NAME,
-        toolset="test-capability",
-        schema={
-            "name": TOOL_NAME,
-            "description": "Protected",
-            "parameters": {"type": "object", "properties": {}},
-        },
-        handler=lambda args, **kwargs: (
+    _register(
+        home,
+        lambda args, **kwargs: (
             calls.append(kwargs["execution_runtime"])
             or json.dumps({"ok": True})
         ),
-        execution_capability=cron_job_capability(JOB_ID),
     )
-    context = _issue_cron_job_execution_context(JOB_ID)
-    agent = _Agent(context)
-    _bind_execution_context(context, agent)
+    agent = _Agent()
+    context = _context(home, owner=agent)
+    agent.execution_context = context
     try:
         direct = json.loads(
             model_tools.handle_function_call(
@@ -91,6 +139,16 @@ def test_real_agent_helper_mints_grant_but_direct_model_dispatch_fails():
                 {},
                 task_id="direct",
                 skip_pre_tool_call_hook=True,
+                skip_tool_request_middleware=True,
+            )
+        )
+        nested = json.loads(
+            invoke_tool(
+                _Agent(context),
+                TOOL_NAME,
+                {},
+                effective_task_id="nested-agent",
+                tool_call_id="call-nested",
                 skip_tool_request_middleware=True,
             )
         )
@@ -108,22 +166,15 @@ def test_real_agent_helper_mints_grant_but_direct_model_dispatch_fails():
         registry.deregister(TOOL_NAME)
 
     assert direct["error_type"] == "execution_capability_unavailable"
+    assert nested["error_type"] == "execution_capability_unavailable"
     assert result == {"ok": True}
     assert len(calls) == 1
 
 
-def test_agent_without_execution_context_cannot_mint_protected_grant():
-    registry.register(
-        name=TOOL_NAME,
-        toolset="test-capability",
-        schema={
-            "name": TOOL_NAME,
-            "description": "Protected",
-            "parameters": {"type": "object", "properties": {}},
-        },
-        handler=lambda args, **kwargs: '{"ok": true}',
-        execution_capability=cron_job_capability(JOB_ID),
-    )
+def test_agent_without_execution_context_cannot_mint_protected_grant(tmp_path):
+    home = tmp_path / "profiles" / "emily"
+    home.mkdir(parents=True)
+    _register(home, lambda args, **kwargs: '{"ok": true}')
     try:
         result = json.loads(
             invoke_tool(
@@ -139,3 +190,27 @@ def test_agent_without_execution_context_cannot_mint_protected_grant():
         registry.deregister(TOOL_NAME)
 
     assert result["error_type"] == "execution_capability_unavailable"
+
+
+def test_mcp_refresh_preserves_exact_execution_context_and_owner(monkeypatch):
+    agent = _Agent(execution_context=object())
+    agent.tools = []
+    agent.valid_tool_names = set()
+    agent._tool_snapshot_generation = 0
+    seen = {}
+
+    def capture(**kwargs):
+        seen.update(kwargs)
+        return []
+
+    monkeypatch.setattr(model_tools, "get_tool_definitions", capture)
+    monkeypatch.setattr(
+        mcp_tool,
+        "_reinject_post_build_tools",
+        lambda agent, defs, names: set(),
+    )
+
+    mcp_tool.refresh_agent_mcp_tools(agent)
+
+    assert seen["execution_context"] is agent.execution_context
+    assert seen["execution_owner"] is agent

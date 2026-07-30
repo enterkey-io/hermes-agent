@@ -305,6 +305,12 @@ from cron.executions import (
 # locally for audit.
 SILENT_MARKER = "[SILENT]"
 OPERATOR_ONLY_SCRIPT_FAILURE = "[operator-only-script-failure] "
+_PROTECTED_HANDLER_TIMEOUT_SECONDS = 10.0
+_PROTECTED_SETTLEMENT_TIMEOUT_SECONDS = 11.0
+
+
+class ProtectedMutationUncertainError(RuntimeError):
+    """A protected external mutation may have completed and needs reconciliation."""
 
 # Canonical silence tokens recognized in cron output.  Cron's contract is
 # intentionally looser than the gateway's exact-whole-response rule: the cron
@@ -731,6 +737,51 @@ def _get_hermes_home() -> Path:
     anchor it at the shared default root — either re-breaks profile isolation.
     """
     return _hermes_home or get_hermes_home()
+
+
+def _profile_identity_for_home(hermes_home: Path) -> str:
+    """Derive the exact scheduler profile identity from its isolated home."""
+    home = hermes_home.expanduser().resolve()
+    if home.parent.name == "profiles":
+        return home.name
+    try:
+        if home == (Path.home() / ".hermes").resolve():
+            return "default"
+    except OSError:
+        pass
+    return "custom"
+
+
+def _issue_registered_cron_dispatch(
+    job: dict,
+    *,
+    profile_name: str,
+    hermes_home: Path,
+    execution_id: str,
+):
+    """Issue only when registry configuration exactly trusts this dispatch."""
+    from agent.execution_capabilities import (
+        _issue_trusted_cron_dispatch,
+        cron_job_capability,
+    )
+    from tools.registry import registry
+
+    requirement = cron_job_capability(
+        profile_name=profile_name,
+        hermes_home=hermes_home,
+        job_id=str(job.get("id") or ""),
+    )
+    allowed_tools = registry.get_execution_capability_tools(requirement)
+    if not allowed_tools:
+        return None
+    return _issue_trusted_cron_dispatch(
+        job=job,
+        profile_name=profile_name,
+        hermes_home=hermes_home,
+        execution_id=execution_id,
+        allowed_tools=allowed_tools,
+        protected_handler_timeout_seconds=_PROTECTED_HANDLER_TIMEOUT_SECONDS,
+    )
 
 
 def _get_lock_paths() -> tuple[Path, Path]:
@@ -3168,8 +3219,11 @@ def _preflight_job_config(job: dict, cfg: dict) -> Optional[str]:
 
 
 def run_job(
-    job: dict, *, defer_agent_teardown: Optional[list] = None,
+    job: dict,
+    *,
+    defer_agent_teardown: Optional[list] = None,
     extra_prompt: Optional[str] = None,
+    _trusted_dispatch=None,
 ) -> tuple[bool, str, str, Optional[str]]:
     """
     Execute a single cron job.
@@ -3506,6 +3560,31 @@ def run_job(
 
     agent = None
     _execution_context = None
+    _execution_settlement = None
+
+    def _settle_execution_capability():
+        nonlocal _execution_settlement
+        if _execution_context is None:
+            return None
+        if _execution_settlement is None:
+            from agent.execution_capabilities import _finalize_execution_context
+
+            _execution_settlement = _finalize_execution_context(
+                _execution_context,
+                timeout_seconds=_PROTECTED_SETTLEMENT_TIMEOUT_SECONDS,
+            )
+        return _execution_settlement
+
+    def _raise_for_uncertain_settlement():
+        settlement = _settle_execution_capability()
+        if settlement is None:
+            return
+        if not settlement.settled or settlement.reconciliation_required:
+            operations = ", ".join(settlement.uncertain_operations) or "in-flight"
+            raise ProtectedMutationUncertainError(
+                "Protected mutation outcome is uncertain; reconciliation required "
+                f"before retry ({operations})."
+            )
 
     # Use ContextVars for per-job session/delivery state so parallel jobs
     # don't clobber each other's targets (os.environ is process-global).
@@ -3659,9 +3738,18 @@ def run_job(
         # at the run_conversation hop carries this into the agent thread.
         _non_dispatcher_token = enter_non_dispatcher_owned_context()
 
-        from agent.execution_capabilities import _issue_cron_job_execution_context
+        if _trusted_dispatch is not None:
+            from agent.execution_capabilities import (
+                _issue_cron_job_execution_context,
+            )
 
-        _execution_context = _issue_cron_job_execution_context(job_id)
+            _execution_context = _issue_cron_job_execution_context(
+                permit=_trusted_dispatch,
+                job=job,
+                execution_id=str(job.get("execution_id") or ""),
+                profile_name=_profile_identity_for_home(_get_hermes_home()),
+                hermes_home=_get_hermes_home(),
+            )
         if _job_workdir:
             os.environ["TERMINAL_CWD"] = _job_workdir
             logger.info("Job '%s': using workdir %s", job_id, _job_workdir)
@@ -4242,11 +4330,14 @@ def run_job(
                 _cur_tool or "none",
             )
             request_hard_interrupt(agent, "Cron job timed out (inactivity)")
+            _raise_for_uncertain_settlement()
             raise TimeoutError(
                 f"Cron job '{job_name}' idle for "
                 f"{int(_secs_ago)}s (limit {int(_cron_inactivity_limit)}s) "
                 f"— last activity: {_last_desc}"
             )
+
+        _raise_for_uncertain_settlement()
 
         # Guard against non-dict returns from run_conversation under error conditions
         if not isinstance(result, dict):
@@ -4370,6 +4461,11 @@ def run_job(
         return True, output, final_response, None
 
     except Exception as e:
+        if _execution_context is not None and _execution_settlement is None:
+            try:
+                _raise_for_uncertain_settlement()
+            except ProtectedMutationUncertainError as settlement_error:
+                e = settlement_error
         error_msg = f"{type(e).__name__}: {str(e)}"
         logger.exception("Job '%s' failed: %s", job_name, error_msg)
         # Best-effort audit write on failure path. _audit_fire_id
@@ -4412,12 +4508,10 @@ def run_job(
     finally:
         if _execution_context is not None:
             try:
-                from agent.execution_capabilities import _revoke_execution_context
-
-                _revoke_execution_context(_execution_context)
+                _settle_execution_capability()
             except Exception:
                 logger.exception(
-                    "Job '%s': failed to revoke execution capability",
+                    "Job '%s': failed to finalize execution capability",
                     job_id,
                 )
         # Restore TERMINAL_CWD to whatever it was before this job ran.  We
@@ -4558,8 +4652,13 @@ def _teardown_cron_agent(agent, job_id: str) -> None:
 
 
 def run_one_job(
-    job: dict, *, adapters=None, loop=None, verbose: bool = False,
+    job: dict,
+    *,
+    adapters=None,
+    loop=None,
+    verbose: bool = False,
     extra_prompt: Optional[str] = None,
+    _trusted_dispatch=None,
 ) -> bool:
     """Run ONE due job end-to-end: execute → save output → deliver → mark.
 
@@ -4627,10 +4726,13 @@ def run_one_job(
         # interpreter-shutdown guard in _deliver_result.
         _deferred_agents: list = []
         try:
-            success, output, final_response, error = run_job(
-                job, defer_agent_teardown=_deferred_agents,
-                extra_prompt=extra_prompt,
-            )
+            _run_kwargs = {
+                "defer_agent_teardown": _deferred_agents,
+                "extra_prompt": extra_prompt,
+            }
+            if _trusted_dispatch is not None:
+                _run_kwargs["_trusted_dispatch"] = _trusted_dispatch
+            success, output, final_response, error = run_job(job, **_run_kwargs)
         except BaseException:
             # run_job's finally still hands back the agent when it raises; tear
             # it down here so a failed run never leaks its async resources
@@ -4993,12 +5095,19 @@ def tick(
                 _max_workers if _max_workers else "unbounded",
             )
 
-        def _process_job(job: dict) -> bool:
+        def _process_job(job: dict, trusted_dispatch=None) -> bool:
             """Run one due job end-to-end. Thin wrapper around the shared
             module-level ``run_one_job`` so ``tick`` and external providers
             (Chronos ``fire_due``) use the identical execute→save→deliver→mark
             body."""
-            return run_one_job(job, adapters=adapters, loop=loop, verbose=verbose)
+            _run_kwargs = {
+                "adapters": adapters,
+                "loop": loop,
+                "verbose": verbose,
+            }
+            if trusted_dispatch is not None:
+                _run_kwargs["_trusted_dispatch"] = trusted_dispatch
+            return run_one_job(job, **_run_kwargs)
 
         # Partition due jobs: those with a per-job workdir mutate
         # os.environ["TERMINAL_CWD"] inside run_job, which is process-global, so
@@ -5038,11 +5147,21 @@ def tick(
             # abandoned records as unknown; it never automatically retries them.
             execution = create_execution(job_id, source="builtin")
             dispatched_job = dict(job, execution_id=execution["id"])
+            trusted_dispatch = _issue_registered_cron_dispatch(
+                dispatched_job,
+                profile_name=_profile_identity_for_home(_get_hermes_home()),
+                hermes_home=_get_hermes_home(),
+                execution_id=execution["id"],
+            )
             _ctx = contextvars.copy_context()
 
-            def _run_and_release(j=dispatched_job, ctx=_ctx):
+            def _run_and_release(
+                j=dispatched_job,
+                ctx=_ctx,
+                permit=trusted_dispatch,
+            ):
                 try:
-                    return ctx.run(_process_job, j)
+                    return ctx.run(_process_job, j, permit)
                 finally:
                     release_running_job(j["id"])
 

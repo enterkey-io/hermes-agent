@@ -302,11 +302,14 @@ def _clear_tool_defs_cache() -> None:
     _tool_defs_cache.clear()
 
 
-def _execution_context_fingerprint(execution_context) -> str:
+def _execution_context_fingerprint(execution_context, execution_owner) -> str:
     try:
         from agent.execution_capabilities import execution_context_fingerprint
 
-        return execution_context_fingerprint(execution_context)
+        return execution_context_fingerprint(
+            execution_context,
+            owner=execution_owner,
+        )
     except Exception:
         return ""
 
@@ -317,6 +320,7 @@ def get_tool_definitions(
     quiet_mode: bool = False,
     skip_tool_search_assembly: bool = False,
     execution_context=None,
+    execution_owner=None,
 ) -> List[Dict[str, Any]]:
     """
     Get tool definitions for model API calls with toolset-based filtering.
@@ -365,7 +369,7 @@ def get_tool_definitions(
                 _is_delegated_child_context(),
                 _is_dispatcher_owned_worker(),
                 profile_scope,
-                _execution_context_fingerprint(execution_context),
+                _execution_context_fingerprint(execution_context, execution_owner),
             )
         cached = _tool_defs_cache.get(cache_key) if cache_key is not None else None
         if cached is not None:
@@ -383,6 +387,7 @@ def get_tool_definitions(
         quiet_mode,
         skip_tool_search_assembly=skip_tool_search_assembly,
         execution_context=execution_context,
+        execution_owner=execution_owner,
     )
     if quiet_mode and cache_key is not None:
         # Cache the freshly-computed list, but hand callers a shallow copy so
@@ -410,6 +415,7 @@ def _compute_tool_definitions(
     quiet_mode: bool = False,
     skip_tool_search_assembly: bool = False,
     execution_context=None,
+    execution_owner=None,
 ) -> List[Dict[str, Any]]:
     """Uncached implementation of :func:`get_tool_definitions`."""
     # Determine which tool names the caller wants
@@ -502,6 +508,7 @@ def _compute_tool_definitions(
         tools_to_include,
         quiet=quiet_mode,
         execution_context=execution_context,
+        execution_owner=execution_owner,
     )
 
     # The set of tool names that actually passed check_fn filtering.
@@ -1163,6 +1170,8 @@ def handle_function_call(
     disabled_toolsets: Optional[List[str]] = None,
     approval_provenance: Any = None,
     _execution_capability_grant=None,
+    _execution_capability_owner=None,
+    _execution_context=None,
 ) -> str:
     """
     Main function call dispatcher that routes calls to the tool registry.
@@ -1468,6 +1477,8 @@ def handle_function_call(
                         session_id=session_id,
                         enabled_tools=sandbox_enabled,
                         _execution_capability_grant=_execution_capability_grant,
+                        _execution_capability_owner=_execution_capability_owner,
+                        _execution_context=_execution_context,
                         **provenance_kwargs,
                     )
             else:
@@ -1485,6 +1496,8 @@ def handle_function_call(
                         session_id=session_id,
                         user_task=user_task,
                         _execution_capability_grant=_execution_capability_grant,
+                        _execution_capability_owner=_execution_capability_owner,
+                        _execution_context=_execution_context,
                         **provenance_kwargs,
                     )
             if skip_tool_execution_middleware:

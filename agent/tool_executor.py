@@ -53,13 +53,10 @@ from tools.budget_config import BudgetConfig, DEFAULT_BUDGET, budget_for_context
 logger = logging.getLogger(__name__)
 
 
-def _execution_capability_kwargs(agent, function_name: str) -> dict[str, Any]:
-    from agent.agent_runtime_helpers import issue_execution_capability_grant
+def _execution_capability_dispatch_kwargs(agent, function_name: str):
+    from agent.agent_runtime_helpers import execution_capability_dispatch_kwargs
 
-    grant = issue_execution_capability_grant(agent, function_name)
-    if grant is None:
-        return {}
-    return {"_execution_capability_grant": grant}
+    return execution_capability_dispatch_kwargs(agent, function_name)
 
 
 def _ensure_file_checkpoint(
@@ -377,6 +374,8 @@ def _tool_search_scoped_names(agent) -> frozenset:
             disabled_toolsets=disabled,
             quiet_mode=True,
             skip_tool_search_assembly=True,
+            execution_context=getattr(agent, "execution_context", None),
+            execution_owner=agent,
         ) or []
         names = _ts.scoped_deferrable_names(scoped_defs)
     except Exception:
@@ -2064,7 +2063,10 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                         enabled_toolsets=getattr(agent, "enabled_toolsets", None),
                         disabled_toolsets=getattr(agent, "disabled_toolsets", None),
                         approval_provenance=approval_provenance_box[0],
-                        **_execution_capability_kwargs(agent, function_name),
+                        **_execution_capability_dispatch_kwargs(
+                            agent,
+                            function_name,
+                        ),
                     )
 
                 (
@@ -2148,7 +2150,10 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                         enabled_toolsets=getattr(agent, "enabled_toolsets", None),
                         disabled_toolsets=getattr(agent, "disabled_toolsets", None),
                         approval_provenance=approval_provenance_box[0],
-                        **_execution_capability_kwargs(agent, function_name),
+                        **_execution_capability_dispatch_kwargs(
+                            agent,
+                            function_name,
+                        ),
                     )
 
                 (
