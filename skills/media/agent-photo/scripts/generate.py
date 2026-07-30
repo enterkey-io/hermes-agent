@@ -7,8 +7,11 @@ Teaches agents how to build detailed, realistic prompts.
 import os
 import sys
 import argparse
+import hashlib
+import json
 import subprocess
 import shutil
+from importlib import metadata as importlib_metadata
 from contextvars import ContextVar
 from pathlib import Path
 from datetime import datetime
@@ -38,7 +41,15 @@ _OP_ITEMS = {
 }
 
 _NO_OP_FALLBACK = ContextVar("agent_photo_no_op_fallback", default=False)
-WRAPPER_CONTRACT = "hermes-agent-photo/no-op-fallback/v1"
+WRAPPER_CONTRACT = "hermes-agent-photo/no-op-fallback/v2"
+WRAPPER_CONTRACT_FILES = (
+    "SKILL.md",
+    "requirements.txt",
+    "references/photo-prompting-rules.md",
+    "scripts/generate.py",
+    "scripts/identity_parser.py",
+    "scripts/prompt_profiles.py",
+)
 
 
 def _get_api_key(provider: str, *, allow_op_fallback: bool | None = None) -> str:
@@ -68,6 +79,25 @@ def _get_api_key(provider: str, *, allow_op_fallback: bool | None = None) -> str
             except (FileNotFoundError, subprocess.TimeoutExpired):
                 continue
     raise RuntimeError(f"No API key for {provider}. Set {env_name} or check 1Password.")
+
+
+def _wrapper_contract_payload() -> dict[str, object]:
+    if Image is None:
+        raise RuntimeError("Pillow is unavailable")
+    skill_root = Path(__file__).resolve().parents[1]
+    return {
+        "contract": WRAPPER_CONTRACT,
+        "dependencies": {
+            "Pillow": importlib_metadata.version("Pillow"),
+            "requests": importlib_metadata.version("requests"),
+        },
+        "files": {
+            relative: hashlib.sha256(
+                (skill_root / relative).read_bytes()
+            ).hexdigest()
+            for relative in WRAPPER_CONTRACT_FILES
+        },
+    }
 
 
 SUPPORTED_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp"})
@@ -643,8 +673,18 @@ def main(argv: list[str] | None = None, providers: dict | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.wrapper_contract:
-        print(WRAPPER_CONTRACT)
-        return 0
+        try:
+            print(
+                json.dumps(
+                    _wrapper_contract_payload(),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+            return 0
+        except Exception as exc:
+            print(f"Wrapper contract probe failed: {exc}", file=sys.stderr)
+            return 1
 
     if not args.preview_prompt and not args.approved:
         print(

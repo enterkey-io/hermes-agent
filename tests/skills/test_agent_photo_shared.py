@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -71,9 +73,22 @@ def test_generator_reports_no_op_fallback_wrapper_contract(
     result = generate.main(["--wrapper-contract", "compatibility-probe"])
 
     assert result == 0
-    assert capsys.readouterr().out.strip() == (
-        "hermes-agent-photo/no-op-fallback/v1"
-    )
+    payload = json.loads(capsys.readouterr().out)
+    expected_files = {
+        "SKILL.md",
+        "requirements.txt",
+        "references/photo-prompting-rules.md",
+        "scripts/generate.py",
+        "scripts/identity_parser.py",
+        "scripts/prompt_profiles.py",
+    }
+    assert payload["contract"] == "hermes-agent-photo/no-op-fallback/v2"
+    assert set(payload["files"]) == expected_files
+    assert set(payload["dependencies"]) == {"Pillow", "requests"}
+    for relative in expected_files:
+        assert payload["files"][relative] == hashlib.sha256(
+            (SKILL_DIR / relative).read_bytes()
+        ).hexdigest()
 
 
 def test_profile_root_prefers_hermes_home(monkeypatch, tmp_path, identity_parser):
