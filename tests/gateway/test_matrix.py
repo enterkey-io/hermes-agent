@@ -1,8 +1,10 @@
 """Tests for Matrix platform adapter (mautrix-python backend)."""
 import asyncio
+import os
 import re
 import stat
 import sys
+import threading
 import time
 import types
 from pathlib import Path
@@ -12,6 +14,43 @@ from unittest.mock import MagicMock, patch, AsyncMock
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import MessageType
+
+
+class _PrivateStateOSProxy:
+    def __init__(self, *, name, secure_capabilities, race_components=()):
+        self.name = name
+        self.O_NOFOLLOW = (
+            getattr(os, "O_NOFOLLOW", 0) if secure_capabilities else 0
+        )
+        self.O_DIRECTORY = (
+            getattr(os, "O_DIRECTORY", 0) if secure_capabilities else 0
+        )
+        self.supports_dir_fd = (
+            {self.open, self.mkdir} if secure_capabilities else set()
+        )
+        self._race_components = set(race_components)
+        self._race_barrier = (
+            threading.Barrier(2) if self._race_components else None
+        )
+        self.used_posix_only_open = False
+
+    def __getattr__(self, name):
+        return getattr(os, name)
+
+    def open(self, path, flags, mode=0o777, *, dir_fd=None):
+        posix_flags = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_DIRECTORY", 0)
+        if dir_fd is not None or flags & posix_flags:
+            self.used_posix_only_open = True
+        if dir_fd is None:
+            return os.open(path, flags, mode)
+        return os.open(path, flags, mode, dir_fd=dir_fd)
+
+    def mkdir(self, path, mode=0o777, *, dir_fd=None):
+        if path in self._race_components:
+            self._race_barrier.wait(timeout=5)
+        if dir_fd is None:
+            return os.mkdir(path, mode)
+        return os.mkdir(path, mode, dir_fd=dir_fd)
 
 
 def _make_fake_mautrix():
@@ -339,6 +378,92 @@ class TestMatrixConfigLoading:
         assert sidecar.is_symlink()
         assert outside.read_bytes() == b"outside sidecar"
         assert stat.S_IMODE(outside.stat().st_mode) == 0o664
+
+    def test_windows_without_posix_traversal_initializes_matrix_store(
+        self, tmp_path
+    ):
+        import plugins.platforms.matrix.adapter as matrix_mod
+
+        store_dir = tmp_path / "matrix" / "store"
+        crypto_db = store_dir / "crypto.db"
+        windows_os = _PrivateStateOSProxy(
+            name="nt",
+            secure_capabilities=False,
+        )
+
+        with patch.object(matrix_mod, "os", windows_os):
+            matrix_mod._normalize_matrix_store_permissions(store_dir, crypto_db)
+            crypto_db.write_bytes(b"sqlite contents")
+            matrix_mod._normalize_matrix_store_permissions(
+                store_dir,
+                crypto_db,
+                require_database=True,
+            )
+
+        assert windows_os.used_posix_only_open is False
+        assert stat.S_IMODE(store_dir.parent.stat().st_mode) == 0o700
+        assert stat.S_IMODE(store_dir.stat().st_mode) == 0o700
+        assert stat.S_IMODE(crypto_db.stat().st_mode) == 0o600
+
+    def test_posix_without_secure_traversal_capabilities_fails_closed(
+        self, tmp_path
+    ):
+        import plugins.platforms.matrix.adapter as matrix_mod
+
+        store_dir = tmp_path / "matrix" / "store"
+        crypto_db = store_dir / "crypto.db"
+        limited_os = _PrivateStateOSProxy(
+            name="posix",
+            secure_capabilities=False,
+        )
+
+        with (
+            patch.object(matrix_mod, "os", limited_os),
+            pytest.raises(matrix_mod._PrivateStatePermissionError),
+        ):
+            matrix_mod._normalize_matrix_store_permissions(store_dir, crypto_db)
+
+        assert not store_dir.parent.exists()
+
+    def test_concurrent_cold_matrix_store_initialization_succeeds(self, tmp_path):
+        import plugins.platforms.matrix.adapter as matrix_mod
+
+        store_dir = tmp_path / "matrix" / "store"
+        crypto_db = store_dir / "crypto.db"
+        racing_os = _PrivateStateOSProxy(
+            name="posix",
+            secure_capabilities=True,
+            race_components={"matrix", "store"},
+        )
+        errors = []
+
+        def initialize():
+            try:
+                matrix_mod._normalize_matrix_store_permissions(
+                    store_dir,
+                    crypto_db,
+                )
+                crypto_db.touch(exist_ok=True)
+                matrix_mod._normalize_matrix_store_permissions(
+                    store_dir,
+                    crypto_db,
+                    require_database=True,
+                )
+            except BaseException as exc:
+                errors.append(exc)
+
+        with patch.object(matrix_mod, "os", racing_os):
+            threads = [threading.Thread(target=initialize) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=10)
+
+        assert not any(thread.is_alive() for thread in threads)
+        assert errors == []
+        assert stat.S_IMODE(store_dir.parent.stat().st_mode) == 0o700
+        assert stat.S_IMODE(store_dir.stat().st_mode) == 0o700
+        assert stat.S_IMODE(crypto_db.stat().st_mode) == 0o600
 
     def test_apply_env_overrides_with_access_token(self, monkeypatch):
         monkeypatch.setenv("MATRIX_ACCESS_TOKEN", "syt_abc123")

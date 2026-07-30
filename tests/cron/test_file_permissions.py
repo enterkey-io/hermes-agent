@@ -3,9 +3,47 @@
 import os
 import stat
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+
+class _PrivateStateOSProxy:
+    def __init__(self, *, name, secure_capabilities, race_components=()):
+        self.name = name
+        self.O_NOFOLLOW = (
+            getattr(os, "O_NOFOLLOW", 0) if secure_capabilities else 0
+        )
+        self.O_DIRECTORY = (
+            getattr(os, "O_DIRECTORY", 0) if secure_capabilities else 0
+        )
+        self.supports_dir_fd = (
+            {self.open, self.mkdir} if secure_capabilities else set()
+        )
+        self._race_components = set(race_components)
+        self._race_barrier = (
+            threading.Barrier(2) if self._race_components else None
+        )
+        self.used_posix_only_open = False
+
+    def __getattr__(self, name):
+        return getattr(os, name)
+
+    def open(self, path, flags, mode=0o777, *, dir_fd=None):
+        posix_flags = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_DIRECTORY", 0)
+        if dir_fd is not None or flags & posix_flags:
+            self.used_posix_only_open = True
+        if dir_fd is None:
+            return os.open(path, flags, mode)
+        return os.open(path, flags, mode, dir_fd=dir_fd)
+
+    def mkdir(self, path, mode=0o777, *, dir_fd=None):
+        if path in self._race_components:
+            self._race_barrier.wait(timeout=5)
+        if dir_fd is None:
+            return os.mkdir(path, mode)
+        return os.mkdir(path, mode, dir_fd=dir_fd)
 
 
 class TestCronFilePermissions(unittest.TestCase):
@@ -402,6 +440,73 @@ class TestCronFilePermissions(unittest.TestCase):
         finally:
             scheduler.fcntl.flock(holder_fd, scheduler.fcntl.LOCK_UN)
             os.close(holder_fd)
+
+    def test_windows_without_posix_traversal_initializes_cron_lock(self):
+        import cron.executions as executions
+
+        cron_dir = Path(self.tmpdir) / "cron"
+        lock_file = cron_dir / ".jobs.lock"
+        windows_os = _PrivateStateOSProxy(
+            name="nt",
+            secure_capabilities=False,
+        )
+
+        with patch.object(executions, "os", windows_os):
+            lock_fd = executions._open_private_cron_lock(lock_file)
+        os.close(lock_fd)
+
+        self.assertFalse(windows_os.used_posix_only_open)
+        self.assertTrue(cron_dir.is_dir())
+        self.assertEqual(stat.S_IMODE(cron_dir.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(lock_file.stat().st_mode), 0o600)
+
+    def test_posix_without_secure_traversal_capabilities_fails_closed(self):
+        import cron.executions as executions
+
+        executions_db = Path(self.tmpdir) / "cron" / "executions.db"
+        limited_os = _PrivateStateOSProxy(
+            name="posix",
+            secure_capabilities=False,
+        )
+
+        with (
+            patch.object(executions, "os", limited_os),
+            self.assertRaises(executions._PrivateStatePermissionError),
+        ):
+            executions._normalize_execution_store_permissions(executions_db)
+
+        self.assertFalse(executions_db.parent.exists())
+
+    def test_concurrent_cold_cron_lock_initialization_succeeds(self):
+        import cron.executions as executions
+
+        cron_dir = Path(self.tmpdir) / "cron"
+        lock_file = cron_dir / ".jobs.lock"
+        racing_os = _PrivateStateOSProxy(
+            name="posix",
+            secure_capabilities=True,
+            race_components={"cron"},
+        )
+        errors = []
+
+        def initialize():
+            try:
+                fd = executions._open_private_cron_lock(lock_file)
+                os.close(fd)
+            except BaseException as exc:
+                errors.append(exc)
+
+        with patch.object(executions, "os", racing_os):
+            threads = [threading.Thread(target=initialize) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=10)
+
+        self.assertFalse(any(thread.is_alive() for thread in threads))
+        self.assertEqual(errors, [])
+        self.assertEqual(stat.S_IMODE(cron_dir.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(lock_file.stat().st_mode), 0o600)
 
 
 class TestConfigFilePermissions(unittest.TestCase):

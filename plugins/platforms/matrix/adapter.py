@@ -619,6 +619,70 @@ class _PrivateStatePermissionError(OSError):
     """A private Matrix state path could not be secured and verified."""
 
 
+def _secure_matrix_traversal_supported() -> bool:
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory_flag = getattr(os, "O_DIRECTORY", 0)
+    supports_dir_fd = getattr(os, "supports_dir_fd", ())
+    return bool(
+        nofollow
+        and directory_flag
+        and os.open in supports_dir_fd
+        and os.mkdir in supports_dir_fd
+    )
+
+
+def _reject_windows_matrix_state_symlinks(path: Path) -> str:
+    """Best-effort Windows symlink guard without POSIX-only open flags."""
+    absolute = os.path.abspath(os.fspath(path))
+    candidates = []
+    current = absolute
+    while True:
+        candidates.append(current)
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    for candidate in reversed(candidates):
+        if os.path.islink(candidate):
+            raise _PrivateStatePermissionError(
+                f"Matrix private state path contains a symlink: {path}"
+            )
+    return absolute
+
+
+def _chmod_windows_matrix_state_path(
+    path: Path,
+    mode: int,
+    *,
+    directory: bool,
+    create_directories: bool = False,
+    missing_ok: bool = False,
+) -> None:
+    """Preserve Matrix store initialization on Windows without dir_fd."""
+    try:
+        absolute = _reject_windows_matrix_state_symlinks(path)
+        if directory and create_directories:
+            os.makedirs(absolute, mode=0o700, exist_ok=True)
+        absolute = _reject_windows_matrix_state_symlinks(path)
+        if not os.path.lexists(absolute):
+            if missing_ok:
+                return
+            raise FileNotFoundError(absolute)
+        path_stat = os.stat(absolute)
+        expected_type = stat.S_ISDIR if directory else stat.S_ISREG
+        if not expected_type(path_stat.st_mode):
+            raise _PrivateStatePermissionError(
+                f"Matrix private state path has unexpected type: {path}"
+            )
+        os.chmod(absolute, mode)
+    except _PrivateStatePermissionError:
+        raise
+    except OSError as exc:
+        raise _PrivateStatePermissionError(
+            f"cannot secure Matrix private state path {path}: {exc}"
+        ) from exc
+
+
 def _open_matrix_state_path(
     path: Path,
     *,
@@ -629,12 +693,7 @@ def _open_matrix_state_path(
     """Open *path* component-by-component without following symlinks."""
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     directory_flag = getattr(os, "O_DIRECTORY", 0)
-    if (
-        not nofollow
-        or not directory_flag
-        or os.open not in os.supports_dir_fd
-        or os.mkdir not in os.supports_dir_fd
-    ):
+    if not _secure_matrix_traversal_supported():
         raise _PrivateStatePermissionError(
             "secure Matrix state traversal is unsupported on this platform"
         )
@@ -660,7 +719,12 @@ def _open_matrix_state_path(
                 next_fd = os.open(component, flags, dir_fd=current_fd)
             except FileNotFoundError:
                 if directory and create_directories:
-                    os.mkdir(component, 0o700, dir_fd=current_fd)
+                    try:
+                        os.mkdir(component, 0o700, dir_fd=current_fd)
+                    except FileExistsError:
+                        # A concurrent safe creator won the race. Reopen below
+                        # with O_NOFOLLOW|O_DIRECTORY; files and symlinks fail.
+                        pass
                     next_fd = os.open(component, flags, dir_fd=current_fd)
                 elif is_target and missing_ok:
                     os.close(current_fd)
@@ -690,6 +754,16 @@ def _chmod_matrix_state_path(
     create_directories: bool = False,
     missing_ok: bool = False,
 ) -> None:
+    if os.name == "nt":
+        _chmod_windows_matrix_state_path(
+            path,
+            mode,
+            directory=directory,
+            create_directories=create_directories,
+            missing_ok=missing_ok,
+        )
+        return
+
     fd = _open_matrix_state_path(
         path,
         directory=directory,
