@@ -731,6 +731,16 @@ def _stage_candidate_venv(
     python: Path,
 ) -> Path | None:
     runtime_root = project_root / _RUNTIME_DIR_NAME
+    source_python = _venv_python(project_root / _VENV_NAME)
+    source_requirements = _freeze_non_editable_requirements(
+        uv_bin,
+        python=source_python,
+        cwd=project_root,
+    )
+    if source_requirements is None:
+        logger.warning("candidate dependency inventory failed")
+        return None
+
     token = f"{int(time.time())}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
     candidate = runtime_root / f"venv-candidate-{token}"
     env = managed_python_env(
@@ -799,12 +809,94 @@ def _stage_candidate_venv(
         _remove_tree(candidate, boundary=runtime_root)
         return None
 
+    restored = subprocess.run(
+        [
+            uv_bin,
+            "pip",
+            "install",
+            "--python",
+            str(_venv_python(candidate)),
+            "--requirements",
+            "-",
+            "--no-python-downloads",
+            "--no-config",
+        ],
+        cwd=project_root,
+        env=env,
+        input=source_requirements,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if restored.returncode != 0:
+        # Requirements can contain private direct references. Never include
+        # subprocess output in logs or errors.
+        logger.warning(
+            "candidate installed-package restore failed (rc=%d)",
+            restored.returncode,
+        )
+        _remove_tree(candidate, boundary=runtime_root)
+        return None
+
+    candidate_requirements = _freeze_non_editable_requirements(
+        uv_bin,
+        python=_venv_python(candidate),
+        cwd=project_root,
+    )
+    if candidate_requirements is None or not _requirements_include(
+        candidate_requirements,
+        source_requirements,
+    ):
+        logger.warning("candidate installed-package verification failed")
+        _remove_tree(candidate, boundary=runtime_root)
+        return None
+
     healthy, detail, _ = _smoke_candidate_venv(candidate)
     if not healthy:
         logger.warning("candidate venv smoke failed: %s", detail)
         _remove_tree(candidate, boundary=runtime_root)
         return None
     return candidate
+
+
+def _freeze_non_editable_requirements(
+    uv_bin: str,
+    *,
+    python: Path,
+    cwd: Path,
+) -> str | None:
+    """Capture an installed-package inventory without exposing its contents."""
+    result = subprocess.run(
+        [
+            uv_bin,
+            "pip",
+            "freeze",
+            "--exclude-editable",
+            "--python",
+            str(python),
+            "--no-python-downloads",
+            "--no-config",
+        ],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
+def _requirements_include(candidate: str, source: str) -> bool:
+    """Return whether every non-comment source requirement was preserved."""
+    def lines(value: str) -> set[str]:
+        return {
+            line.strip()
+            for line in value.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        }
+
+    return lines(source).issubset(lines(candidate))
 
 
 def _rename_with_retry(source: Path, destination: Path) -> None:

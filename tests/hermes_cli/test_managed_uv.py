@@ -599,6 +599,52 @@ class TestRuntimeCutover:
 
 
 
+class TestRuntimeCandidateDependencies:
+    def test_preserves_installed_non_editable_packages(self, tmp_path):
+        import hermes_cli.managed_uv as managed_uv
+
+        root, live, _ = _make_runtime_install(tmp_path)
+        (root / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+        generation = root / ".hermes-runtime" / "python" / "generation-test"
+        python = generation / "bin" / "python"
+        python.parent.mkdir(parents=True)
+        python.write_text("candidate interpreter", encoding="utf-8")
+        requirements = "mautrix==0.21.0\npython-telegram-bot==22.6\n"
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append((cmd, kwargs))
+            if cmd[1:3] == ["pip", "freeze"]:
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=requirements,
+                    stderr="",
+                )
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with patch.object(managed_uv.subprocess, "run", side_effect=fake_run), \
+             patch.object(
+                 managed_uv,
+                 "_smoke_candidate_venv",
+                 return_value=(True, "", _runtime_info(python, (3, 53, 1))),
+             ):
+            candidate = managed_uv._stage_candidate_venv(
+                "uv",
+                project_root=root,
+                generation=generation,
+                python=python,
+            )
+
+        assert candidate is not None
+        freeze_calls = [call for call in calls if call[0][1:3] == ["pip", "freeze"]]
+        assert str(live / "bin" / "python") in freeze_calls[0][0]
+        restore_calls = [call for call in calls if call[0][1:3] == ["pip", "install"]]
+        assert len(restore_calls) == 1
+        assert restore_calls[0][1]["input"] == requirements
+        assert "--python" in restore_calls[0][0]
+        assert str(candidate / "bin" / "python") in restore_calls[0][0]
+
+
 # ---------------------------------------------------------------------------
 # _install_uv internals
 # ---------------------------------------------------------------------------
