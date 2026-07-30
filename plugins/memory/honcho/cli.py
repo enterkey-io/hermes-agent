@@ -160,11 +160,19 @@ def _validate_shared_profile_block(
         raise ValueError(f"shared Honcho host {host!r} has a foreign AI peer")
     if block.get("enabled") is not True:
         raise ValueError(f"shared Honcho host {host!r} is not enabled")
-    if block.get("sessionStrategy") != "per-directory":
-        raise ValueError(f"shared Honcho host {host!r} has a noncanonical session strategy")
+    normalized = dict(block)
+
+    if "sessionStrategy" not in block:
+        normalized["sessionStrategy"] = "per-directory"
+    elif block.get("sessionStrategy") != "per-directory":
+        raise ValueError(
+            f"shared Honcho host {host!r} has a noncanonical session strategy"
+        )
     if block.get("sessionPeerPrefix") is not True:
         raise ValueError(f"shared Honcho host {host!r} does not prefix sessions")
-    if block.get("pinUserPeer") is not False:
+    if "pinUserPeer" not in block:
+        normalized["pinUserPeer"] = False
+    elif block.get("pinUserPeer") is not False:
         raise ValueError(f"shared Honcho host {host!r} pins the user peer")
     if block.get("pinPeerName") not in (None, False):
         raise ValueError(f"shared Honcho host {host!r} has a legacy peer pin")
@@ -173,7 +181,11 @@ def _validate_shared_profile_block(
     if block.get("runtimePeerPrefix") not in (None, ""):
         raise ValueError(f"shared Honcho host {host!r} permits generated peers")
 
-    aliases = block.get("userPeerAliases")
+    if "userPeerAliases" not in block:
+        aliases = {}
+        normalized["userPeerAliases"] = aliases
+    else:
+        aliases = block.get("userPeerAliases")
     if not isinstance(aliases, dict):
         raise ValueError(f"shared Honcho host {host!r} has invalid peer aliases")
     for runtime_id, target in aliases.items():
@@ -182,7 +194,7 @@ def _validate_shared_profile_block(
         if target != peer_name:
             raise ValueError(f"shared Honcho host {host!r} has a foreign peer alias")
 
-    return dict(block)
+    return normalized
 
 
 def _validate_existing_local_config(
@@ -472,21 +484,31 @@ def cmd_sync(args) -> None:
 
     created = 0
     skipped = 0
+    failed = 0
     for p in profiles:
         if p.name == "default":
             continue
-        if clone_honcho_for_profile(p.name):
-            print(f"  + {p.name} -> {profile_host_key(p.name)}")
-            created += 1
-        else:
-            skipped += 1
+        try:
+            if clone_honcho_for_profile(p.name):
+                print(f"  + {p.name} -> {profile_host_key(p.name)}")
+                created += 1
+            else:
+                skipped += 1
+        except Exception as exc:
+            failure_class = type(exc).__name__
+            if failure_class not in {"ValueError", "PermissionError", "OSError"}:
+                failure_class = "Error"
+            print(f"  ! {p.name}: {failure_class}")
+            failed += 1
 
     if created:
         print(f"\n  {created} profile(s) synced.")
-    else:
+    elif not failed:
         print("  All profiles already have Honcho config.")
     if skipped:
         print(f"  {skipped} profile(s) already configured (skipped).")
+    if failed:
+        print(f"  {failed} profile(s) failed validation.")
     print()
 
 
@@ -514,8 +536,11 @@ def sync_honcho_profiles_quiet() -> int:
     for p in profiles:
         if p.name == "default":
             continue
-        if clone_honcho_for_profile(p.name):
-            created += 1
+        try:
+            if clone_honcho_for_profile(p.name):
+                created += 1
+        except Exception:
+            continue
     return created
 
 

@@ -605,14 +605,26 @@ class TestSharedProfileBackfill:
             HonchoProfileContext,
         )
 
+        old_clone_block = {
+            "workspace": "hermes",
+            "peerName": "owner-alpha-private-v1",
+            "aiPeer": "alpha-private-v1",
+            "enabled": True,
+            "sessionPeerPrefix": True,
+            "isolatePeerTools": True,
+        }
         (
             honcho_cli,
             default_root,
             alpha_root,
             shared_path,
-            canonical,
+            _,
             peer_setup,
-        ) = self._setup(monkeypatch, tmp_path)
+        ) = self._setup(
+            monkeypatch,
+            tmp_path,
+            block=old_clone_block,
+        )
         shared_before = shared_path.read_bytes()
         monkeypatch.setattr(
             "hermes_cli.profiles.list_profiles",
@@ -627,7 +639,14 @@ class TestSharedProfileBackfill:
         local_path = alpha_root / "honcho.json"
         local_before = local_path.read_bytes()
         assert json.loads(local_before) == {
-            "hosts": {"hermes_alpha": canonical},
+            "hosts": {
+                "hermes_alpha": {
+                    **old_clone_block,
+                    "sessionStrategy": "per-directory",
+                    "pinUserPeer": False,
+                    "userPeerAliases": {},
+                },
+            },
         }
         assert local_path.stat().st_mode & 0o777 == 0o600
         assert shared_path.read_bytes() == shared_before
@@ -643,7 +662,10 @@ class TestSharedProfileBackfill:
         assert runtime.workspace_id == "hermes"
         assert runtime.peer_name == "owner-alpha-private-v1"
         assert runtime.ai_peer == "alpha-private-v1"
+        assert runtime.session_strategy == "per-directory"
         assert runtime.session_peer_prefix is True
+        assert runtime.pin_peer_name is False
+        assert runtime.user_peer_aliases == {}
         assert runtime.isolate_peer_tools is True
 
         assert honcho_cli.sync_honcho_profiles_quiet() == 0
@@ -657,6 +679,7 @@ class TestSharedProfileBackfill:
             ("workspace", "foreign-workspace"),
             ("peerName", "owner-beta"),
             ("aiPeer", "beta-private-v1"),
+            ("sessionStrategy", "per-session"),
             ("sessionPeerPrefix", False),
             ("pinUserPeer", True),
             ("isolatePeerTools", False),
@@ -693,6 +716,75 @@ class TestSharedProfileBackfill:
             honcho_cli.clone_honcho_for_profile("alpha")
 
         assert not (alpha_root / "honcho.json").exists()
+
+    def test_quiet_sync_contains_validation_failure_without_writes(
+        self, monkeypatch, tmp_path,
+    ):
+        malformed = {
+            "workspace": "hermes",
+            "peerName": "owner-alpha-private-v1",
+            "aiPeer": "alpha-private-v1",
+            "enabled": True,
+            "sessionStrategy": "foreign-strategy",
+            "sessionPeerPrefix": True,
+            "pinUserPeer": False,
+            "isolatePeerTools": True,
+            "userPeerAliases": {},
+        }
+        honcho_cli, _, alpha_root, shared_path, _, peer_setup = self._setup(
+            monkeypatch,
+            tmp_path,
+            block=malformed,
+        )
+        shared_before = shared_path.read_bytes()
+        monkeypatch.setattr(
+            "hermes_cli.profiles.list_profiles",
+            lambda: [
+                SimpleNamespace(name="default"),
+                SimpleNamespace(name="alpha"),
+            ],
+        )
+
+        assert honcho_cli.sync_honcho_profiles_quiet() == 0
+        assert not (alpha_root / "honcho.json").exists()
+        assert shared_path.read_bytes() == shared_before
+        peer_setup.assert_not_called()
+
+    def test_verbose_sync_reports_only_sanitized_failure_class(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        malformed = {
+            "workspace": "hermes",
+            "peerName": "owner-alpha-private-v1",
+            "aiPeer": "alpha-private-v1",
+            "enabled": True,
+            "sessionStrategy": "secret-invalid-value",
+            "sessionPeerPrefix": True,
+            "pinUserPeer": False,
+            "isolatePeerTools": True,
+            "userPeerAliases": {},
+        }
+        honcho_cli, _, alpha_root, shared_path, _, _ = self._setup(
+            monkeypatch,
+            tmp_path,
+            block=malformed,
+        )
+        shared_before = shared_path.read_bytes()
+        monkeypatch.setattr(
+            "hermes_cli.profiles.list_profiles",
+            lambda: [
+                SimpleNamespace(name="default"),
+                SimpleNamespace(name="alpha"),
+            ],
+        )
+
+        honcho_cli.cmd_sync(SimpleNamespace())
+
+        output = capsys.readouterr().out
+        assert "alpha: ValueError" in output
+        assert "secret-invalid-value" not in output
+        assert not (alpha_root / "honcho.json").exists()
+        assert shared_path.read_bytes() == shared_before
 
     def test_rejects_shared_config_symlink(self, monkeypatch, tmp_path):
         honcho_cli, _, alpha_root, shared_path, _, _ = self._setup(
