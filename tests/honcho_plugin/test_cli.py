@@ -3,6 +3,8 @@
 from types import SimpleNamespace
 import json
 
+import pytest
+
 
 class TestResolveApiKey:
     """Test _resolve_api_key with various config shapes."""
@@ -216,6 +218,48 @@ class TestCmdStatus:
         out = capsys.readouterr().out
         assert "Auth:           OAuth (hermes-agent" in out
         assert "API key:" not in out
+
+
+class TestAllProfileHostConfigs:
+    def test_discovers_default_and_named_canonical_hosts(self, monkeypatch):
+        import plugins.memory.honcho.cli as honcho_cli
+
+        default_block = {"peerName": "owner-default"}
+        alpha_block = {"peerName": "owner-alpha", "aiPeer": "ai-alpha"}
+        monkeypatch.setattr(
+            "hermes_cli.profiles.list_profiles",
+            lambda: [
+                SimpleNamespace(name="default"),
+                SimpleNamespace(name="alpha"),
+            ],
+        )
+        monkeypatch.setattr(
+            honcho_cli,
+            "_read_config",
+            lambda: {
+                "hosts": {
+                    "hermes": default_block,
+                    "hermes_alpha": alpha_block,
+                }
+            },
+        )
+
+        assert honcho_cli._all_profile_host_configs() == [
+            ("default", "hermes", default_block),
+            ("alpha", "hermes_alpha", alpha_block),
+        ]
+
+    def test_rejects_unsafe_profile_name(self, monkeypatch):
+        import plugins.memory.honcho.cli as honcho_cli
+
+        monkeypatch.setattr(
+            "hermes_cli.profiles.list_profiles",
+            lambda: [SimpleNamespace(name="../alpha")],
+        )
+        monkeypatch.setattr(honcho_cli, "_read_config", lambda: {"hosts": {}})
+
+        with pytest.raises(ValueError, match="invalid profile name"):
+            honcho_cli._all_profile_host_configs()
 
 
 class TestCloneHonchoForProfile:
