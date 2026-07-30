@@ -75,6 +75,27 @@ class TestProviderEnvBlocklist:
         for var in leaked_vars:
             assert var not in result_env, f"{var} leaked into subprocess env"
 
+    def test_photo_and_static_auth_keys_are_stripped_from_terminal_children(self):
+        leaked_vars = {
+            "GEMINI_API_KEY": "gemini-photo-key",
+            "NOVITA_API_KEY": "novita-photo-key",
+            "XAI_API_KEY": "xai-photo-key",
+            "AUTH_TOKEN": "x-auth-token",
+            "CT0": "x-ct0",
+            "_HERMES_FORCE_GEMINI_API_KEY": "forced-gemini-photo-key",
+            "_HERMES_FORCE_AUTH_TOKEN": "forced-x-auth-token",
+        }
+        result_env = _run_with_env(extra_os_env=leaked_vars)
+
+        for var in (
+            "GEMINI_API_KEY",
+            "NOVITA_API_KEY",
+            "XAI_API_KEY",
+            "AUTH_TOKEN",
+            "CT0",
+        ):
+            assert var not in result_env, f"{var} leaked into terminal child"
+
     def test_registry_derived_vars_are_stripped(self):
         """Vars from the provider registry (ANTHROPIC_TOKEN, ZAI_API_KEY, etc.)
         must also be blocked — not just the hand-written extras."""

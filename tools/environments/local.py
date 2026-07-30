@@ -469,7 +469,7 @@ def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = Non
     for key, value in (base_env or {}).items():
         if key.startswith(_HERMES_PROVIDER_ENV_FORCE_PREFIX):
             continue
-        if _is_hermes_internal_secret(key):
+        if key in _ALWAYS_STRIP_KEYS or _is_hermes_internal_secret(key):
             continue
         passthrough = _is_passthrough(key)
         if key in _HERMES_PROVIDER_ENV_BLOCKLIST and not passthrough:
@@ -481,10 +481,10 @@ def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = Non
     for key, value in (extra_env or {}).items():
         if key.startswith(_HERMES_PROVIDER_ENV_FORCE_PREFIX):
             real_key = key[len(_HERMES_PROVIDER_ENV_FORCE_PREFIX):]
-            if _is_hermes_internal_secret(real_key):
+            if real_key in _ALWAYS_STRIP_KEYS or _is_hermes_internal_secret(real_key):
                 continue
             sanitized[real_key] = value
-        elif _is_hermes_internal_secret(key):
+        elif key in _ALWAYS_STRIP_KEYS or _is_hermes_internal_secret(key):
             continue
         else:
             passthrough = _is_passthrough(key)
@@ -568,6 +568,14 @@ _ALWAYS_STRIP_KEYS: frozenset[str] = frozenset({
     "MODAL_TOKEN_ID",
     "MODAL_TOKEN_SECRET",
     "DAYTONA_API_KEY",
+    # Photo provider credentials and X-reader credentials are never needed by
+    # ordinary terminal/scheduler children, including credential-inheriting
+    # model-driving children.
+    "GEMINI_API_KEY",
+    "NOVITA_API_KEY",
+    "XAI_API_KEY",
+    "AUTH_TOKEN",
+    "CT0",
 })
 
 
@@ -1281,10 +1289,10 @@ def _make_run_env(env: dict) -> dict:
     for k, v in merged.items():
         if k.startswith(_HERMES_PROVIDER_ENV_FORCE_PREFIX):
             real_key = k[len(_HERMES_PROVIDER_ENV_FORCE_PREFIX):]
-            if _is_hermes_internal_secret(real_key):
+            if real_key in _ALWAYS_STRIP_KEYS or _is_hermes_internal_secret(real_key):
                 continue
             run_env[real_key] = v
-        elif _is_hermes_internal_secret(k):
+        elif k in _ALWAYS_STRIP_KEYS or _is_hermes_internal_secret(k):
             continue
         else:
             passthrough = _is_passthrough(k)

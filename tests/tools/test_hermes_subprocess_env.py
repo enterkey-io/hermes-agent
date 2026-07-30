@@ -35,6 +35,14 @@ _PROVIDER_SAMPLE = {
     "OPENROUTER_API_KEY": "or-fake",
 }
 
+_PROTECTED_PHOTO_SAMPLE = {
+    "GEMINI_API_KEY": "gemini-photo-key",
+    "NOVITA_API_KEY": "novita-photo-key",
+    "XAI_API_KEY": "xai-photo-key",
+    "AUTH_TOKEN": "x-auth-token",
+    "CT0": "x-ct0",
+}
+
 _SAFE_SAMPLE = {
     "PATH": "/usr/bin:/bin",
     "HOME": "/home/user",
@@ -88,6 +96,20 @@ class TestInheritCredentials:
 
     def test_pythonutf8_set_when_inheriting(self):
         assert _build(inherit_credentials=True).get("PYTHONUTF8") == "1"
+
+    def test_photo_and_static_auth_keys_are_never_inherited(self):
+        result = _build(_PROTECTED_PHOTO_SAMPLE, inherit_credentials=True)
+        assert not set(_PROTECTED_PHOTO_SAMPLE) & result.keys()
+
+    def test_photo_and_static_auth_force_prefixes_are_never_inherited(self):
+        result = _build(
+            {
+                f"{_HERMES_PROVIDER_ENV_FORCE_PREFIX}{name}": value
+                for name, value in _PROTECTED_PHOTO_SAMPLE.items()
+            },
+            inherit_credentials=True,
+        )
+        assert not set(_PROTECTED_PHOTO_SAMPLE) & result.keys()
 
 
 class TestTierInvariants:
