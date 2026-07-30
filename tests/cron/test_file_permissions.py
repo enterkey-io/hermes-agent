@@ -80,7 +80,7 @@ class TestCronFilePermissions(unittest.TestCase):
 
         self.assertEqual(stat.S_IMODE(executions_db.stat().st_mode), 0o600)
 
-    def test_execution_store_permissions_skip_symlinked_lock(self):
+    def test_execution_store_permissions_reject_symlinked_lock(self):
         import cron.executions as executions
 
         cron_dir = Path(self.tmpdir) / "cron"
@@ -98,13 +98,59 @@ class TestCronFilePermissions(unittest.TestCase):
         outside.chmod(0o664)
         jobs_lock.chmod(0o664)
 
-        executions._normalize_execution_store_permissions(executions_db)
+        with self.assertRaises(OSError):
+            executions._normalize_execution_store_permissions(executions_db)
 
-        self.assertEqual(stat.S_IMODE(cron_dir.stat().st_mode), 0o700)
-        self.assertEqual(stat.S_IMODE(executions_db.stat().st_mode), 0o600)
-        self.assertEqual(stat.S_IMODE(jobs_lock.stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(outside.stat().st_mode), 0o664)
         self.assertTrue(tick_lock.is_symlink())
+
+    def test_execution_store_rejects_ancestor_symlink(self):
+        import cron.executions as executions
+
+        real_home = Path(self.tmpdir) / "real-home"
+        real_cron_dir = real_home / "cron"
+        real_cron_dir.mkdir(parents=True)
+        real_cron_dir.chmod(0o775)
+        executions_db = real_cron_dir / "executions.db"
+        executions_db.write_bytes(b"sqlite contents")
+        executions_db.chmod(0o664)
+        linked_home = Path(self.tmpdir) / "linked-home"
+        linked_home.symlink_to(real_home, target_is_directory=True)
+        linked_db = linked_home / "cron" / "executions.db"
+
+        with (
+            patch.object(executions, "EXECUTIONS_FILE", linked_db),
+            self.assertRaises(OSError),
+        ):
+            connection = executions._connect()
+            connection.close()
+
+        self.assertTrue(linked_home.is_symlink())
+        self.assertEqual(stat.S_IMODE(real_cron_dir.stat().st_mode), 0o775)
+        self.assertEqual(stat.S_IMODE(executions_db.stat().st_mode), 0o664)
+
+    def test_execution_store_fails_closed_when_chmod_fails(self):
+        import cron.executions as executions
+
+        cron_dir = Path(self.tmpdir) / "cron"
+        cron_dir.mkdir()
+        executions_db = cron_dir / "executions.db"
+        executions_db.write_bytes(b"sqlite contents")
+
+        with (
+            patch.object(
+                executions.os,
+                "chmod",
+                side_effect=PermissionError("chmod denied"),
+            ),
+            patch.object(
+                executions.os,
+                "fchmod",
+                side_effect=PermissionError("fchmod denied"),
+            ),
+            self.assertRaises(OSError),
+        ):
+            executions._normalize_execution_store_permissions(executions_db)
 
     @patch("cron.jobs.CRON_DIR")
     @patch("cron.jobs.OUTPUT_DIR")

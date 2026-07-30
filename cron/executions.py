@@ -25,38 +25,148 @@ _lock = threading.RLock()
 _PROCESS_ID = uuid.uuid4().hex
 
 
-def _normalize_execution_store_permissions(executions_file: Path) -> None:
-    """Repair cron private-state modes without following symlinks."""
-    cron_dir = executions_file.parent
-    try:
-        cron_stat = os.lstat(cron_dir)
-    except OSError:
-        return
-    if stat.S_ISLNK(cron_stat.st_mode):
-        return
+class _PrivateStatePermissionError(OSError):
+    """A private cron state path could not be secured and verified."""
 
-    paths = [
-        (cron_dir, 0o700),
-        (executions_file, 0o600),
-        (executions_file.with_name(executions_file.name + "-wal"), 0o600),
-        (executions_file.with_name(executions_file.name + "-shm"), 0o600),
-        (cron_dir / ".tick.lock", 0o600),
-        (cron_dir / ".jobs.lock", 0o600),
-    ]
-    for path, mode in paths:
-        try:
-            path_stat = os.lstat(path)
-            if stat.S_ISLNK(path_stat.st_mode):
-                continue
-            if not (stat.S_ISDIR(path_stat.st_mode) or stat.S_ISREG(path_stat.st_mode)):
-                continue
-            os.chmod(path, mode, follow_symlinks=False)
-        except (OSError, NotImplementedError):
-            continue
+
+def _open_execution_state_path(
+    path: Path,
+    *,
+    directory: bool,
+    create_directories: bool = False,
+    missing_ok: bool = False,
+) -> int | None:
+    """Open *path* component-by-component without following symlinks."""
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory_flag = getattr(os, "O_DIRECTORY", 0)
+    if (
+        not nofollow
+        or not directory_flag
+        or os.open not in os.supports_dir_fd
+        or os.mkdir not in os.supports_dir_fd
+    ):
+        raise _PrivateStatePermissionError(
+            "secure cron state traversal is unsupported on this platform"
+        )
+
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    parts = absolute.parts
+    if not absolute.is_absolute() or len(parts) < 2:
+        raise _PrivateStatePermissionError(
+            f"invalid cron private state path: {path}"
+        )
+
+    close_on_exec = getattr(os, "O_CLOEXEC", 0)
+    directory_flags = os.O_RDONLY | directory_flag | nofollow | close_on_exec
+    file_flags = os.O_RDONLY | nofollow | close_on_exec
+    current_fd: int | None = None
+    try:
+        current_fd = os.open(absolute.anchor, directory_flags)
+        components = parts[1:]
+        for index, component in enumerate(components):
+            is_target = index == len(components) - 1
+            flags = directory_flags if not is_target or directory else file_flags
+            try:
+                next_fd = os.open(component, flags, dir_fd=current_fd)
+            except FileNotFoundError:
+                if directory and create_directories:
+                    os.mkdir(component, 0o700, dir_fd=current_fd)
+                    next_fd = os.open(component, flags, dir_fd=current_fd)
+                elif is_target and missing_ok:
+                    os.close(current_fd)
+                    current_fd = None
+                    return None
+                else:
+                    raise
+            os.close(current_fd)
+            current_fd = next_fd
+        result_fd = current_fd
+        current_fd = None
+        return result_fd
+    except OSError as exc:
+        raise _PrivateStatePermissionError(
+            f"cannot safely open cron private state path {path}: {exc}"
+        ) from exc
+    finally:
+        if current_fd is not None:
+            os.close(current_fd)
+
+
+def _chmod_execution_state_path(
+    path: Path,
+    mode: int,
+    *,
+    directory: bool,
+    create_directories: bool = False,
+    missing_ok: bool = False,
+) -> None:
+    fd = _open_execution_state_path(
+        path,
+        directory=directory,
+        create_directories=create_directories,
+        missing_ok=missing_ok,
+    )
+    if fd is None:
+        return
+    try:
+        path_stat = os.fstat(fd)
+        expected_type = stat.S_ISDIR if directory else stat.S_ISREG
+        if not expected_type(path_stat.st_mode):
+            raise _PrivateStatePermissionError(
+                f"cron private state path has unexpected type: {path}"
+            )
+        os.fchmod(fd, mode)
+        verified_mode = stat.S_IMODE(os.fstat(fd).st_mode)
+        if verified_mode != mode:
+            raise _PrivateStatePermissionError(
+                f"cron private state path {path} has mode "
+                f"{verified_mode:#o}, expected {mode:#o}"
+            )
+    except _PrivateStatePermissionError:
+        raise
+    except OSError as exc:
+        raise _PrivateStatePermissionError(
+            f"cannot secure cron private state path {path}: {exc}"
+        ) from exc
+    finally:
+        os.close(fd)
+
+
+def _normalize_execution_store_permissions(
+    executions_file: Path,
+    *,
+    require_database: bool = False,
+) -> None:
+    """Secure cron-owned state paths or raise without following symlinks."""
+    absolute_db = Path(os.path.abspath(os.fspath(executions_file)))
+    cron_dir = absolute_db.parent
+    _chmod_execution_state_path(
+        cron_dir,
+        0o700,
+        directory=True,
+        create_directories=True,
+    )
+    _chmod_execution_state_path(
+        absolute_db,
+        0o600,
+        directory=False,
+        missing_ok=not require_database,
+    )
+    for name in (
+        absolute_db.name + "-wal",
+        absolute_db.name + "-shm",
+        ".tick.lock",
+        ".jobs.lock",
+    ):
+        _chmod_execution_state_path(
+            cron_dir / name,
+            0o600,
+            directory=False,
+            missing_ok=True,
+        )
 
 
 def _connect() -> sqlite3.Connection:
-    EXECUTIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
     _normalize_execution_store_permissions(EXECUTIONS_FILE)
     return sqlite3.connect(EXECUTIONS_FILE, timeout=5)
 
@@ -92,7 +202,10 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_executions_status_claimed "
         "ON executions(status, claimed_at DESC, id DESC)"
     )
-    _normalize_execution_store_permissions(EXECUTIONS_FILE)
+    _normalize_execution_store_permissions(
+        EXECUTIONS_FILE,
+        require_database=True,
+    )
 
 
 @contextmanager

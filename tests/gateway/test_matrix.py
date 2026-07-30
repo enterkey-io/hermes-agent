@@ -5,6 +5,8 @@ import stat
 import sys
 import time
 import types
+from pathlib import Path
+
 import pytest
 from unittest.mock import MagicMock, patch, AsyncMock
 
@@ -225,7 +227,13 @@ def _make_fake_mautrix():
         @classmethod
         def create(cls, url, upgrade_table=None):
             db = MagicMock()
-            db.start = AsyncMock()
+            db_path = Path(url.removeprefix("sqlite:///"))
+
+            async def start():
+                db_path.parent.mkdir(parents=True, exist_ok=True)
+                db_path.touch(exist_ok=True)
+
+            db.start = AsyncMock(side_effect=start)
             db.stop = AsyncMock()
             return db
 
@@ -291,7 +299,7 @@ class TestMatrixConfigLoading:
         assert stat.S_IMODE(outside.stat().st_mode) == 0o664
         assert linked_sidecar.is_symlink()
 
-    def test_matrix_store_permissions_skip_symlinked_database(self, tmp_path):
+    def test_matrix_store_permissions_reject_symlinked_database(self, tmp_path):
         from plugins.platforms.matrix.adapter import _normalize_matrix_store_permissions
 
         store_dir = tmp_path / "matrix" / "store"
@@ -303,10 +311,10 @@ class TestMatrixConfigLoading:
         store_dir.chmod(0o775)
         outside.chmod(0o664)
 
-        _normalize_matrix_store_permissions(store_dir, crypto_db)
+        with pytest.raises(OSError):
+            _normalize_matrix_store_permissions(store_dir, crypto_db)
 
-        assert stat.S_IMODE(store_dir.stat().st_mode) == 0o700
-        assert outside.stat().st_mode & 0o777 == 0o664
+        assert stat.S_IMODE(outside.stat().st_mode) == 0o664
         assert crypto_db.is_symlink()
 
     def test_apply_env_overrides_with_access_token(self, monkeypatch):
@@ -388,6 +396,33 @@ def _make_adapter():
     )
     adapter = MatrixAdapter(config)
     return adapter
+
+
+def _make_connect_ready_matrix_client():
+    client = MagicMock()
+    client.mxid = "@bot:example.org"
+    client.device_id = None
+    client.crypto = None
+    client.whoami = AsyncMock(
+        return_value=MagicMock(
+            user_id="@bot:example.org",
+            device_id="DEV123",
+        )
+    )
+    client.sync_store = MagicMock()
+    client.sync_store.put_next_batch = AsyncMock()
+    client.sync = AsyncMock(
+        return_value={
+            "rooms": {"join": {}},
+            "next_batch": "s1",
+        }
+    )
+    client.add_dispatcher = MagicMock()
+    client.add_event_handler = MagicMock()
+    client.api = MagicMock()
+    client.api.session = MagicMock()
+    client.api.session.close = AsyncMock()
+    return client
 
 
 def _pending_invite_data(
@@ -1006,6 +1041,152 @@ class TestMatrixRequirements:
 # ---------------------------------------------------------------------------
 
 class TestMatrixAccessTokenAuth:
+    @pytest.mark.asyncio
+    async def test_connect_repairs_owned_matrix_directories_and_store_files(
+        self,
+        tmp_path,
+    ):
+        import plugins.platforms.matrix.adapter as matrix_mod
+
+        matrix_dir = tmp_path / "platforms" / "matrix"
+        store_dir = matrix_dir / "store"
+        store_dir.mkdir(parents=True)
+        crypto_db = store_dir / "crypto.db"
+        crypto_db.write_bytes(b"sqlite contents")
+        wal = store_dir / "crypto.db-wal"
+        wal.write_bytes(b"wal contents")
+        shm = store_dir / "crypto.db-shm"
+        shm.write_bytes(b"shm contents")
+        unrelated = store_dir / "unrelated.txt"
+        unrelated.write_bytes(b"unrelated")
+        matrix_dir.chmod(0o775)
+        store_dir.chmod(0o775)
+        for path in (crypto_db, wal, shm, unrelated):
+            path.chmod(0o664)
+
+        adapter = _make_adapter()
+        fake_mautrix_mods = _make_fake_mautrix()
+        mock_client = _make_connect_ready_matrix_client()
+        fake_mautrix_mods["mautrix.client"].Client = MagicMock(
+            return_value=mock_client
+        )
+
+        with (
+            patch.object(matrix_mod, "_STORE_DIR", store_dir),
+            patch.object(matrix_mod, "_CRYPTO_DB_PATH", crypto_db),
+            patch.object(
+                matrix_mod,
+                "_create_matrix_session",
+                return_value=MagicMock(),
+            ),
+            patch.dict("sys.modules", fake_mautrix_mods),
+            patch.object(adapter, "_refresh_dm_cache", AsyncMock()),
+            patch.object(adapter, "_dispatch_sync", AsyncMock()),
+            patch.object(adapter, "_sync_loop", AsyncMock(return_value=None)),
+        ):
+            assert await adapter.connect() is True
+
+        await adapter.disconnect()
+        assert stat.S_IMODE(matrix_dir.stat().st_mode) == 0o700
+        assert stat.S_IMODE(store_dir.stat().st_mode) == 0o700
+        assert stat.S_IMODE(crypto_db.stat().st_mode) == 0o600
+        assert stat.S_IMODE(wal.stat().st_mode) == 0o600
+        assert stat.S_IMODE(shm.stat().st_mode) == 0o600
+        assert stat.S_IMODE(unrelated.stat().st_mode) == 0o664
+        assert crypto_db.read_bytes() == b"sqlite contents"
+        assert wal.read_bytes() == b"wal contents"
+        assert shm.read_bytes() == b"shm contents"
+
+    @pytest.mark.asyncio
+    async def test_connect_fails_closed_on_exact_wal_symlink(self, tmp_path):
+        import plugins.platforms.matrix.adapter as matrix_mod
+
+        matrix_dir = tmp_path / "platforms" / "matrix"
+        store_dir = matrix_dir / "store"
+        store_dir.mkdir(parents=True)
+        crypto_db = store_dir / "crypto.db"
+        crypto_db.write_bytes(b"sqlite contents")
+        outside = tmp_path / "outside-wal"
+        outside.write_bytes(b"outside")
+        outside.chmod(0o664)
+        wal = store_dir / "crypto.db-wal"
+        wal.symlink_to(outside)
+
+        adapter = _make_adapter()
+        fake_mautrix_mods = _make_fake_mautrix()
+        mock_client = _make_connect_ready_matrix_client()
+        fake_mautrix_mods["mautrix.client"].Client = MagicMock(
+            return_value=mock_client
+        )
+
+        with (
+            patch.object(matrix_mod, "_STORE_DIR", store_dir),
+            patch.object(matrix_mod, "_CRYPTO_DB_PATH", crypto_db),
+            patch.object(
+                matrix_mod,
+                "_create_matrix_session",
+                return_value=MagicMock(),
+            ),
+            patch.dict("sys.modules", fake_mautrix_mods),
+            patch.object(adapter, "_refresh_dm_cache", AsyncMock()),
+            patch.object(adapter, "_dispatch_sync", AsyncMock()),
+            patch.object(adapter, "_sync_loop", AsyncMock(return_value=None)),
+        ):
+            result = await adapter.connect()
+
+        if result:
+            await adapter.disconnect()
+        assert result is False
+        assert wal.is_symlink()
+        assert stat.S_IMODE(outside.stat().st_mode) == 0o664
+        assert outside.read_bytes() == b"outside"
+
+    @pytest.mark.asyncio
+    async def test_connect_fails_closed_on_matrix_ancestor_symlink(self, tmp_path):
+        import plugins.platforms.matrix.adapter as matrix_mod
+
+        real_matrix_dir = tmp_path / "real" / "matrix"
+        real_store_dir = real_matrix_dir / "store"
+        real_store_dir.mkdir(parents=True)
+        real_matrix_dir.chmod(0o775)
+        real_store_dir.chmod(0o775)
+        linked_matrix_dir = tmp_path / "linked-matrix"
+        linked_matrix_dir.symlink_to(real_matrix_dir, target_is_directory=True)
+        store_dir = linked_matrix_dir / "store"
+        crypto_db = store_dir / "crypto.db"
+        crypto_db.write_bytes(b"sqlite contents")
+        crypto_db.chmod(0o664)
+
+        adapter = _make_adapter()
+        fake_mautrix_mods = _make_fake_mautrix()
+        mock_client = _make_connect_ready_matrix_client()
+        fake_mautrix_mods["mautrix.client"].Client = MagicMock(
+            return_value=mock_client
+        )
+
+        with (
+            patch.object(matrix_mod, "_STORE_DIR", store_dir),
+            patch.object(matrix_mod, "_CRYPTO_DB_PATH", crypto_db),
+            patch.object(
+                matrix_mod,
+                "_create_matrix_session",
+                return_value=MagicMock(),
+            ),
+            patch.dict("sys.modules", fake_mautrix_mods),
+            patch.object(adapter, "_refresh_dm_cache", AsyncMock()),
+            patch.object(adapter, "_dispatch_sync", AsyncMock()),
+            patch.object(adapter, "_sync_loop", AsyncMock(return_value=None)),
+        ):
+            result = await adapter.connect()
+
+        if result:
+            await adapter.disconnect()
+        assert result is False
+        assert linked_matrix_dir.is_symlink()
+        assert stat.S_IMODE(real_matrix_dir.stat().st_mode) == 0o775
+        assert stat.S_IMODE(real_store_dir.stat().st_mode) == 0o775
+        assert stat.S_IMODE(crypto_db.stat().st_mode) == 0o664
+
     @pytest.mark.asyncio
     async def test_connect_with_access_token_and_encryption(self):
         """connect() should call whoami, set user_id/device_id, set up crypto."""

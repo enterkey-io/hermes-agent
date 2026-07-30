@@ -615,31 +615,152 @@ _STORE_DIR = _get_hermes_dir("platforms/matrix/store", "matrix/store")
 _CRYPTO_DB_PATH = _STORE_DIR / "crypto.db"
 
 
-def _normalize_matrix_store_permissions(store_dir: Path, crypto_db: Path) -> None:
-    """Repair modes on Matrix's private store without following symlinks."""
-    try:
-        store_stat = os.lstat(store_dir)
-    except OSError:
-        return
-    if stat.S_ISLNK(store_stat.st_mode):
-        return
+class _PrivateStatePermissionError(OSError):
+    """A private Matrix state path could not be secured and verified."""
 
-    paths = [
-        (store_dir, 0o700),
-        (crypto_db, 0o600),
-        (crypto_db.with_name(crypto_db.name + "-wal"), 0o600),
-        (crypto_db.with_name(crypto_db.name + "-shm"), 0o600),
-    ]
-    for path, mode in paths:
-        try:
-            path_stat = os.lstat(path)
-            if stat.S_ISLNK(path_stat.st_mode):
-                continue
-            if not (stat.S_ISDIR(path_stat.st_mode) or stat.S_ISREG(path_stat.st_mode)):
-                continue
-            os.chmod(path, mode, follow_symlinks=False)
-        except (OSError, NotImplementedError):
-            continue
+
+def _open_matrix_state_path(
+    path: Path,
+    *,
+    directory: bool,
+    create_directories: bool = False,
+    missing_ok: bool = False,
+) -> int | None:
+    """Open *path* component-by-component without following symlinks."""
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory_flag = getattr(os, "O_DIRECTORY", 0)
+    if (
+        not nofollow
+        or not directory_flag
+        or os.open not in os.supports_dir_fd
+        or os.mkdir not in os.supports_dir_fd
+    ):
+        raise _PrivateStatePermissionError(
+            "secure Matrix state traversal is unsupported on this platform"
+        )
+
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    parts = absolute.parts
+    if not absolute.is_absolute() or len(parts) < 2:
+        raise _PrivateStatePermissionError(
+            f"invalid Matrix private state path: {path}"
+        )
+
+    close_on_exec = getattr(os, "O_CLOEXEC", 0)
+    directory_flags = os.O_RDONLY | directory_flag | nofollow | close_on_exec
+    file_flags = os.O_RDONLY | nofollow | close_on_exec
+    current_fd: int | None = None
+    try:
+        current_fd = os.open(absolute.anchor, directory_flags)
+        components = parts[1:]
+        for index, component in enumerate(components):
+            is_target = index == len(components) - 1
+            flags = directory_flags if not is_target or directory else file_flags
+            try:
+                next_fd = os.open(component, flags, dir_fd=current_fd)
+            except FileNotFoundError:
+                if directory and create_directories:
+                    os.mkdir(component, 0o700, dir_fd=current_fd)
+                    next_fd = os.open(component, flags, dir_fd=current_fd)
+                elif is_target and missing_ok:
+                    os.close(current_fd)
+                    current_fd = None
+                    return None
+                else:
+                    raise
+            os.close(current_fd)
+            current_fd = next_fd
+        result_fd = current_fd
+        current_fd = None
+        return result_fd
+    except OSError as exc:
+        raise _PrivateStatePermissionError(
+            f"cannot safely open Matrix private state path {path}: {exc}"
+        ) from exc
+    finally:
+        if current_fd is not None:
+            os.close(current_fd)
+
+
+def _chmod_matrix_state_path(
+    path: Path,
+    mode: int,
+    *,
+    directory: bool,
+    create_directories: bool = False,
+    missing_ok: bool = False,
+) -> None:
+    fd = _open_matrix_state_path(
+        path,
+        directory=directory,
+        create_directories=create_directories,
+        missing_ok=missing_ok,
+    )
+    if fd is None:
+        return
+    try:
+        path_stat = os.fstat(fd)
+        expected_type = stat.S_ISDIR if directory else stat.S_ISREG
+        if not expected_type(path_stat.st_mode):
+            raise _PrivateStatePermissionError(
+                f"Matrix private state path has unexpected type: {path}"
+            )
+        os.fchmod(fd, mode)
+        verified_mode = stat.S_IMODE(os.fstat(fd).st_mode)
+        if verified_mode != mode:
+            raise _PrivateStatePermissionError(
+                f"Matrix private state path {path} has mode "
+                f"{verified_mode:#o}, expected {mode:#o}"
+            )
+    except _PrivateStatePermissionError:
+        raise
+    except OSError as exc:
+        raise _PrivateStatePermissionError(
+            f"cannot secure Matrix private state path {path}: {exc}"
+        ) from exc
+    finally:
+        os.close(fd)
+
+
+def _normalize_matrix_store_permissions(
+    store_dir: Path,
+    crypto_db: Path,
+    *,
+    require_database: bool = False,
+) -> None:
+    """Secure Matrix-owned state paths or raise without following symlinks."""
+    absolute_store = Path(os.path.abspath(os.fspath(store_dir)))
+    absolute_db = Path(os.path.abspath(os.fspath(crypto_db)))
+    if absolute_db.parent != absolute_store:
+        raise _PrivateStatePermissionError(
+            f"Matrix crypto database is outside its store directory: {crypto_db}"
+        )
+
+    _chmod_matrix_state_path(
+        absolute_store.parent,
+        0o700,
+        directory=True,
+        create_directories=True,
+    )
+    _chmod_matrix_state_path(
+        absolute_store,
+        0o700,
+        directory=True,
+        create_directories=True,
+    )
+    _chmod_matrix_state_path(
+        absolute_db,
+        0o600,
+        directory=False,
+        missing_ok=not require_database,
+    )
+    for suffix in ("-wal", "-shm"):
+        _chmod_matrix_state_path(
+            absolute_db.with_name(absolute_db.name + suffix),
+            0o600,
+            directory=False,
+            missing_ok=True,
+        )
 
 # Grace period: ignore messages older than this many seconds before startup.
 _STARTUP_GRACE_SECONDS = 5
@@ -1857,9 +1978,12 @@ class MatrixAdapter(BasePlatformAdapter):
             logger.error("Matrix: homeserver URL not configured")
             return False
 
-        # Ensure store dir exists for E2EE key persistence.
-        _STORE_DIR.mkdir(parents=True, exist_ok=True)
-        _normalize_matrix_store_permissions(_STORE_DIR, _CRYPTO_DB_PATH)
+        # Ensure and secure the profile-local store before any Matrix I/O.
+        try:
+            _normalize_matrix_store_permissions(_STORE_DIR, _CRYPTO_DB_PATH)
+        except _PrivateStatePermissionError as exc:
+            logger.error("Matrix: refusing insecure private state path: %s", exc)
+            return False
 
         # Create the HTTP API layer.
         client_session = _create_matrix_session(self._proxy_url)
@@ -2015,8 +2139,6 @@ class MatrixAdapter(BasePlatformAdapter):
                     from mautrix.crypto import OlmMachine
                     from mautrix.crypto.store.asyncpg import PgCryptoStore
                     from mautrix.util.async_db import Database
-
-                    _STORE_DIR.mkdir(parents=True, exist_ok=True)
                 except Exception as exc:
                     if self._e2ee_mode == "optional":
                         logger.warning(
@@ -2065,7 +2187,11 @@ class MatrixAdapter(BasePlatformAdapter):
                         db=crypto_db,
                     )
                     await crypto_store.open()
-                    _normalize_matrix_store_permissions(_STORE_DIR, _CRYPTO_DB_PATH)
+                    _normalize_matrix_store_permissions(
+                        _STORE_DIR,
+                        _CRYPTO_DB_PATH,
+                        require_database=True,
+                    )
 
                     if client.device_id:
                         _store_was_reset = await self._reset_crypto_store_if_device_changed(
@@ -2183,6 +2309,15 @@ class MatrixAdapter(BasePlatformAdapter):
                         str(_CRYPTO_DB_PATH),
                         f", device_id={client.device_id}" if client.device_id else "",
                     )
+                except _PrivateStatePermissionError as exc:
+                    logger.error("Matrix: refusing insecure private state path: %s", exc)
+                    if self._crypto_db:
+                        try:
+                            await self._crypto_db.stop()
+                        except Exception:
+                            pass
+                    await api.session.close()
+                    return False
                 except Exception as exc:
                     if self._e2ee_mode == "optional":
                         logger.warning(
