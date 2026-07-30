@@ -371,6 +371,9 @@ class PluginContext:
     def __init__(self, manifest: PluginManifest, manager: "PluginManager"):
         self.manifest = manifest
         self._manager = manager
+        source = (manifest.source or "unknown").strip()
+        plugin_id = (manifest.key or manifest.name).strip()
+        self._registration_owner = f"{source}:{plugin_id}"
         # Lazy-built host-owned LLM facade — see ctx.llm property below.
         self._llm: Any = None
         self._subagent_lifecycle: Any = None
@@ -436,15 +439,24 @@ class PluginContext:
 
     # -- tool registration --------------------------------------------------
 
-    @staticmethod
-    def cron_job_capability(*, profile_name: str, hermes_home, job_id: str):
-        """Require a tool to run only for one exact profile and cron job."""
+    @property
+    def registration_owner(self) -> str:
+        """Stable identity binding this plugin's protected registrations.
+
+        The contract is ``<manifest source>:<manifest key>``. User plugins
+        should keep their directory/manifest key stable across upgrades.
+        """
+        return self._registration_owner
+
+    def cron_job_capability(self, *, profile_name: str, hermes_home, job_id: str):
+        """Require a tool to run only for this plugin, profile, and cron job."""
         from agent.execution_capabilities import cron_job_capability
 
         return cron_job_capability(
             profile_name=profile_name,
             hermes_home=hermes_home,
             job_id=job_id,
+            registration_owner=self.registration_owner,
         )
 
     def register_tool(
@@ -498,6 +510,7 @@ class PluginContext:
             description=description,
             emoji=emoji,
             execution_capability=execution_capability,
+            registration_owner=self.registration_owner,
             override=override,
         )
         self._manager._plugin_tool_names.add(name)

@@ -205,13 +205,13 @@ class ToolEntry:
         "name", "toolset", "schema", "handler", "check_fn",
         "requires_env", "is_async", "description", "emoji",
         "max_result_size_chars", "dynamic_schema_overrides",
-        "execution_capability",
+        "execution_capability", "registration_owner",
     )
 
     def __init__(self, name, toolset, schema, handler, check_fn,
                  requires_env, is_async, description, emoji,
                  max_result_size_chars=None, dynamic_schema_overrides=None,
-                 execution_capability=None):
+                 execution_capability=None, registration_owner=None):
         self.name = name
         self.toolset = toolset
         self.schema = schema
@@ -231,6 +231,7 @@ class ToolEntry:
         # of the base schema before the {"type": "function", ...} wrap.
         self.dynamic_schema_overrides = dynamic_schema_overrides
         self.execution_capability = execution_capability
+        self.registration_owner = registration_owner
 
 
 # ---------------------------------------------------------------------------
@@ -593,6 +594,7 @@ class ToolRegistry:
         dynamic_schema_overrides: Callable = None,
         override: bool = False,
         execution_capability=None,
+        registration_owner: str | None = None,
     ):
         """Register a tool.  Called at module-import time by each tool file.
 
@@ -603,6 +605,48 @@ class ToolRegistry:
         toolset are rejected to prevent accidental overwrites.
         """
         with self._lock:
+            if execution_capability is not None:
+                from agent.execution_capabilities import (
+                    CronJobCapabilityRequirement,
+                )
+
+                if not isinstance(
+                    execution_capability,
+                    CronJobCapabilityRequirement,
+                ):
+                    raise TypeError("invalid execution capability requirement")
+                declared_owner = execution_capability.registration_owner
+                registration_owner = registration_owner or declared_owner
+                if registration_owner != declared_owner:
+                    raise PermissionError(
+                        "execution capability owner does not match registration owner"
+                    )
+                scope = (
+                    execution_capability.profile_name,
+                    execution_capability.hermes_home,
+                    execution_capability.job_id,
+                )
+                for entry in self._tools.values():
+                    requirement = entry.execution_capability
+                    if not isinstance(
+                        requirement,
+                        CronJobCapabilityRequirement,
+                    ):
+                        continue
+                    existing_scope = (
+                        requirement.profile_name,
+                        requirement.hermes_home,
+                        requirement.job_id,
+                    )
+                    if (
+                        existing_scope == scope
+                        and requirement.registration_owner != declared_owner
+                    ):
+                        raise PermissionError(
+                            "cron capability scope is already owned by "
+                            f"{requirement.registration_owner!r}"
+                        )
+
             existing = self._tools.get(name)
             if existing and existing.toolset != toolset:
                 if override:
@@ -653,6 +697,7 @@ class ToolRegistry:
                 max_result_size_chars=max_result_size_chars,
                 dynamic_schema_overrides=dynamic_schema_overrides,
                 execution_capability=execution_capability,
+                registration_owner=registration_owner,
             )
             # Availability is now derived per-tool (_toolset_has_exposable_tools),
             # so this map no longer gates a toolset. It is still consumed by

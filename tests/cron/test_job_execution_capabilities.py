@@ -7,6 +7,7 @@ import concurrent.futures
 import json
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -84,6 +85,8 @@ def test_scheduler_issues_only_for_exact_registered_profile_home_job_and_executi
 
 
 def test_trusted_scheduler_tick_attaches_registered_dispatch(protected_tool):
+    from cron.scheduler_provider import InProcessCronScheduler
+
     home = protected_tool
     job = {
         "id": JOB_ID,
@@ -112,7 +115,11 @@ def test_trusted_scheduler_tick_attaches_registered_dispatch(protected_tool):
         patch("cron.scheduler._kill_orphaned_mcp_children", create=True),
     ):
         scheduler._running_job_ids.discard(JOB_ID)
-        count = scheduler._trusted_scheduler_tick(verbose=False, sync=True)
+        trusted_tick = getattr(
+            InProcessCronScheduler,
+            "_InProcessCronScheduler__gateway_tick",
+        )
+        count = trusted_tick(verbose=False, sync=True)
 
     assert count == 1
     assert seen["job"]["execution_id"] == "execution-tick"
@@ -158,19 +165,25 @@ def test_private_tick_impl_does_not_accept_forged_scheduler_provenance(
     assert events == ["run"]
 
 
-def test_public_tick_rejects_protected_profile_before_any_cron_state(
+def test_public_tick_filters_protected_profile_before_job_state_mutation(
     protected_tool,
     monkeypatch,
 ):
     events = []
     monkeypatch.setattr(scheduler, "_hermes_home", protected_tool)
     monkeypatch.setattr(
-        scheduler,
-        "_get_lock_paths",
-        lambda: events.append("lock") or (Path("/unused"), Path("/unused/lock")),
+            scheduler,
+            "_get_lock_paths",
+            lambda: events.append("lock")
+            or (protected_tool / "locks", protected_tool / "locks" / ".tick.lock"),
     )
     monkeypatch.setattr(
-        scheduler, "get_due_jobs", lambda: events.append("read-schedules") or []
+        scheduler,
+        "get_due_jobs",
+        lambda *, exclude_job_ids=None: events.append(
+            ("read-schedules", exclude_job_ids)
+        )
+        or [],
     )
     monkeypatch.setattr(
         scheduler,
@@ -191,9 +204,220 @@ def test_public_tick_rejects_protected_profile_before_any_cron_state(
         scheduler, "run_one_job", lambda *_args, **_kwargs: events.append("handler")
     )
 
-    with pytest.raises(ExecutionCapabilityError):
-        scheduler.tick(verbose=False, sync=True)
+    assert scheduler.tick(verbose=False, sync=True) == 0
 
+    assert events == ["lock", ("read-schedules", {JOB_ID})]
+
+
+def test_public_tick_runs_ordinary_due_job_without_mutating_protected_sibling(
+    protected_tool,
+    monkeypatch,
+):
+    ordinary = {
+        "id": "ordinary-job",
+        "name": "ordinary",
+        "schedule": {"kind": "cron", "expr": "* * * * *"},
+    }
+    protected = {
+        "id": JOB_ID,
+        "name": "protected",
+        "schedule": {"kind": "cron", "expr": "* * * * *"},
+    }
+    events = []
+
+    monkeypatch.setattr(scheduler, "_hermes_home", protected_tool)
+
+    def due_jobs(*, exclude_job_ids=None):
+        assert exclude_job_ids == {JOB_ID}
+        events.append(("read", frozenset(exclude_job_ids)))
+        return [ordinary]
+
+    monkeypatch.setattr(scheduler, "get_due_jobs", due_jobs)
+    monkeypatch.setattr(
+        scheduler,
+        "advance_next_runs",
+        lambda job_ids: events.append(("advance", tuple(job_ids))),
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "create_execution",
+        lambda job_id, **_kwargs: events.append(("create", job_id))
+        or {"id": "execution-ordinary"},
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "run_one_job",
+        lambda job, **_kwargs: events.append(("run", job["id"])) or True,
+    )
+
+    scheduler._running_job_ids.discard(ordinary["id"])
+    assert scheduler.tick(verbose=False, sync=True) == 1
+    assert ("advance", JOB_ID) not in events
+    assert ("create", JOB_ID) not in events
+    assert ("run", JOB_ID) not in events
+    assert events == [
+        ("read", frozenset({JOB_ID})),
+        ("advance", ("ordinary-job",)),
+        ("create", "ordinary-job"),
+        ("run", "ordinary-job"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "protected_run_at",
+    [
+        "2026-07-29T10:00:00+00:00",
+        "2026-07-29T11:00:00+00:00",
+    ],
+)
+def test_due_scan_does_not_repair_claim_or_advance_excluded_protected_job(
+    monkeypatch,
+    protected_run_at,
+):
+    from cron import jobs
+
+    protected = {
+        "id": JOB_ID,
+        "enabled": True,
+        "schedule": {"kind": "once", "run_at": protected_run_at},
+        "next_run_at": protected_run_at,
+    }
+    ordinary = {
+        "id": "ordinary-job",
+        "enabled": True,
+        "schedule": {"kind": "once", "run_at": "2026-07-29T10:00:00+00:00"},
+        "next_run_at": "2026-07-29T10:00:00+00:00",
+    }
+    stored = [dict(protected), dict(ordinary)]
+    saved = []
+    monkeypatch.setattr(jobs, "load_jobs", lambda: stored)
+    monkeypatch.setattr(
+        jobs,
+        "save_jobs",
+        lambda value, **_kwargs: saved.append(value),
+    )
+    monkeypatch.setattr(
+        jobs,
+        "_hermes_now",
+        lambda: datetime.fromisoformat("2026-07-29T10:01:00+00:00"),
+    )
+
+    due = jobs._get_due_jobs_locked(exclude_job_ids={JOB_ID})
+
+    assert [job["id"] for job in due] == ["ordinary-job"]
+    assert stored[0] == protected
+    assert "run_claim" in stored[1]
+    assert saved
+
+
+def test_trigger_protected_job_rejects_before_schedule_mutation(
+    protected_tool,
+    monkeypatch,
+):
+    from cron import jobs
+
+    events = []
+    monkeypatch.setattr(scheduler, "_hermes_home", protected_tool)
+    monkeypatch.setattr(
+        jobs,
+        "resolve_job_ref",
+        lambda job_id: events.append(("resolve", job_id)) or {"id": JOB_ID},
+    )
+    monkeypatch.setattr(
+        jobs,
+        "update_job",
+        lambda *_args, **_kwargs: events.append(("update",)) or {},
+    )
+
+    with pytest.raises(ExecutionCapabilityError, match="protected"):
+        jobs.trigger_job(JOB_ID)
+
+    assert events == [("resolve", JOB_ID)]
+
+
+def test_forged_dispatch_is_rejected_before_no_agent_or_prerun_side_effects(
+    protected_tool,
+    monkeypatch,
+):
+    events = []
+    monkeypatch.setattr(scheduler, "_hermes_home", protected_tool)
+    monkeypatch.setattr(
+        scheduler,
+        "_run_job_script_with_claim_heartbeat",
+        lambda *_args, **_kwargs: events.append("script") or (True, ""),
+    )
+
+    result = scheduler.run_job(
+        {
+            "id": JOB_ID,
+            "name": "protected",
+            "execution_id": "execution-forged",
+            "no_agent": True,
+            "script": "/must-not-run",
+        },
+        _trusted_dispatch=object(),
+    )
+
+    assert result[0] is False
+    assert "trusted cron dispatch" in str(result[3]).lower()
+    assert events == []
+
+
+def test_forged_dispatch_is_rejected_before_session_db_and_wake_gate_script(
+    protected_tool,
+    monkeypatch,
+):
+    events = []
+    monkeypatch.setattr(scheduler, "_hermes_home", protected_tool)
+    monkeypatch.setattr(
+        scheduler,
+        "_run_job_script_with_claim_heartbeat",
+        lambda *_args, **_kwargs: events.append("script")
+        or (True, '{"wakeAgent": false}'),
+    )
+    monkeypatch.setattr(
+        "hermes_state.SessionDB",
+        lambda: events.append("session-db"),
+    )
+
+    result = scheduler.run_job(
+        {
+            "id": JOB_ID,
+            "name": "protected",
+            "execution_id": "execution-forged",
+            "script": "/must-not-run",
+        },
+        _trusted_dispatch=object(),
+    )
+
+    assert result[0] is False
+    assert "trusted cron dispatch" in str(result[3]).lower()
+    assert events == []
+
+
+def test_direct_run_one_job_rejects_before_execution_row_or_dispatch_claim(
+    protected_tool,
+    monkeypatch,
+):
+    events = []
+    monkeypatch.setattr(scheduler, "_hermes_home", protected_tool)
+    monkeypatch.setattr(
+        scheduler,
+        "create_execution",
+        lambda *_args, **_kwargs: events.append("execution"),
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "claim_dispatch",
+        lambda *_args, **_kwargs: events.append("claim") or True,
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "run_job",
+        lambda *_args, **_kwargs: events.append("handler"),
+    )
+
+    assert scheduler.run_one_job({"id": JOB_ID, "name": "protected"}) is False
     assert events == []
 
 
@@ -341,7 +565,7 @@ def test_direct_run_and_replayed_or_copied_job_row_fail_closed(protected_tool):
     )
 
     assert success is False
-    assert "does not match this job object" in str(error)
+    assert "does not match" in str(error)
 
 
 def test_scheduler_converts_unknown_mutation_outcome_to_terminal_failure(

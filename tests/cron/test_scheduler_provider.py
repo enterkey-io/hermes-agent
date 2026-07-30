@@ -309,9 +309,9 @@ def test_gateway_internal_provider_loop_uses_private_trusted_tick(monkeypatch):
         return 0
 
     monkeypatch.setattr(
-        "cron.scheduler._trusted_scheduler_tick",
-        trusted_tick,
-        raising=False,
+        InProcessCronScheduler,
+        "_InProcessCronScheduler__gateway_tick",
+        staticmethod(trusted_tick),
     )
     monkeypatch.setattr(
         "cron.scheduler.tick",
@@ -345,6 +345,22 @@ def test_gateway_selects_private_builtin_start_but_not_external_start():
 
     assert _gateway_cron_start_callable(builtin) == builtin._start_gateway
     assert _gateway_cron_start_callable(external) == external.start
+
+
+def test_gateway_does_not_trust_inprocess_scheduler_subclass():
+    import cron.scheduler as scheduler
+    from cron.scheduler_provider import InProcessCronScheduler
+    from gateway.run import _gateway_cron_start_callable
+
+    class MaliciousScheduler(InProcessCronScheduler):
+        pass
+
+    malicious = MaliciousScheduler()
+
+    assert _gateway_cron_start_callable(malicious) == malicious.start
+    with pytest.raises(PermissionError, match="exact built-in"):
+        malicious._start_gateway(threading.Event())
+    assert not hasattr(scheduler, "_trusted_scheduler_tick")
 
 
 def test_external_provider_fire_due_remains_untrusted(monkeypatch):

@@ -218,6 +218,62 @@ def test_dashboard_fire_cannot_issue_protected_dispatch_or_mutate_state(
     assert events == []
 
 
+def test_dashboard_trigger_cannot_advance_protected_job(
+    isolated_profiles,
+):
+    from agent.execution_capabilities import (
+        ExecutionCapabilityError,
+        cron_job_capability,
+    )
+    from hermes_cli import web_server
+    from tools.registry import registry
+
+    job = web_server._call_cron_for_profile(
+        "worker_alpha",
+        "create_job",
+        prompt="protected",
+        schedule="every 1h",
+        name="protected",
+    )
+    before = web_server._call_cron_for_profile(
+        "worker_alpha",
+        "get_job",
+        job["id"],
+    )
+    tool_name = "_test_dashboard_trigger_protected"
+    registry.register(
+        name=tool_name,
+        toolset="test",
+        schema={
+            "name": tool_name,
+            "description": "protected",
+            "parameters": {"type": "object", "properties": {}},
+        },
+        handler=lambda args, **kwargs: "{}",
+        execution_capability=cron_job_capability(
+            profile_name="worker_alpha",
+            hermes_home=isolated_profiles["worker_alpha"],
+            job_id=job["id"],
+        ),
+    )
+    try:
+        with pytest.raises(ExecutionCapabilityError, match="protected"):
+            web_server._trigger_cron_job_sync(
+                job["id"],
+                profile="worker_alpha",
+            )
+    finally:
+        registry.deregister(tool_name)
+
+    after = web_server._call_cron_for_profile(
+        "worker_alpha",
+        "get_job",
+        job["id"],
+    )
+    assert after["next_run_at"] == before["next_run_at"]
+    assert after.get("fire_claim") == before.get("fire_claim")
+
+
 def test_profile_call_cannot_retarget_ticker_store_mid_write(
     isolated_profiles,
     monkeypatch,

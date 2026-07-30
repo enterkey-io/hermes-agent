@@ -14,11 +14,14 @@ import json
 import sys
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from agent.execution_capabilities import cron_job_capability
 from tools.cronjob_tools import cronjob, _execute_job_now
 from tools.environments.base import set_activity_callback
+from tools.registry import registry
 
 
 _JOB = {"id": "job-run-1", "name": "manual run", "prompt": "hi",
@@ -26,6 +29,43 @@ _JOB = {"id": "job-run-1", "name": "manual run", "prompt": "hi",
 
 
 class TestCronjobRunExecutesImmediately:
+    def test_protected_run_is_rejected_before_claim_or_execution(self, tmp_path):
+        home = tmp_path / ".hermes" / "profiles" / "emily"
+        home.mkdir(parents=True)
+        tool_name = "_test_manual_protected_cron_tool"
+        registry.register(
+            name=tool_name,
+            toolset="test",
+            schema={
+                "name": tool_name,
+                "description": "protected",
+                "parameters": {"type": "object", "properties": {}},
+            },
+            handler=lambda args, **kwargs: "{}",
+            execution_capability=cron_job_capability(
+                profile_name="emily",
+                hermes_home=home,
+                job_id=_JOB["id"],
+            ),
+        )
+        try:
+            with (
+                patch("cron.scheduler._hermes_home", Path(home)),
+                patch("tools.cronjob_tools.claim_job_for_fire") as claim,
+                patch("cron.scheduler.run_one_job") as run,
+                patch("tools.cronjob_tools.mark_job_run") as mark,
+            ):
+                result = _execute_job_now(dict(_JOB))
+        finally:
+            registry.deregister(tool_name)
+
+        assert result["claimed"] is False
+        assert result["success"] is False
+        assert "protected" in result["error"].lower()
+        claim.assert_not_called()
+        run.assert_not_called()
+        mark.assert_not_called()
+
     def test_run_action_claims_and_fires_via_run_one_job(self):
         """action='run' must claim the job then fire it through run_one_job."""
         ran = {"job": "after-run", "last_status": "ok", "last_error": None}

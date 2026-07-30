@@ -2172,6 +2172,9 @@ def trigger_job(job_id: str) -> Optional[Dict[str, Any]]:
     job = resolve_job_ref(job_id)
     if not job:
         return None
+    from cron.scheduler import _assert_untrusted_cron_job_allowed
+
+    _assert_untrusted_cron_job_allowed(job["id"])
     return update_job(
         job["id"],
         {
@@ -2743,7 +2746,10 @@ def _sweep_completed_oneshots(
     return removed
 
 
-def get_due_jobs() -> List[Dict[str, Any]]:
+def get_due_jobs(
+    *,
+    exclude_job_ids: Optional[set[str]] = None,
+) -> List[Dict[str, Any]]:
     """Get all jobs that are due to run now.
 
     For recurring jobs (cron/interval), if the scheduled time is stale (more
@@ -2758,10 +2764,13 @@ def get_due_jobs() -> List[Dict[str, Any]]:
     a ``repeat.times`` limit consumes one of its runs on that catch-up fire.
     """
     with _jobs_lock():
-        return _get_due_jobs_locked()
+        return _get_due_jobs_locked(exclude_job_ids=exclude_job_ids)
 
 
-def _get_due_jobs_locked() -> List[Dict[str, Any]]:
+def _get_due_jobs_locked(
+    *,
+    exclude_job_ids: Optional[set[str]] = None,
+) -> List[Dict[str, Any]]:
     """Inner implementation of get_due_jobs(); must be called with _jobs_lock held."""
     now = _hermes_now()
     raw_jobs = load_jobs()
@@ -2783,7 +2792,11 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
             rj["id"] = rj.pop("job_id", None) or uuid.uuid4().hex[:12]
             needs_save = True
 
-    jobs = [_apply_skill_fields(j) for j in copy.deepcopy(raw_jobs)]
+    excluded = set(exclude_job_ids or ())
+    mutable_raw_jobs = [
+        job for job in raw_jobs if str(job.get("id") or "") not in excluded
+    ]
+    jobs = [_apply_skill_fields(j) for j in copy.deepcopy(mutable_raw_jobs)]
     due = []
 
     # Normalize malformed "schedule" records (direct jobs.json edit, old writers,
@@ -2798,7 +2811,7 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
         if not isinstance(j.get("schedule"), dict):
             j["schedule"] = {}
             needs_save = True
-    for rj in raw_jobs:
+    for rj in mutable_raw_jobs:
         if not isinstance(rj.get("schedule"), dict):
             rj["schedule"] = {}
             needs_save = True
@@ -2822,7 +2835,7 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
                 except Exception:
                     j.pop("next_run_at", None)
                     needs_save = True
-    for rj in raw_jobs:
+    for rj in mutable_raw_jobs:
         nr = rj.get("next_run_at")
         if nr is not None:
             if not isinstance(nr, str):
@@ -2847,7 +2860,7 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
             except Exception:
                 j.pop("last_run_at", None)
                 needs_save = True
-    for rj in raw_jobs:
+    for rj in mutable_raw_jobs:
         lr = rj.get("last_run_at")
         if lr is not None and not isinstance(lr, str):
             rj.pop("last_run_at", None)

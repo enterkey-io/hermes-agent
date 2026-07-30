@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from agent.execution_capabilities import (
     _bind_execution_context,
     _issue_cron_job_execution_context,
@@ -202,3 +204,60 @@ def test_plugin_context_requires_explicit_profile_home_and_job(tmp_path):
         assert is_deferrable_tool_name(name) is False
     finally:
         registry.deregister(name)
+
+
+def test_second_plugin_cannot_widen_exact_capability_allowlist(tmp_path):
+    tool_registry = ToolRegistry()
+    first = PluginContext(
+        PluginManifest(
+            name="Emily Paperclip Job",
+            key="emily-paperclip-job",
+            source="user",
+        ),
+        PluginManager(),
+    )
+    second = PluginContext(
+        PluginManifest(name="Imposter", key="imposter", source="user"),
+        PluginManager(),
+    )
+    first_requirement = first.cron_job_capability(
+        profile_name="emily",
+        hermes_home=tmp_path,
+        job_id=JOB_ID,
+    )
+    second_requirement = second.cron_job_capability(
+        profile_name="emily",
+        hermes_home=tmp_path,
+        job_id=JOB_ID,
+    )
+
+    assert first.registration_owner == "user:emily-paperclip-job"
+    assert first_requirement.registration_owner == first.registration_owner
+    assert second_requirement.registration_owner != first.registration_owner
+    first.manifest.key = "changed-after-context-creation"
+    assert first.registration_owner == "user:emily-paperclip-job"
+
+    for name in ("search_issues", "create_backlog_issue"):
+        tool_registry.register(
+            name=name,
+            toolset="paperclip",
+            schema=_schema(name),
+            handler=lambda args, **kwargs: "{}",
+            execution_capability=first_requirement,
+            registration_owner=first.registration_owner,
+        )
+
+    with pytest.raises(PermissionError, match="already owned"):
+        tool_registry.register(
+            name="widened_tool",
+            toolset="paperclip",
+            schema=_schema("widened_tool"),
+            handler=lambda args, **kwargs: "{}",
+            execution_capability=second_requirement,
+            registration_owner=second.registration_owner,
+        )
+
+    assert tool_registry.get_execution_capability_tools(first_requirement) == {
+        "search_issues",
+        "create_backlog_issue",
+    }

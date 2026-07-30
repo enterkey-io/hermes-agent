@@ -623,6 +623,13 @@ def _execute_job_now(
     """
     job_id = job["id"]
     try:
+        from cron.scheduler import _assert_untrusted_cron_job_allowed
+
+        _assert_untrusted_cron_job_allowed(job_id)
+    except Exception as exc:
+        return {"claimed": False, "success": False, "error": str(exc)}
+
+    try:
         # At-most-once claim: bail without running if a tick/other fire owns it.
         if not claim_job_for_fire(job_id):
             # claim_job_for_fire returns False for paused/disabled/missing

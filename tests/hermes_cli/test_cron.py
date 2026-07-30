@@ -218,21 +218,33 @@ def test_cron_tick_invokes_scheduler_tick_with_verbose(monkeypatch):
     assert calls == [True]
 
 
-def test_cron_tick_cannot_issue_protected_dispatch_or_mutate_state(monkeypatch):
-    from agent.execution_capabilities import ExecutionCapabilityError
+def test_cron_tick_cannot_issue_protected_dispatch_or_mutate_state(
+    monkeypatch,
+    tmp_path,
+):
     from cron import scheduler
 
     events = []
     monkeypatch.setattr(
         scheduler,
-        "_untrusted_cron_profile_has_capabilities",
-        lambda: True,
-        raising=False,
+        "_untrusted_cron_protected_job_ids",
+        lambda: {"protected-job"},
+    )
+    monkeypatch.setattr(
+            scheduler,
+            "_get_lock_paths",
+            lambda: (
+                tmp_path / "cron",
+                tmp_path / "cron" / ".tick.lock",
+            ),
     )
     monkeypatch.setattr(
         scheduler,
-        "_get_lock_paths",
-        lambda: events.append("lock"),
+        "get_due_jobs",
+        lambda *, exclude_job_ids=None: events.append(
+            ("read", exclude_job_ids)
+        )
+        or [],
     )
     monkeypatch.setattr(
         scheduler,
@@ -255,10 +267,9 @@ def test_cron_tick_cannot_issue_protected_dispatch_or_mutate_state(monkeypatch):
         lambda *_args, **_kwargs: events.append("handler"),
     )
 
-    with pytest.raises(ExecutionCapabilityError):
-        cron_cli.cron_tick()
+    cron_cli.cron_tick()
 
-    assert events == []
+    assert events == [("read", {"protected-job"})]
 
 
 def test_cron_create_success_prints_job_details(monkeypatch, capsys):

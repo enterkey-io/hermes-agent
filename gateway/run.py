@@ -27200,7 +27200,10 @@ def _gateway_cron_start_callable(provider):
     """Select the private trusted loop only for the built-in gateway provider."""
     from cron.scheduler_provider import InProcessCronScheduler
 
-    if isinstance(provider, InProcessCronScheduler):
+    if (
+        type(provider) is InProcessCronScheduler
+        and type(provider).__module__ == "cron.scheduler_provider"
+    ):
         return provider._start_gateway
     return provider.start
 
