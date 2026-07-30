@@ -452,7 +452,11 @@ def test_get_flow_status_reports_stored_connection(tmp_path, monkeypatch, reset_
     from plugins.memory.honcho import client as honcho_client
 
     cfgfile = tmp_path / "honcho.json"
-    monkeypatch.setattr(honcho_client, "resolve_config_path", lambda: cfgfile)
+    monkeypatch.setattr(
+        honcho_client,
+        "resolve_config_path",
+        lambda context=None: cfgfile,
+    )
     monkeypatch.setattr(honcho_client, "resolve_active_host", lambda: "hermes")
     monkeypatch.delenv("HONCHO_API_KEY", raising=False)
 

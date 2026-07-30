@@ -2,6 +2,7 @@
 
 from types import SimpleNamespace
 import json
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -140,7 +141,7 @@ class TestCmdStatus:
         monkeypatch.setattr(honcho_cli, "_active_profile_name", lambda: "default")
         monkeypatch.setattr(
             "plugins.memory.honcho.client.HonchoClientConfig.from_global_config",
-            lambda host=None: FakeConfig(),
+            lambda **kwargs: FakeConfig(),
         )
         monkeypatch.setattr(
             "plugins.memory.honcho.client.get_honcho_client",
@@ -207,7 +208,7 @@ class TestCmdStatus:
         monkeypatch.setattr(honcho_cli, "_active_profile_name", lambda: "default")
         monkeypatch.setattr(
             "plugins.memory.honcho.client.HonchoClientConfig.from_global_config",
-            lambda host=None: FakeConfig(),
+            lambda **kwargs: FakeConfig(),
         )
         monkeypatch.setattr("plugins.memory.honcho.client.get_honcho_client", lambda cfg: object())
         monkeypatch.setattr(honcho_cli, "_show_peer_cards", lambda hcfg, client: None)
@@ -260,6 +261,145 @@ class TestAllProfileHostConfigs:
 
         with pytest.raises(ValueError, match="invalid profile name"):
             honcho_cli._all_profile_host_configs()
+
+    def test_legacy_named_host_remains_visible_read_only(self, monkeypatch):
+        import plugins.memory.honcho.cli as honcho_cli
+
+        legacy_block = {"peerName": "legacy-owner-alpha"}
+        monkeypatch.setattr(
+            "hermes_cli.profiles.list_profiles",
+            lambda: [
+                SimpleNamespace(name="default"),
+                SimpleNamespace(name="alpha"),
+            ],
+        )
+        monkeypatch.setattr(
+            honcho_cli,
+            "_read_config",
+            lambda: {"hosts": {"hermes.alpha": legacy_block}},
+        )
+
+        assert honcho_cli._all_profile_host_configs() == [
+            ("default", "hermes", {}),
+            ("alpha", "hermes.alpha", legacy_block),
+        ]
+
+    def test_canonical_and_legacy_named_hosts_are_both_visible(
+        self, monkeypatch, capsys,
+    ):
+        import plugins.memory.honcho.cli as honcho_cli
+
+        canonical_block = {"peerName": "owner-alpha"}
+        legacy_block = {"peerName": "legacy-owner-alpha"}
+        config = {
+            "hosts": {
+                "hermes_alpha": canonical_block,
+                "hermes.alpha": legacy_block,
+            }
+        }
+        monkeypatch.setattr(
+            "hermes_cli.profiles.list_profiles",
+            lambda: [
+                SimpleNamespace(name="default"),
+                SimpleNamespace(name="alpha"),
+            ],
+        )
+        monkeypatch.setattr(honcho_cli, "_read_config", lambda: config)
+        monkeypatch.setattr(honcho_cli, "_active_profile_name", lambda: "default")
+
+        assert honcho_cli._all_profile_host_configs() == [
+            ("default", "hermes", {}),
+            ("alpha", "hermes_alpha", canonical_block),
+            ("alpha", "hermes.alpha", legacy_block),
+        ]
+
+        honcho_cli._cmd_status_all()
+        assert "hermes.alpha [legacy read-only]" in capsys.readouterr().out
+
+
+class TestTargetProfileContext:
+    def test_target_profile_peer_setup_uses_target_root(
+        self, tmp_path, monkeypatch,
+    ):
+        import plugins.memory.honcho.cli as honcho_cli
+
+        default_root = tmp_path / "default"
+        alpha_root = default_root / "profiles" / "alpha"
+        alpha_root.mkdir(parents=True)
+        (alpha_root / "honcho.json").write_text(json.dumps({
+            "apiKey": "neutral-key",
+            "hosts": {
+                "hermes_alpha": {
+                    "enabled": True,
+                    "workspace": "workspace-alpha",
+                    "peerName": "owner-alpha",
+                    "aiPeer": "ai-alpha",
+                }
+            },
+        }))
+        monkeypatch.setattr(honcho_cli, "_profile_override", "alpha")
+        monkeypatch.setattr(
+            "hermes_cli.profiles.resolve_profile_env",
+            lambda name: str(alpha_root if name == "alpha" else default_root),
+        )
+        monkeypatch.setattr(
+            "hermes_cli.profiles.get_active_profile_name",
+            lambda: "default",
+        )
+        client = MagicMock()
+
+        with patch("honcho.Honcho", return_value=client):
+            assert honcho_cli._ensure_peer_exists("hermes_alpha") is True
+
+        assert [call.args[0] for call in client.peer.call_args_list] == [
+            "ai-alpha",
+            "owner-alpha",
+        ]
+
+    def test_clone_eager_peer_setup_uses_cloned_profile_context(
+        self, tmp_path, monkeypatch,
+    ):
+        import plugins.memory.honcho.cli as honcho_cli
+
+        default_root = tmp_path / "default"
+        alpha_root = default_root / "profiles" / "alpha"
+        alpha_root.mkdir(parents=True)
+        config_path = default_root / "honcho.json"
+        initial = {
+            "apiKey": "neutral-key",
+            "hosts": {
+                "hermes": {
+                    "enabled": True,
+                    "workspace": "hermes",
+                    "peerName": "owner",
+                    "aiPeer": "ai-default",
+                }
+            },
+        }
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(json.dumps(initial))
+        monkeypatch.setattr(honcho_cli, "_profile_override", None)
+        monkeypatch.setattr(honcho_cli, "_read_config", lambda: initial)
+        monkeypatch.setattr(
+            honcho_cli,
+            "_write_config",
+            lambda cfg, path=None: config_path.write_text(json.dumps(cfg)),
+        )
+        monkeypatch.setattr(
+            "hermes_cli.profiles.resolve_profile_env",
+            lambda name: str(alpha_root if name == "alpha" else default_root),
+        )
+        client = MagicMock()
+
+        with patch("honcho.Honcho", return_value=client):
+            assert honcho_cli.clone_honcho_for_profile("alpha") is True
+
+        written = json.loads(config_path.read_text())
+        assert "hermes_alpha" in written["hosts"]
+        assert [call.args[0] for call in client.peer.call_args_list] == [
+            "alpha",
+            "owner-alpha",
+        ]
 
 
 class TestCloneHonchoForProfile:
@@ -438,7 +578,7 @@ class TestSetupWizardDeploymentShape:
 
         monkeypatch.setattr(
             "plugins.memory.honcho.client.HonchoClientConfig.from_global_config",
-            lambda host=None: _FakeClientCfg(),
+            lambda **kwargs: _FakeClientCfg(),
         )
         monkeypatch.setattr(
             "plugins.memory.honcho.client.reset_honcho_client",
@@ -755,7 +895,7 @@ class TestCmdSetupDeviceFlow:
 
         monkeypatch.setattr(
             "plugins.memory.honcho.client.HonchoClientConfig.from_global_config",
-            lambda host=None: _FakeClientCfg(),
+            lambda **kwargs: _FakeClientCfg(),
         )
         monkeypatch.setattr("plugins.memory.honcho.client.reset_honcho_client", lambda: None)
         monkeypatch.setattr("plugins.memory.honcho.client.get_honcho_client", lambda hcfg: object())

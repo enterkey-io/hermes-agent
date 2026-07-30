@@ -11,8 +11,14 @@ import re
 import sys
 from pathlib import Path
 
-from hermes_constants import get_hermes_home
-from plugins.memory.honcho.client import _host_block, profile_host_key, resolve_active_host, resolve_config_path, HOST
+from plugins.memory.honcho.client import (
+    HOST,
+    HonchoProfileContext,
+    _host_block,
+    profile_host_key,
+    resolve_config_path,
+    resolve_profile_context,
+)
 from hermes_cli.config import cfg_get
 
 
@@ -113,7 +119,12 @@ def _ensure_peer_exists(host_key: str | None = None) -> bool:
     """
     try:
         from plugins.memory.honcho.client import HonchoClientConfig, get_honcho_client
-        hcfg = HonchoClientConfig.from_global_config(host=host_key)
+        context = _profile_context()
+        if host_key is not None and host_key != context.host:
+            if not host_key.startswith(f"{HOST}_"):
+                raise ValueError(f"non-canonical Honcho host: {host_key!r}")
+            context = _target_profile_context(_profile_name_from_host(host_key))
+        hcfg = HonchoClientConfig.from_global_config(context=context)
         if not hcfg.enabled or not (hcfg.api_key or hcfg.base_url):
             return False
         client = get_honcho_client(hcfg)
@@ -265,18 +276,39 @@ def sync_honcho_profiles_quiet() -> int:
 _profile_override: str | None = None
 
 
+def _target_profile_context(profile_name: str) -> HonchoProfileContext:
+    """Resolve an operator-selected profile without mutating process state."""
+    from hermes_cli.profiles import (
+        normalize_profile_name,
+        resolve_profile_env,
+        validate_profile_name,
+    )
+
+    profile = normalize_profile_name(profile_name)
+    validate_profile_name(profile)
+    root = Path(resolve_profile_env(profile))
+    default_root = Path(resolve_profile_env("default"))
+    return HonchoProfileContext.for_profile(
+        profile,
+        root,
+        default_root=default_root,
+    )
+
+
+def _profile_context() -> HonchoProfileContext:
+    if _profile_override:
+        return _target_profile_context(_profile_override)
+    return resolve_profile_context()
+
+
 def _host_key() -> str:
     """Return the active Honcho host key, derived from the current Hermes profile."""
-    if _profile_override:
-        if _profile_override in {"default", "custom"}:
-            return HOST
-        return profile_host_key(_profile_override)
-    return resolve_active_host()
+    return _profile_context().host
 
 
 def _config_path() -> Path:
     """Return the active Honcho config path for reading (instance-local or global)."""
-    return resolve_config_path()
+    return resolve_config_path(_profile_context())
 
 
 def _local_config_path() -> Path:
@@ -286,7 +318,7 @@ def _local_config_path() -> Path:
     its own config file.  The global ~/.honcho/config.json is only used as
     a read fallback (via resolve_config_path) for cross-app interop.
     """
-    return get_hermes_home() / "honcho.json"
+    return _profile_context().root / "honcho.json"
 
 
 def _read_config() -> dict:
@@ -317,7 +349,7 @@ def _resolve_api_key(cfg: dict) -> str:
     config shapes, e.g. ``localhost:8000``) still pass — the Honcho SDK
     will reject them itself with a clearer error than ours.
     """
-    host_key = _host_block(cfg, _host_key()).get("apiKey")
+    host_key = _host_block(cfg, _host_key(), allow_legacy=True).get("apiKey")
     key = host_key or cfg.get("apiKey", "") or os.environ.get("HONCHO_API_KEY", "")
     if not key:
         base_url = cfg.get("baseUrl") or cfg.get("base_url") or os.environ.get("HONCHO_BASE_URL", "")
@@ -1047,7 +1079,7 @@ def cmd_setup(args) -> None:
     try:
         from plugins.memory.honcho.client import HonchoClientConfig, get_honcho_client, reset_honcho_client
         reset_honcho_client()
-        hcfg = HonchoClientConfig.from_global_config(host=_host_key())
+        hcfg = HonchoClientConfig.from_global_config(context=_profile_context())
         get_honcho_client(hcfg)
         print("OK")
     except Exception as e:
@@ -1139,8 +1171,17 @@ def _all_profile_host_configs() -> list[tuple[str, str, dict]]:
     for p in profiles:
         if p.name == "default":
             continue
-        h = profile_host_key(p.name)
-        results.append((p.name, h, hosts.get(h, {})))
+        canonical = profile_host_key(p.name)
+        legacy = f"{HOST}.{p.name}"
+        found = False
+        if canonical in hosts:
+            results.append((p.name, canonical, hosts[canonical]))
+            found = True
+        if legacy in hosts:
+            results.append((p.name, legacy, hosts[legacy]))
+            found = True
+        if not found:
+            results.append((p.name, canonical, {}))
 
     return results
 
@@ -1168,7 +1209,9 @@ def cmd_status(args) -> None:
         # Config file missing — try env var fallback before giving up.
         try:
             from plugins.memory.honcho.client import HonchoClientConfig
-            _env_cfg = HonchoClientConfig.from_global_config(host=_host_key())
+            _env_cfg = HonchoClientConfig.from_global_config(
+                context=_profile_context()
+            )
             if _env_cfg.api_key or _env_cfg.base_url:
                 # Env var fallback worked — use that config instead.
                 cfg = {"apiKey": _env_cfg.api_key, "enabled": _env_cfg.enabled}
@@ -1183,7 +1226,7 @@ def cmd_status(args) -> None:
 
     try:
         from plugins.memory.honcho.client import HonchoClientConfig, get_honcho_client
-        hcfg = HonchoClientConfig.from_global_config(host=_host_key())
+        hcfg = HonchoClientConfig.from_global_config(context=_profile_context())
     except Exception as e:
         print(f"  Config error: {e}\n")
         return
@@ -1311,8 +1354,13 @@ def _cmd_status_all() -> None:
         recall = block.get("recallMode") or cfg.get("recallMode", "hybrid")
         write = block.get("writeFrequency") or cfg.get("writeFrequency", "async")
 
-        marker = " *" if name == active else ""
-        print(f"  {name + marker:<14} {host:<22} {enabled_str:<9} {recall:<9} {write}")
+        marker = " *" if name == active and not host.startswith(f"{HOST}.") else ""
+        host_display = (
+            f"{host} [legacy read-only]"
+            if host.startswith(f"{HOST}.")
+            else host
+        )
+        print(f"  {name + marker:<14} {host_display:<22} {enabled_str:<9} {recall:<9} {write}")
 
     print("\n  * active profile\n")
 
@@ -1329,7 +1377,12 @@ def cmd_peers(args) -> None:
     for name, host, block in rows:
         user = block.get("peerName") or cfg.get("peerName") or "(not set)"
         ai = block.get("aiPeer") or cfg.get("aiPeer") or host
-        print(f"  {name:<14} {user:<16} {ai}")
+        profile_display = (
+            f"{name} [legacy read-only]"
+            if host.startswith(f"{HOST}.")
+            else name
+        )
+        print(f"  {profile_display:<14} {user:<16} {ai}")
 
     print()
 
@@ -1560,7 +1613,7 @@ def cmd_identity(args) -> None:
     try:
         from plugins.memory.honcho.client import HonchoClientConfig, get_honcho_client
         from plugins.memory.honcho.session import HonchoSessionManager
-        hcfg = HonchoClientConfig.from_global_config(host=_host_key())
+        hcfg = HonchoClientConfig.from_global_config(context=_profile_context())
         client = get_honcho_client(hcfg)
         mgr = HonchoSessionManager(honcho=client, config=hcfg)
         session_key = hcfg.resolve_session_name()
@@ -1737,7 +1790,9 @@ def cmd_migrate(args) -> None:
                     from plugins.memory.honcho.session import HonchoSessionManager
 
                     reset_honcho_client()
-                    hcfg = HonchoClientConfig.from_global_config()
+                    hcfg = HonchoClientConfig.from_global_config(
+                        context=_profile_context()
+                    )
                     client = get_honcho_client(hcfg)
                     mgr = HonchoSessionManager(honcho=client, config=hcfg)
                     session_key = hcfg.resolve_session_name()
@@ -1787,7 +1842,9 @@ def cmd_migrate(args) -> None:
                     from plugins.memory.honcho.session import HonchoSessionManager
 
                     reset_honcho_client()
-                    hcfg = HonchoClientConfig.from_global_config()
+                    hcfg = HonchoClientConfig.from_global_config(
+                        context=_profile_context()
+                    )
                     client = get_honcho_client(hcfg)
                     mgr = HonchoSessionManager(honcho=client, config=hcfg)
                     session_key = hcfg.resolve_session_name()

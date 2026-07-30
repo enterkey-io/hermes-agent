@@ -19,6 +19,7 @@ import logging
 import hashlib
 import ipaddress
 import re
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
@@ -26,7 +27,6 @@ from urllib.parse import urlparse
 from agent.secret_scope import get_secret
 from hermes_constants import get_hermes_home
 from hermes_cli.profiles import _get_default_hermes_home
-from plugins.plugin_utils import SingletonSlot
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -57,6 +57,90 @@ def _active_profile_name() -> str:
         return "default"
 
 
+@dataclass(frozen=True)
+class HonchoProfileContext:
+    """Immutable profile identity used for config and client resolution."""
+
+    profile: str
+    root: Path
+    host: str
+    default_root: Path
+
+    def __post_init__(self) -> None:
+        expected_host = profile_host_key(self.profile)
+        if self.host != expected_host:
+            raise ValueError(
+                f"Honcho host {self.host!r} does not match profile "
+                f"{self.profile!r}; expected {expected_host!r}"
+            )
+        resolved_root = self.root.expanduser().resolve()
+        resolved_default = self.default_root.expanduser().resolve()
+        object.__setattr__(self, "root", resolved_root)
+        object.__setattr__(self, "default_root", resolved_default)
+        if self.profile == "default" and resolved_root != resolved_default:
+            raise ValueError(
+                f"default profile root {str(resolved_root)!r} does not match "
+                f"default root {str(resolved_default)!r}"
+            )
+        if (
+            self.profile not in {"default", "custom"}
+            and resolved_root != resolved_default / "profiles" / self.profile
+        ):
+            raise ValueError(
+                f"profile root {str(resolved_root)!r} does not match "
+                f"profile {self.profile!r}"
+            )
+
+    @classmethod
+    def for_profile(
+        cls,
+        profile: str,
+        root: Path | str,
+        *,
+        default_root: Path | str | None = None,
+    ) -> "HonchoProfileContext":
+        host = profile_host_key(profile)
+        resolved_root = Path(root).expanduser().resolve()
+        if default_root is None:
+            if profile not in {"default", "custom"} and resolved_root.parent.name == "profiles":
+                resolved_default = resolved_root.parent.parent
+            else:
+                resolved_default = resolved_root
+        else:
+            resolved_default = Path(default_root).expanduser().resolve()
+        if (
+            profile not in {"default", "custom"}
+            and resolved_root != resolved_default / "profiles" / profile
+        ):
+            raise ValueError(
+                f"profile root {str(resolved_root)!r} does not match profile {profile!r}"
+            )
+        return cls(
+            profile=profile,
+            root=resolved_root,
+            host=host,
+            default_root=resolved_default,
+        )
+
+    @property
+    def cache_key(self) -> tuple[str, str, str]:
+        return (str(self.root), self.profile, self.host)
+
+
+def resolve_profile_context() -> HonchoProfileContext:
+    """Capture and validate the current runtime profile identity once."""
+    profile = _active_profile_name()
+    context = HonchoProfileContext.for_profile(
+        profile,
+        get_hermes_home(),
+        default_root=_get_default_hermes_home(),
+    )
+    explicit = os.environ.get("HERMES_HONCHO_HOST", "").strip()
+    if explicit:
+        _validate_profile_host(explicit, profile)
+    return context
+
+
 def _validate_profile_host(
     host: str,
     profile: str | None = None,
@@ -72,17 +156,17 @@ def _validate_profile_host(
     return host
 
 
-def _host_block(raw: dict, host: str) -> dict:
-    """Return host config, accepting legacy dot-form profile host keys."""
+def _host_block(raw: dict, host: str, *, allow_legacy: bool = False) -> dict:
+    """Return a host block, with opt-in legacy lookup for read-only CLI use."""
     hosts = raw.get("hosts") or {}
     block = hosts.get(host, {})
-    if block or not host.startswith(f"{HOST}_"):
+    if block or not allow_legacy or not host.startswith(f"{HOST}_"):
         return block
     legacy = f"{HOST}.{host[len(HOST) + 1:]}"
     return hosts.get(legacy, {})
 
 
-def resolve_active_host() -> str:
+def resolve_active_host(context: HonchoProfileContext | None = None) -> str:
     """Derive the Honcho host key from the active Hermes profile.
 
     Resolution order:
@@ -90,11 +174,15 @@ def resolve_active_host() -> str:
       2. Active profile name via profiles system -> ``hermes_<profile>``
       3. Fallback: ``"hermes"`` (default profile)
     """
+    if context is not None:
+        return context.host
+
+    context = resolve_profile_context()
     explicit = os.environ.get("HERMES_HONCHO_HOST", "").strip()
     if explicit:
-        return _validate_profile_host(explicit)
+        return _validate_profile_host(explicit, context.profile)
 
-    return profile_host_key(_active_profile_name())
+    return context.host
 
 
 def resolve_global_config_path() -> Path:
@@ -102,7 +190,7 @@ def resolve_global_config_path() -> Path:
     return Path.home() / ".honcho" / "config.json"
 
 
-def resolve_config_path() -> Path:
+def resolve_config_path(context: HonchoProfileContext | None = None) -> Path:
     """Return the active Honcho config path.
 
     Resolution order:
@@ -112,12 +200,20 @@ def resolve_config_path() -> Path:
 
     Returns the global path if none exist (for first-time setup writes).
     """
-    local_path = get_hermes_home() / "honcho.json"
+    local_path = (
+        context.root / "honcho.json"
+        if context is not None
+        else get_hermes_home() / "honcho.json"
+    )
     if local_path.exists():
         return local_path
 
     # Default profile's config — host blocks accumulate here via setup/clone
-    default_path = _get_default_hermes_home() / "honcho.json"
+    default_path = (
+        context.default_root / "honcho.json"
+        if context is not None
+        else _get_default_hermes_home() / "honcho.json"
+    )
     if default_path != local_path and default_path.exists():
         return default_path
 
@@ -367,6 +463,12 @@ class HonchoClientConfig:
     """Configuration for Honcho client, resolved for a specific host."""
 
     host: str = HOST
+    profile_context: HonchoProfileContext | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    config_path: Path | None = field(default=None, repr=False, compare=False)
     workspace_id: str = "hermes"
     api_key: str | None = None
     environment: str = "production"
@@ -475,14 +577,27 @@ class HonchoClientConfig:
         cls,
         workspace_id: str = "hermes",
         host: str | None = None,
+        *,
+        context: HonchoProfileContext | None = None,
+        config_path: Path | None = None,
     ) -> HonchoClientConfig:
         """Create config from environment variables (fallback)."""
-        resolved_host = _validate_profile_host(host) if host else resolve_active_host()
+        resolved_context = context or resolve_profile_context()
+        if host is not None:
+            _validate_profile_host(host, resolved_context.profile)
+            if host != resolved_context.host:
+                raise ValueError(
+                    f"Honcho host {host!r} does not match context host "
+                    f"{resolved_context.host!r}"
+                )
+        resolved_host = resolved_context.host
         api_key = get_secret("HONCHO_API_KEY")
         base_url = os.environ.get("HONCHO_BASE_URL", "").strip() or None
         timeout = _resolve_optional_float(os.environ.get("HONCHO_TIMEOUT"))
         return cls(
             host=resolved_host,
+            profile_context=resolved_context,
+            config_path=config_path,
             workspace_id=workspace_id,
             api_key=api_key,
             environment=os.environ.get("HONCHO_ENVIRONMENT", "production"),
@@ -497,30 +612,41 @@ class HonchoClientConfig:
         cls,
         host: str | None = None,
         config_path: Path | None = None,
+        *,
+        context: HonchoProfileContext | None = None,
     ) -> HonchoClientConfig:
         """Create config from the resolved Honcho config path.
 
         Resolution: $HERMES_HOME/honcho.json -> ~/.honcho/config.json -> env vars.
         When host is None, derives it from the active Hermes profile.
         """
-        resolved_host = host or resolve_active_host()
-        path = config_path or resolve_config_path()
+        resolved_context = context or resolve_profile_context()
+        if host is not None:
+            _validate_profile_host(host, resolved_context.profile)
+            if host != resolved_context.host:
+                raise ValueError(
+                    f"Honcho host {host!r} does not match context host "
+                    f"{resolved_context.host!r}"
+                )
+        resolved_host = resolved_context.host
+        path = config_path or resolve_config_path(resolved_context)
         if not path.exists():
             logger.debug("No global Honcho config at %s, falling back to env", path)
-            if host:
-                _validate_profile_host(host)
-            return cls.from_env(host=resolved_host)
+            return cls.from_env(
+                host=resolved_host,
+                context=resolved_context,
+                config_path=path,
+            )
 
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError) as e:
             logger.warning("Failed to read %s: %s, falling back to env", path, e)
-            if host:
-                _validate_profile_host(host)
-            return cls.from_env(host=resolved_host)
-
-        if host:
-            _validate_profile_host(host)
+            return cls.from_env(
+                host=resolved_host,
+                context=resolved_context,
+                config_path=path,
+            )
 
         host_block = _host_block(raw, resolved_host)
         # A hosts.hermes block or explicit enabled flag means the user
@@ -604,6 +730,8 @@ class HonchoClientConfig:
 
         return cls(
             host=resolved_host,
+            profile_context=resolved_context,
+            config_path=path,
             workspace_id=workspace,
             api_key=api_key,
             environment=environment,
@@ -878,9 +1006,11 @@ class HonchoClientConfig:
         return self.workspace_id
 
 
-_honcho_client_slot: SingletonSlot = SingletonSlot()
-_cached_timeout: float | None = None
-_cached_host: str | None = None
+_honcho_client_cache: dict[
+    tuple[str, str, str],
+    tuple["Honcho", float],
+] = {}
+_honcho_client_cache_lock = threading.RLock()
 # Memo for the honcho.json-derived timeout, keyed on the file's mtime_ns so
 # the staleness check on every get_honcho_client() call costs one stat()
 # instead of a JSON parse. mtime -1 = file absent; (None, None) = not yet
@@ -965,14 +1095,19 @@ def _apply_fresh_oauth_token(config: HonchoClientConfig) -> None:
     try:
         from plugins.memory.honcho import oauth
 
-        token, _ = oauth.ensure_fresh_token(resolve_config_path(), config.host)
+        path = config.config_path or resolve_config_path(config.profile_context)
+        token, _ = oauth.ensure_fresh_token(path, config.host)
         if token:
             config.api_key = token
     except Exception:
         logger.warning("Honcho OAuth pre-build refresh failed", exc_info=True)
 
 
-def _refresh_cached_oauth(client: "Honcho", config: HonchoClientConfig | None) -> None:
+def _refresh_cached_oauth(
+    client: "Honcho",
+    config: HonchoClientConfig,
+    cache_key: tuple[str, str, str],
+) -> None:
     """Rotate the cached client's Bearer in place when its OAuth token is stale.
 
     If the SDK shape changed and the in-place rotation can't apply, the slot is
@@ -981,57 +1116,41 @@ def _refresh_cached_oauth(client: "Honcho", config: HonchoClientConfig | None) -
     try:
         from plugins.memory.honcho import oauth
 
-        host = config.host if config is not None else resolve_active_host()
-        token, refreshed = oauth.ensure_fresh_token(resolve_config_path(), host)
+        path = config.config_path or resolve_config_path(config.profile_context)
+        token, refreshed = oauth.ensure_fresh_token(path, config.host)
         if refreshed and token and not oauth.apply_token_to_client(client, token):
-            _honcho_client_slot.reset()
+            _honcho_client_cache.pop(cache_key, None)
     except Exception:
         logger.warning("Honcho OAuth cached refresh failed", exc_info=True)
 
 
 def get_honcho_client(config: HonchoClientConfig | None = None) -> Honcho:
-    """Get or create the Honcho client singleton.
+    """Get or create the Honcho client for one immutable profile context.
 
     When no config is provided, attempts to load ~/.honcho/config.json
     first, falling back to environment variables.
 
-    Thread-safe: the client is built exactly once even under concurrent
-    first calls (double-checked locking via ``SingletonSlot``), so racing
-    threads can't each construct a client and leak the loser's connection.
+    Cache lookup and construction are synchronized and keyed by resolved
+    root/profile/host, so concurrent profile contexts cannot cross-return.
     """
-    global _cached_host, _cached_timeout
-    active_host = resolve_active_host()
-    requested_host = (
-        _validate_profile_host(config.host)
-        if config is not None
-        else active_host
-    )
-    cached = _honcho_client_slot.peek()
-    if cached is not None and _cached_host != requested_host:
-        _honcho_client_slot.reset()
-        _cached_host = None
-        _cached_timeout = None
-        cached = None
-    if cached is not None:
-        # Detect timeout config changes in long-lived processes (gateway,
-        # dashboard).  If the user changed the timeout after the client was
-        # built, rebuild with the new value.
-        new_timeout = _resolve_timeout_from_sources(config)
-        if new_timeout != _cached_timeout:
-            _honcho_client_slot.reset()
-            _cached_host = None
-            _cached_timeout = None
-            cached = None
-        else:
-            _refresh_cached_oauth(cached, config)
-            return cached
-
     if config is None:
-        config = HonchoClientConfig.from_global_config()
+        context = resolve_profile_context()
+        config = HonchoClientConfig.from_global_config(context=context)
+    elif config.profile_context is not None:
+        context = config.profile_context
+        _validate_profile_host(config.host, context.profile)
+        if config.host != context.host:
+            raise ValueError(
+                f"Honcho host {config.host!r} does not match context host "
+                f"{context.host!r}"
+            )
+    else:
+        # Hand-built configs remain strict to the current runtime profile.
+        context = resolve_profile_context()
+        _validate_profile_host(config.host, context.profile)
 
-    # Refresh a near-expiry OAuth grant before the first build so the client
-    # starts with a live access token rather than 401ing an hour in.
-    _apply_fresh_oauth_token(config)
+    cache_key = context.cache_key
+    new_timeout = _resolve_timeout_from_sources(config)
 
     if not config.api_key and not config.base_url:
         raise ValueError(
@@ -1041,8 +1160,7 @@ def get_honcho_client(config: HonchoClientConfig | None = None) -> Honcho:
             "For local instances, set HONCHO_BASE_URL instead."
         )
 
-    # Build inside the singleton factory so racing callers share one client.
-    def _build() -> "Honcho":
+    def _build() -> tuple["Honcho", float]:
         # Lazy dependency failures fall through to the canonical import error.
         try:
             from tools.lazy_deps import FeatureUnavailable, ensure as _lazy_ensure
@@ -1135,18 +1253,28 @@ def get_honcho_client(config: HonchoClientConfig | None = None) -> Honcho:
         if resolved_timeout is not None:
             kwargs["timeout"] = resolved_timeout
 
-        global _cached_host, _cached_timeout
-        _cached_host = config.host
-        _cached_timeout = resolved_timeout
-        return Honcho(**kwargs)
+        return Honcho(**kwargs), resolved_timeout
 
-    return _honcho_client_slot.get(_build)
+    with _honcho_client_cache_lock:
+        cached = _honcho_client_cache.get(cache_key)
+        if cached is not None and cached[1] == new_timeout:
+            _refresh_cached_oauth(cached[0], config, cache_key)
+            refreshed = _honcho_client_cache.get(cache_key)
+            if refreshed is not None:
+                return refreshed[0]
+        elif cached is not None:
+            _honcho_client_cache.pop(cache_key, None)
+
+        # Refresh before building so a new client starts with a live token.
+        _apply_fresh_oauth_token(config)
+        client, resolved_timeout = _build()
+        _honcho_client_cache[cache_key] = (client, resolved_timeout)
+        return client
 
 
 def reset_honcho_client() -> None:
-    """Reset the Honcho client singleton (useful for testing)."""
-    global _cached_host, _cached_timeout, _honcho_json_timeout_memo
-    _honcho_client_slot.reset()
-    _cached_host = None
-    _cached_timeout = None
+    """Reset every cached Honcho client (useful for testing)."""
+    global _honcho_json_timeout_memo
+    with _honcho_client_cache_lock:
+        _honcho_client_cache.clear()
     _honcho_json_timeout_memo = (None, None)

@@ -4,7 +4,9 @@ import importlib.util
 import json
 import os
 import sys
+import threading
 import types
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -14,6 +16,7 @@ import pytest
 
 from plugins.memory.honcho.client import (
     HonchoClientConfig,
+    HonchoProfileContext,
     get_honcho_client,
     profile_host_key,
     reset_honcho_client,
@@ -244,22 +247,40 @@ class TestResolveActiveHost:
         assert profile_host_key("default") == "hermes"
 
 
-    def test_explicit_env_var_wins(self):
+    def test_explicit_env_var_wins(self, tmp_path):
+        context = HonchoProfileContext.for_profile(
+            "coder", tmp_path / "profiles" / "coder"
+        )
         with patch.dict(os.environ, {"HERMES_HONCHO_HOST": "hermes_coder"}), \
-             patch("hermes_cli.profiles.get_active_profile_name", return_value="coder"):
+             patch(
+                 "plugins.memory.honcho.client.resolve_profile_context",
+                 return_value=context,
+             ):
             assert resolve_active_host() == "hermes_coder"
 
     @pytest.mark.parametrize("override", ["hermes_alina", "hermes_unknown"])
-    def test_foreign_or_unknown_env_host_fails_closed(self, override):
+    def test_foreign_or_unknown_env_host_fails_closed(self, override, tmp_path):
+        context = HonchoProfileContext.for_profile(
+            "grace", tmp_path / "profiles" / "grace"
+        )
         with patch.dict(os.environ, {"HERMES_HONCHO_HOST": override}), \
-             patch("hermes_cli.profiles.get_active_profile_name", return_value="grace"):
+             patch(
+                 "plugins.memory.honcho.client.resolve_profile_context",
+                 return_value=context,
+             ):
             with pytest.raises(ValueError, match="not allowed for profile 'grace'"):
                 resolve_active_host()
 
-    def test_profile_name_derives_host(self):
+    def test_profile_name_derives_host(self, tmp_path):
+        context = HonchoProfileContext.for_profile(
+            "coder", tmp_path / "profiles" / "coder"
+        )
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("HERMES_HONCHO_HOST", None)
-            with patch("hermes_cli.profiles.get_active_profile_name", return_value="coder"):
+            with patch(
+                "plugins.memory.honcho.client.resolve_profile_context",
+                return_value=context,
+            ):
                 assert resolve_active_host() == "hermes_coder"
 
     def test_default_host_does_not_override_named_profile(self, tmp_path):
@@ -272,7 +293,13 @@ class TestResolveActiveHost:
 
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("HERMES_HONCHO_HOST", None)
-            with patch("hermes_cli.profiles.get_active_profile_name", return_value="coder"), \
+            context = HonchoProfileContext.for_profile(
+                "coder", tmp_path / "profiles" / "coder"
+            )
+            with patch(
+                "plugins.memory.honcho.client.resolve_profile_context",
+                return_value=context,
+            ), \
                  patch("plugins.memory.honcho.client.resolve_config_path", return_value=config_file):
                 assert resolve_active_host() == "hermes_coder"
 
@@ -330,10 +357,16 @@ class TestResolveActiveHost:
 
 
 class TestProfileScopedConfig:
-    def test_from_env_uses_profile_host(self):
+    def test_from_env_uses_profile_host(self, tmp_path):
+        context = HonchoProfileContext.for_profile(
+            "coder", tmp_path / "profiles" / "coder"
+        )
         with patch.dict(os.environ, {"HONCHO_API_KEY": "key"}), \
              patch("hermes_cli.profiles.get_active_profile_name", return_value="coder"):
-            config = HonchoClientConfig.from_env(host="hermes_coder")
+            config = HonchoClientConfig.from_env(
+                host="hermes_coder",
+                context=context,
+            )
         assert config.host == "hermes_coder"
         assert config.workspace_id == "hermes"  # shared workspace
         assert config.ai_peer == "hermes_coder"
@@ -357,10 +390,14 @@ class TestProfileScopedConfig:
                 },
             },
         }))
-        with patch("hermes_cli.profiles.get_active_profile_name", return_value="coder"):
-            config = HonchoClientConfig.from_global_config(
-                host="hermes_coder", config_path=config_file,
-            )
+        context = HonchoProfileContext.for_profile(
+            "coder", tmp_path / "profiles" / "coder"
+        )
+        config = HonchoClientConfig.from_global_config(
+            host="hermes_coder",
+            config_path=config_file,
+            context=context,
+        )
         assert config.host == "hermes_coder"
         assert config.workspace_id == "coder-ws"
         assert config.ai_peer == "hermes_coder"
@@ -369,11 +406,15 @@ class TestProfileScopedConfig:
     def test_from_global_config_rejects_foreign_explicit_host(self, tmp_path):
         config_file = tmp_path / "config.json"
         config_file.write_text(json.dumps({"apiKey": "neutral-key"}))
-        with patch("hermes_cli.profiles.get_active_profile_name", return_value="grace"):
-            with pytest.raises(ValueError, match="not allowed for profile 'grace'"):
-                HonchoClientConfig.from_global_config(
-                    host="hermes_alina", config_path=config_file,
-                )
+        context = HonchoProfileContext.for_profile(
+            "grace", tmp_path / "profiles" / "grace"
+        )
+        with pytest.raises(ValueError, match="not allowed for profile 'grace'"):
+            HonchoClientConfig.from_global_config(
+                host="hermes_alina",
+                config_path=config_file,
+                context=context,
+            )
 
     def test_custom_root_rejects_configured_legacy_explicit_host(
         self, tmp_path, monkeypatch,
@@ -403,12 +444,17 @@ class TestProfileScopedConfig:
                 "hermes_dreamer": {"peerName": "dreamer-user"},
             },
         }))
-        with patch("plugins.memory.honcho.client.resolve_active_host", return_value="hermes_dreamer"):
-            config = HonchoClientConfig.from_global_config(config_path=config_file)
+        context = HonchoProfileContext.for_profile(
+            "dreamer", tmp_path / "profiles" / "dreamer"
+        )
+        config = HonchoClientConfig.from_global_config(
+            config_path=config_file,
+            context=context,
+        )
         assert config.host == "hermes_dreamer"
         assert config.peer_name == "dreamer-user"
 
-    def test_from_global_config_reads_legacy_dot_profile_host_block(self, tmp_path):
+    def test_from_global_config_does_not_authorize_legacy_dot_host_block(self, tmp_path):
         config_file = tmp_path / "config.json"
         config_file.write_text(json.dumps({
             "apiKey": "key",
@@ -416,13 +462,16 @@ class TestProfileScopedConfig:
                 "hermes.dreamer": {"peerName": "dreamer-user"},
             },
         }))
-        with patch("hermes_cli.profiles.get_active_profile_name", return_value="dreamer"):
-            config = HonchoClientConfig.from_global_config(
-                host="hermes_dreamer",
-                config_path=config_file,
-            )
+        context = HonchoProfileContext.for_profile(
+            "dreamer", tmp_path / "profiles" / "dreamer"
+        )
+        config = HonchoClientConfig.from_global_config(
+            host="hermes_dreamer",
+            config_path=config_file,
+            context=context,
+        )
         assert config.host == "hermes_dreamer"
-        assert config.peer_name == "dreamer-user"
+        assert config.peer_name is None
         assert config.workspace_id == "hermes_dreamer"
 
 
@@ -477,14 +526,128 @@ class TestGetHonchoClient:
         not importlib.util.find_spec("honcho"),
         reason="honcho SDK not installed"
     )
+    def test_concurrent_profile_contexts_never_cross_return(
+        self, tmp_path, monkeypatch,
+    ):
+        from plugins.memory.honcho.client import HonchoProfileContext
+
+        configs = {}
+        expected_clients = {}
+        for profile in ("alpha", "beta"):
+            root = tmp_path / "profiles" / profile
+            root.mkdir(parents=True)
+            path = root / "honcho.json"
+            path.write_text(json.dumps({
+                "apiKey": "neutral-key",
+                "hosts": {
+                    f"hermes_{profile}": {
+                        "workspace": f"workspace-{profile}",
+                        "peerName": f"owner-{profile}",
+                        "aiPeer": f"ai-{profile}",
+                    }
+                },
+            }))
+            context = HonchoProfileContext.for_profile(profile, root)
+            configs[profile] = HonchoClientConfig.from_global_config(context=context)
+            expected_clients[profile] = MagicMock(name=f"{profile}-client")
+
+        start = threading.Barrier(3)
+
+        def build_client(**kwargs):
+            profile = kwargs["workspace_id"].removeprefix("workspace-")
+            return expected_clients[profile]
+
+        def acquire(profile):
+            start.wait()
+            return get_honcho_client(configs[profile])
+
+        monkeypatch.setenv("HERMES_HONCHO_HOST", "hermes_beta")
+        with patch(
+            "hermes_cli.profiles.get_active_profile_name",
+            return_value="beta",
+        ), patch("honcho.Honcho", side_effect=build_client) as sdk, ThreadPoolExecutor(
+            max_workers=2
+        ) as pool:
+            futures = {
+                profile: pool.submit(acquire, profile)
+                for profile in ("alpha", "beta")
+            }
+            start.wait()
+            results = {
+                profile: future.result(timeout=5)
+                for profile, future in futures.items()
+            }
+
+        assert results == expected_clients
+        assert sdk.call_count == 2
+
+    @pytest.mark.skipif(
+        not importlib.util.find_spec("honcho"),
+        reason="honcho SDK not installed"
+    )
+    def test_concurrent_custom_roots_have_distinct_cache_identity(
+        self, tmp_path,
+    ):
+        from plugins.memory.honcho.client import HonchoProfileContext
+
+        configs = {}
+        expected_clients = {}
+        for name in ("one", "two"):
+            root = tmp_path / name
+            root.mkdir()
+            (root / "honcho.json").write_text(json.dumps({
+                "apiKey": "neutral-key",
+                "hosts": {
+                    "hermes": {
+                        "workspace": f"workspace-{name}",
+                        "peerName": f"owner-{name}",
+                        "aiPeer": f"ai-{name}",
+                    }
+                },
+            }))
+            context = HonchoProfileContext.for_profile("custom", root)
+            configs[name] = HonchoClientConfig.from_global_config(context=context)
+            expected_clients[name] = MagicMock(name=f"{name}-client")
+
+        start = threading.Barrier(3)
+
+        def build_client(**kwargs):
+            name = kwargs["workspace_id"].removeprefix("workspace-")
+            return expected_clients[name]
+
+        def acquire(name):
+            start.wait()
+            return get_honcho_client(configs[name])
+
+        with patch("honcho.Honcho", side_effect=build_client) as sdk, ThreadPoolExecutor(
+            max_workers=2
+        ) as pool:
+            futures = {
+                name: pool.submit(acquire, name)
+                for name in ("one", "two")
+            }
+            start.wait()
+            results = {
+                name: future.result(timeout=5)
+                for name, future in futures.items()
+            }
+
+        assert results == expected_clients
+        assert sdk.call_count == 2
+
+    @pytest.mark.skipif(
+        not importlib.util.find_spec("honcho"),
+        reason="honcho SDK not installed"
+    )
     def test_cached_client_rebuilds_after_active_profile_switch(
         self, tmp_path, monkeypatch,
     ):
         current = {"profile": "alpha"}
+        contexts = {}
         config_paths = {}
         for profile in ("alpha", "beta"):
-            path = tmp_path / profile / "honcho.json"
-            path.parent.mkdir()
+            path = tmp_path / "profiles" / profile / "honcho.json"
+            path.parent.mkdir(parents=True)
             path.write_text(json.dumps({
                 "apiKey": "neutral-key",
                 "hosts": {
@@ -496,23 +659,24 @@ class TestGetHonchoClient:
                 },
             }))
             config_paths[profile] = path
+            contexts[profile] = HonchoProfileContext.for_profile(
+                profile, path.parent
+            )
         monkeypatch.delenv("HERMES_HONCHO_HOST", raising=False)
         first_client = MagicMock(name="alpha-client")
         second_client = MagicMock(name="beta-client")
 
         with patch(
-            "hermes_cli.profiles.get_active_profile_name",
-            side_effect=lambda: current["profile"],
-        ), patch(
-            "plugins.memory.honcho.client.resolve_config_path",
-            side_effect=lambda: config_paths[current["profile"]],
-        ), patch(
             "honcho.Honcho",
             side_effect=[first_client, second_client],
         ) as sdk:
-            first = get_honcho_client()
+            first = get_honcho_client(HonchoClientConfig.from_global_config(
+                context=contexts[current["profile"]],
+            ))
             current["profile"] = "beta"
-            second = get_honcho_client()
+            second = get_honcho_client(HonchoClientConfig.from_global_config(
+                context=contexts[current["profile"]],
+            ))
 
         assert first is first_client
         assert second is second_client
@@ -524,10 +688,14 @@ class TestGetHonchoClient:
         not importlib.util.find_spec("honcho"),
         reason="honcho SDK not installed"
     )
-    def test_cached_client_rejects_later_foreign_host_override(
+    def test_explicit_context_ignores_later_process_host_override(
         self, tmp_path, monkeypatch,
     ):
-        config_file = tmp_path / "honcho.json"
+        from plugins.memory.honcho.client import HonchoProfileContext
+
+        root = tmp_path / "profiles" / "alpha"
+        root.mkdir(parents=True)
+        config_file = root / "honcho.json"
         config_file.write_text(json.dumps({
             "apiKey": "neutral-key",
             "hosts": {
@@ -540,19 +708,13 @@ class TestGetHonchoClient:
         }))
         monkeypatch.delenv("HERMES_HONCHO_HOST", raising=False)
         cached_client = MagicMock(name="alpha-client")
+        context = HonchoProfileContext.for_profile("alpha", root)
 
-        with patch(
-            "hermes_cli.profiles.get_active_profile_name",
-            return_value="alpha",
-        ), patch(
-            "plugins.memory.honcho.client.resolve_config_path",
-            return_value=config_file,
-        ), patch("honcho.Honcho", return_value=cached_client) as sdk:
-            config = HonchoClientConfig.from_global_config()
+        with patch("honcho.Honcho", return_value=cached_client) as sdk:
+            config = HonchoClientConfig.from_global_config(context=context)
             assert get_honcho_client(config) is cached_client
             monkeypatch.setenv("HERMES_HONCHO_HOST", "hermes_beta")
-            with pytest.raises(ValueError, match="not allowed for profile 'alpha'"):
-                get_honcho_client(config)
+            assert get_honcho_client(config) is cached_client
 
         sdk.assert_called_once()
 
@@ -752,14 +914,11 @@ class TestResetHonchoClient:
     def test_reset_clears_singleton(self):
         import plugins.memory.honcho.client as mod
 
-        # Seed the cached client through the slot's public surface, then
-        # verify reset_honcho_client() clears it. (The client is cached in
-        # mod._honcho_client_slot, a thread-safe SingletonSlot, not a bare
-        # module global anymore — see #24759.)
-        mod._honcho_client_slot.get(lambda: MagicMock())
-        assert mod._honcho_client_slot.peek() is not None
+        cache_key = ("/synthetic", "default", "hermes")
+        mod._honcho_client_cache[cache_key] = (MagicMock(), 30.0)
+        assert mod._honcho_client_cache
         reset_honcho_client()
-        assert mod._honcho_client_slot.peek() is None
+        assert not mod._honcho_client_cache
 
 
 class TestDialecticDepthParsing:

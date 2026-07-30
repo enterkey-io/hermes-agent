@@ -23,7 +23,7 @@ from unittest.mock import MagicMock
 import pytest
 
 
-from plugins.memory.honcho.client import HonchoClientConfig
+from plugins.memory.honcho.client import HonchoClientConfig, HonchoProfileContext
 from plugins.memory.honcho.session import HonchoSessionManager
 
 
@@ -735,14 +735,15 @@ class TestProfilePeerUniqueness:
                 },
             },
         }))
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "isolated"))
-        monkeypatch.setattr(
-            "plugins.memory.honcho.client._active_profile_name",
-            lambda: "partner",
+        context = HonchoProfileContext.for_profile(
+            "partner",
+            tmp_path / "profiles" / "partner",
         )
 
         cfg = HonchoClientConfig.from_global_config(
-            host="hermes_partner", config_path=config_file,
+            host="hermes_partner",
+            config_path=config_file,
+            context=context,
         )
         assert cfg.peer_name == "partner-user"
         assert cfg.pin_peer_name is True
