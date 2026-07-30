@@ -641,6 +641,7 @@ class TestRuntimeCandidateDependencies:
         restore_calls = [call for call in calls if call[0][1:3] == ["pip", "install"]]
         assert len(restore_calls) == 1
         assert restore_calls[0][1]["input"] == requirements
+        assert "--no-deps" in restore_calls[0][0]
         assert "--python" in restore_calls[0][0]
         assert str(candidate / "bin" / "python") in restore_calls[0][0]
 

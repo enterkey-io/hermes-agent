@@ -818,6 +818,7 @@ def _stage_candidate_venv(
             str(_venv_python(candidate)),
             "--requirements",
             "-",
+            "--no-deps",
             "--no-python-downloads",
             "--no-config",
         ],
