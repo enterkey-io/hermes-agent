@@ -293,6 +293,7 @@ _LEGACY_HOME_TARGET_ENV_VARS = {
 
 from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_runs, claim_dispatch, heartbeat_run_claim
 from cron.executions import (
+    _PrivateStatePermissionError,
     _open_private_cron_lock,
     create_execution,
     finish_execution,
@@ -4894,6 +4895,10 @@ def tick(
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         elif msvcrt:
             msvcrt.locking(lock_fd.fileno(), msvcrt.LK_NBLCK, 1)
+    except _PrivateStatePermissionError:
+        if lock_fd is not None:
+            lock_fd.close()
+        raise
     except (OSError, IOError):
         logger.debug("Tick skipped — another instance holds the lock")
         if lock_fd is not None:

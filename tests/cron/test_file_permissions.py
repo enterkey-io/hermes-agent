@@ -272,6 +272,137 @@ class TestCronFilePermissions(unittest.TestCase):
 
         self.assertEqual(stat.S_IMODE(lock_file.stat().st_mode), 0o600)
 
+    def test_jobs_lock_rejects_exact_target_symlink_without_mutation(self):
+        import cron.jobs as jobs
+        from cron.executions import _PrivateStatePermissionError
+
+        cron_dir = Path(self.tmpdir) / "cron"
+        cron_dir.mkdir()
+        outside = Path(self.tmpdir) / "outside-jobs-lock"
+        outside.write_bytes(b"outside jobs lock")
+        outside.chmod(0o664)
+        jobs_lock = cron_dir / ".jobs.lock"
+        jobs_lock.symlink_to(outside)
+
+        with (
+            patch.object(jobs, "CRON_DIR", cron_dir),
+            patch.object(jobs, "JOBS_FILE", cron_dir / "jobs.json"),
+            patch.object(jobs, "OUTPUT_DIR", cron_dir / "output"),
+            self.assertRaises(_PrivateStatePermissionError),
+        ):
+            with jobs._jobs_lock():
+                self.fail("unsafe jobs lock must not enter the critical section")
+
+        self.assertTrue(jobs_lock.is_symlink())
+        self.assertEqual(outside.read_bytes(), b"outside jobs lock")
+        self.assertEqual(stat.S_IMODE(outside.stat().st_mode), 0o664)
+
+    def test_jobs_lock_rejects_ancestor_symlink_without_mutation(self):
+        import cron.jobs as jobs
+        from cron.executions import _PrivateStatePermissionError
+
+        real_cron_dir = Path(self.tmpdir) / "real-cron"
+        real_cron_dir.mkdir()
+        real_cron_dir.chmod(0o775)
+        marker = real_cron_dir / "marker"
+        marker.write_bytes(b"outside cron state")
+        marker.chmod(0o664)
+        linked_cron_dir = Path(self.tmpdir) / "linked-cron"
+        linked_cron_dir.symlink_to(real_cron_dir, target_is_directory=True)
+
+        with (
+            patch.object(jobs, "CRON_DIR", linked_cron_dir),
+            patch.object(jobs, "JOBS_FILE", linked_cron_dir / "jobs.json"),
+            patch.object(jobs, "OUTPUT_DIR", linked_cron_dir / "output"),
+            self.assertRaises(_PrivateStatePermissionError),
+        ):
+            with jobs._jobs_lock():
+                self.fail("unsafe jobs lock must not enter the critical section")
+
+        self.assertTrue(linked_cron_dir.is_symlink())
+        self.assertEqual(stat.S_IMODE(real_cron_dir.stat().st_mode), 0o775)
+        self.assertEqual(marker.read_bytes(), b"outside cron state")
+        self.assertEqual(stat.S_IMODE(marker.stat().st_mode), 0o664)
+        self.assertFalse((real_cron_dir / "output").exists())
+
+    def test_tick_lock_rejects_exact_target_symlink_without_mutation(self):
+        import cron.scheduler as scheduler
+        from cron.executions import _PrivateStatePermissionError
+
+        cron_dir = Path(self.tmpdir) / "cron"
+        cron_dir.mkdir()
+        outside = Path(self.tmpdir) / "outside-tick-lock"
+        outside.write_bytes(b"outside tick lock")
+        outside.chmod(0o664)
+        tick_lock = cron_dir / ".tick.lock"
+        tick_lock.symlink_to(outside)
+
+        with (
+            patch.object(
+                scheduler,
+                "_get_lock_paths",
+                return_value=(cron_dir, tick_lock),
+            ),
+            self.assertRaises(_PrivateStatePermissionError),
+        ):
+            scheduler.tick(verbose=False)
+
+        self.assertTrue(tick_lock.is_symlink())
+        self.assertEqual(outside.read_bytes(), b"outside tick lock")
+        self.assertEqual(stat.S_IMODE(outside.stat().st_mode), 0o664)
+
+    def test_tick_lock_rejects_ancestor_symlink_without_mutation(self):
+        import cron.scheduler as scheduler
+        from cron.executions import _PrivateStatePermissionError
+
+        real_cron_dir = Path(self.tmpdir) / "real-cron"
+        real_cron_dir.mkdir()
+        real_cron_dir.chmod(0o775)
+        marker = real_cron_dir / "marker"
+        marker.write_bytes(b"outside cron state")
+        marker.chmod(0o664)
+        linked_cron_dir = Path(self.tmpdir) / "linked-cron"
+        linked_cron_dir.symlink_to(real_cron_dir, target_is_directory=True)
+        tick_lock = linked_cron_dir / ".tick.lock"
+
+        with (
+            patch.object(
+                scheduler,
+                "_get_lock_paths",
+                return_value=(linked_cron_dir, tick_lock),
+            ),
+            self.assertRaises(_PrivateStatePermissionError),
+        ):
+            scheduler.tick(verbose=False)
+
+        self.assertTrue(linked_cron_dir.is_symlink())
+        self.assertEqual(stat.S_IMODE(real_cron_dir.stat().st_mode), 0o775)
+        self.assertEqual(marker.read_bytes(), b"outside cron state")
+        self.assertEqual(stat.S_IMODE(marker.stat().st_mode), 0o664)
+        self.assertFalse((real_cron_dir / ".tick.lock").exists())
+
+    def test_tick_lock_contention_still_returns_zero(self):
+        import cron.scheduler as scheduler
+
+        if scheduler.fcntl is None:
+            self.skipTest("fcntl lock contention is Unix-only")
+
+        cron_dir = Path(self.tmpdir) / "cron"
+        cron_dir.mkdir()
+        tick_lock = cron_dir / ".tick.lock"
+        holder_fd = os.open(tick_lock, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            scheduler.fcntl.flock(holder_fd, scheduler.fcntl.LOCK_EX)
+            with patch.object(
+                scheduler,
+                "_get_lock_paths",
+                return_value=(cron_dir, tick_lock),
+            ):
+                self.assertEqual(scheduler.tick(verbose=False), 0)
+        finally:
+            scheduler.fcntl.flock(holder_fd, scheduler.fcntl.LOCK_UN)
+            os.close(holder_fd)
+
 
 class TestConfigFilePermissions(unittest.TestCase):
     """Verify config files get secure permissions."""

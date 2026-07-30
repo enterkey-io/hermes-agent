@@ -306,10 +306,12 @@ def _jobs_lock():
         _jobs_lock_state.load_stamp = None
         lock_fd = None
         try:
-            try:
-                ensure_dirs()
-                from cron.executions import _open_private_cron_lock
+            from cron.executions import (
+                _PrivateStatePermissionError,
+                _open_private_cron_lock,
+            )
 
+            try:
                 lock_fd = os.fdopen(
                     _open_private_cron_lock(_jobs_lock_file()),
                     "r+",
@@ -355,9 +357,11 @@ def _jobs_lock():
                             time.sleep(0.1)
                 elif msvcrt is not None:
                     getattr(msvcrt, "locking")(lock_fd.fileno(), getattr(msvcrt, "LK_LOCK"), 1)
+            except _PrivateStatePermissionError:
+                raise
             except (OSError, IOError) as e:
-                # Never let a locking failure take down cron writes — fall back to
-                # in-process-only protection (still held via _jobs_file_lock).
+                # Ordinary lock failures retain the historical in-process
+                # fallback. Unsafe private-state paths fail closed above.
                 logger.warning("jobs.json cross-process lock unavailable (%s); "
                                "proceeding with in-process lock only", e)
             try:
