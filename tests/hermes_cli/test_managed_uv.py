@@ -259,8 +259,6 @@ class TestEnsureUvWindowsSafe:
 
 class TestUpdateManagedUv:
 
-
-
     def test_fresh_stamp_skips_network_self_update_but_not_repair(self, tmp_path, monkeypatch):
         """A recent success stamp must skip `uv self update` entirely while the
         vulnerable-runtime repair probe still runs (CVE repair is never gated)."""
@@ -1103,4 +1101,3 @@ class TestVenvPythonUpdateBoundary:
         expected = Path("/opt/hermes/venv/Scripts/python.exe") \
             if sys.platform == "win32" else Path("/opt/hermes/venv/bin/python")
         assert _venv_python(Path("/opt/hermes/venv")) == expected
-
