@@ -167,10 +167,10 @@ def test_public_tick_filters_protected_profile_before_job_state_mutation(
     events = []
     monkeypatch.setattr(scheduler, "_hermes_home", protected_tool)
     monkeypatch.setattr(
-            scheduler,
-            "_get_lock_paths",
-            lambda: events.append("lock")
-            or (protected_tool / "locks", protected_tool / "locks" / ".tick.lock"),
+        scheduler,
+        "_get_lock_paths",
+        lambda: events.append("lock")
+        or (protected_tool / "cron", protected_tool / "cron" / ".tick.lock"),
     )
     monkeypatch.setattr(
         scheduler,
