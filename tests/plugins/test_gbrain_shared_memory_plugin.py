@@ -44,7 +44,8 @@ def test_format_context_is_source_labelled_and_bounded():
 
     assert "[shared]" in context
     assert "people/elliott" in context
-    assert "verify current operational truth in Craft" in context
+    assert "verify mutable operational truth in its owning source system" in context
+    assert "Craft" not in context
 
 
 def test_format_facts_ranks_relevant_shared_memory():
@@ -69,6 +70,8 @@ def test_format_facts_ranks_relevant_shared_memory():
 
     assert "morning workouts" in context
     assert "GBrain shared facts" in context
+    assert "verify mutable records in their owning source systems" in context
+    assert "Craft" not in context
     assert "blue notebook" not in context
 
 

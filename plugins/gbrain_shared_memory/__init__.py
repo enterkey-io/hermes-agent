@@ -92,7 +92,8 @@ def _format_context(result: Any) -> str:
     if len(lines) == 1:
         return ""
     lines.append(
-        "Treat source labels as provenance; verify current operational truth in Craft before acting."
+        "Treat source labels as provenance; verify mutable operational truth "
+        "in its owning source system before acting."
     )
     return "\n".join(lines)
 
@@ -145,7 +146,10 @@ def _format_facts(result: Any, query: str) -> str:
     if not selected:
         return ""
 
-    lines = ["GBrain shared facts (cross-agent memory; verify mutable records in Craft):"]
+    lines = [
+        "GBrain shared facts (cross-agent memory; verify mutable records in "
+        "their owning source systems):"
+    ]
     for row in selected:
         fact_id = row.get("id", "?")
         lines.append(f"- [shared fact {fact_id}] {row['fact']}")
