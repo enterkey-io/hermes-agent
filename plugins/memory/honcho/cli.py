@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
+import stat
 import sys
 from pathlib import Path
 
@@ -40,6 +42,239 @@ def _profile_name_from_host(host: str) -> str:
     return host
 
 
+_HONCHO_PEER_ID_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+def _validate_private_stat(
+    file_stat: os.stat_result,
+    path: Path,
+    *,
+    expected_mode: int,
+    directory: bool,
+) -> None:
+    expected_type = stat.S_ISDIR if directory else stat.S_ISREG
+    if not expected_type(file_stat.st_mode):
+        kind = "directory" if directory else "regular file"
+        raise ValueError(f"{path} is not a {kind}")
+    if hasattr(os, "getuid") and file_stat.st_uid != os.getuid():
+        raise PermissionError(f"{path} is not owned by the current user")
+    actual_mode = stat.S_IMODE(file_stat.st_mode)
+    if actual_mode != expected_mode:
+        raise PermissionError(
+            f"{path} has unsafe mode {oct(actual_mode)}; "
+            f"expected {oct(expected_mode)}"
+        )
+
+
+def _open_private_directory(path: Path) -> int:
+    """Open one owner-only directory without following symlinks."""
+    if path.is_symlink():
+        raise ValueError(f"{path} is a symlink")
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if os.name == "posix" and not nofollow:
+        raise RuntimeError("secure profile provisioning requires O_NOFOLLOW")
+    try:
+        descriptor = os.open(path, flags | nofollow)
+    except OSError as exc:
+        raise ValueError(f"cannot securely open profile directory {path}") from exc
+    try:
+        _validate_private_stat(
+            os.fstat(descriptor),
+            path,
+            expected_mode=0o700,
+            directory=True,
+        )
+    except Exception:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _read_private_shared_config(context: HonchoProfileContext) -> dict:
+    """Read the shared default honcho.json through an owner-only descriptor."""
+    shared_path = context.default_root / "honcho.json"
+    directory_fd = _open_private_directory(context.default_root)
+    descriptor = None
+    try:
+        if shared_path.is_symlink():
+            raise ValueError(f"{shared_path} is a symlink")
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(
+            shared_path.name,
+            flags,
+            dir_fd=directory_fd,
+        )
+        _validate_private_stat(
+            os.fstat(descriptor),
+            shared_path,
+            expected_mode=0o600,
+            directory=False,
+        )
+        with os.fdopen(descriptor, "r", encoding="utf-8") as source:
+            descriptor = None
+            raw = json.load(source)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{shared_path} is not valid JSON") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        os.close(directory_fd)
+    if not isinstance(raw, dict):
+        raise ValueError(f"{shared_path} must contain a JSON object")
+    return raw
+
+
+def _peer_belongs_to_profile(peer: object, profile: str, *, ai: bool) -> bool:
+    if not isinstance(peer, str) or not _HONCHO_PEER_ID_RE.fullmatch(peer):
+        return False
+    if ai:
+        return (
+            peer == profile
+            or peer.startswith(f"{profile}-")
+            or peer.startswith(f"{profile}_")
+        )
+    return re.search(
+        rf"(?:^|[-_]){re.escape(profile)}(?:$|[-_])",
+        peer,
+    ) is not None
+
+
+def _validate_shared_profile_block(
+    block: object,
+    *,
+    profile: str,
+    host: str,
+) -> dict:
+    """Validate a canonical shared block before bounded local provisioning."""
+    if not isinstance(block, dict):
+        raise ValueError(f"shared Honcho host {host!r} is not an object")
+    if block.get("workspace") != HOST:
+        raise ValueError(f"shared Honcho host {host!r} has a foreign workspace")
+
+    peer_name = block.get("peerName")
+    ai_peer = block.get("aiPeer")
+    if not _peer_belongs_to_profile(peer_name, profile, ai=False):
+        raise ValueError(f"shared Honcho host {host!r} has a foreign user peer")
+    if not _peer_belongs_to_profile(ai_peer, profile, ai=True):
+        raise ValueError(f"shared Honcho host {host!r} has a foreign AI peer")
+    if block.get("enabled") is not True:
+        raise ValueError(f"shared Honcho host {host!r} is not enabled")
+    if block.get("sessionStrategy") != "per-directory":
+        raise ValueError(f"shared Honcho host {host!r} has a noncanonical session strategy")
+    if block.get("sessionPeerPrefix") is not True:
+        raise ValueError(f"shared Honcho host {host!r} does not prefix sessions")
+    if block.get("pinUserPeer") is not False:
+        raise ValueError(f"shared Honcho host {host!r} pins the user peer")
+    if block.get("pinPeerName") not in (None, False):
+        raise ValueError(f"shared Honcho host {host!r} has a legacy peer pin")
+    if block.get("isolatePeerTools") is not True:
+        raise ValueError(f"shared Honcho host {host!r} does not isolate peer tools")
+    if block.get("runtimePeerPrefix") not in (None, ""):
+        raise ValueError(f"shared Honcho host {host!r} permits generated peers")
+
+    aliases = block.get("userPeerAliases")
+    if not isinstance(aliases, dict):
+        raise ValueError(f"shared Honcho host {host!r} has invalid peer aliases")
+    for runtime_id, target in aliases.items():
+        if not isinstance(runtime_id, str) or not runtime_id.strip():
+            raise ValueError(f"shared Honcho host {host!r} has an invalid alias key")
+        if target != peer_name:
+            raise ValueError(f"shared Honcho host {host!r} has a foreign peer alias")
+
+    return dict(block)
+
+
+def _validate_existing_local_config(
+    directory_fd: int,
+    local_path: Path,
+) -> bool:
+    """Return whether the local path exists, rejecting unsafe entries."""
+    try:
+        local_stat = os.stat(
+            local_path.name,
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        return False
+    if stat.S_ISLNK(local_stat.st_mode):
+        raise ValueError(f"{local_path} is a symlink")
+    _validate_private_stat(
+        local_stat,
+        local_path,
+        expected_mode=0o600,
+        directory=False,
+    )
+    return True
+
+
+def _atomic_create_profile_config(
+    context: HonchoProfileContext,
+    config: dict,
+) -> bool:
+    """Atomically create a bounded profile config without overwriting."""
+    local_path = context.root / "honcho.json"
+    directory_fd = _open_private_directory(context.root)
+    temporary_name = f".honcho-{secrets.token_hex(12)}.tmp"
+    temporary_created = False
+    try:
+        if _validate_existing_local_config(directory_fd, local_path):
+            return False
+
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        temporary_fd = os.open(
+            temporary_name,
+            flags,
+            0o600,
+            dir_fd=directory_fd,
+        )
+        temporary_created = True
+        with os.fdopen(temporary_fd, "w", encoding="utf-8") as destination:
+            json.dump(config, destination, indent=2)
+            destination.write("\n")
+            destination.flush()
+            os.fsync(destination.fileno())
+        os.link(
+            temporary_name,
+            local_path.name,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+        os.fsync(directory_fd)
+        return True
+    except FileExistsError:
+        if _validate_existing_local_config(directory_fd, local_path):
+            return False
+        raise
+    finally:
+        if temporary_created:
+            try:
+                os.unlink(temporary_name, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+        os.close(directory_fd)
+
+
+def _backfill_shared_profile_config(context: HonchoProfileContext) -> bool:
+    """Provision one validated canonical shared host into its profile root."""
+    shared = _read_private_shared_config(context)
+    hosts = shared.get("hosts")
+    if not isinstance(hosts, dict):
+        raise ValueError("shared Honcho config has no hosts object")
+    block = _validate_shared_profile_block(
+        hosts.get(context.host),
+        profile=context.profile,
+        host=context.host,
+    )
+    return _atomic_create_profile_config(
+        context,
+        {"hosts": {context.host: block}},
+    )
+
+
 def clone_honcho_for_profile(profile_name: str) -> bool:
     """Auto-clone Honcho config for a new profile from the default host block.
 
@@ -49,6 +284,8 @@ def clone_honcho_for_profile(profile_name: str) -> bool:
 
     Returns True if a host block was created, False if Honcho isn't configured.
     """
+    target_context = _target_profile_context(profile_name)
+    profile_name = target_context.profile
     cfg = _read_config()
     if not cfg:
         return False
@@ -61,9 +298,12 @@ def clone_honcho_for_profile(profile_name: str) -> bool:
     if not default_block and not has_key:
         return False
 
-    new_host = profile_host_key(profile_name)
+    new_host = target_context.host
     if new_host in hosts:
-        return False  # already exists
+        created = _backfill_shared_profile_config(target_context)
+        if created:
+            _ensure_peer_exists(new_host)
+        return created
 
     # Clone settings from default block, override identity fields.
     # Identity-mapping keys (pinUserPeer, userPeerAliases, runtimePeerPrefix)
@@ -108,7 +348,6 @@ def clone_honcho_for_profile(profile_name: str) -> bool:
 
     # Runtime reads are profile-local. Keep the shared inventory block for
     # status/compatibility, and provision a bounded target-local config.
-    target_context = _target_profile_context(profile_name)
     target_cfg = dict(cfg)
     target_cfg["hosts"] = {new_host: dict(new_block)}
     _write_config(target_cfg, target_context.root / "honcho.json")
@@ -295,6 +534,12 @@ def _target_profile_context(profile_name: str) -> HonchoProfileContext:
     validate_profile_name(profile)
     root = Path(resolve_profile_env(profile))
     default_root = Path(resolve_profile_env("default"))
+    for label, candidate in (
+        ("profile root", root),
+        ("default root", default_root),
+    ):
+        if candidate.is_symlink():
+            raise ValueError(f"{label} {candidate} is a symlink")
     return HonchoProfileContext.for_profile(
         profile,
         root,

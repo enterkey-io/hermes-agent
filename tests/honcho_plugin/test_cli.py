@@ -2,6 +2,7 @@
 
 from types import SimpleNamespace
 import json
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -535,6 +536,229 @@ class TestCloneHonchoForProfile:
         assert "runtimePeerPrefix" not in new_block
         assert "pinUserPeer" not in new_block
         assert "pinPeerName" not in new_block
+
+
+class TestSharedProfileBackfill:
+    def _setup(self, monkeypatch, tmp_path, *, block=None):
+        import plugins.memory.honcho.cli as honcho_cli
+
+        default_root = tmp_path / "default"
+        profiles_root = default_root / "profiles"
+        alpha_root = profiles_root / "alpha"
+        default_root.mkdir(mode=0o700)
+        profiles_root.mkdir(mode=0o700)
+        alpha_root.mkdir(mode=0o700)
+        os.chmod(default_root, 0o700)
+        os.chmod(profiles_root, 0o700)
+        os.chmod(alpha_root, 0o700)
+        (alpha_root / ".env").write_text("HONCHO_API_KEY=alpha-local-key\n")
+        os.chmod(alpha_root / ".env", 0o600)
+
+        canonical = block or {
+            "workspace": "hermes",
+            "peerName": "owner-alpha-private-v1",
+            "aiPeer": "alpha-private-v1",
+            "enabled": True,
+            "sessionStrategy": "per-directory",
+            "sessionPeerPrefix": True,
+            "pinUserPeer": False,
+            "isolatePeerTools": True,
+            "userPeerAliases": {
+                "runtime-owner-alpha": "owner-alpha-private-v1",
+            },
+        }
+        shared = {
+            "apiKey": "shared-key-must-not-be-copied",
+            "hosts": {
+                "hermes": {"workspace": "hermes"},
+                "hermes_alpha": canonical,
+                "hermes_beta": {
+                    "workspace": "hermes",
+                    "peerName": "owner-beta",
+                    "aiPeer": "beta",
+                },
+                "hermes.alpha": {
+                    "workspace": "legacy",
+                    "peerName": "legacy-owner",
+                    "aiPeer": "legacy-ai",
+                },
+            },
+        }
+        shared_path = default_root / "honcho.json"
+        shared_path.write_text(json.dumps(shared, indent=2))
+        os.chmod(shared_path, 0o600)
+
+        monkeypatch.setattr(honcho_cli, "_profile_override", "default")
+        monkeypatch.setattr(
+            "hermes_cli.profiles.resolve_profile_env",
+            lambda name: str(alpha_root if name == "alpha" else default_root),
+        )
+        peer_setup = MagicMock(return_value=True)
+        monkeypatch.setattr(honcho_cli, "_ensure_peer_exists", peer_setup)
+        return honcho_cli, default_root, alpha_root, shared_path, canonical, peer_setup
+
+    def test_sync_backfills_shared_only_canonical_block_once(
+        self, monkeypatch, tmp_path,
+    ):
+        from plugins.memory.honcho.client import (
+            HonchoClientConfig,
+            HonchoProfileContext,
+        )
+
+        (
+            honcho_cli,
+            default_root,
+            alpha_root,
+            shared_path,
+            canonical,
+            peer_setup,
+        ) = self._setup(monkeypatch, tmp_path)
+        shared_before = shared_path.read_bytes()
+        monkeypatch.setattr(
+            "hermes_cli.profiles.list_profiles",
+            lambda: [
+                SimpleNamespace(name="default"),
+                SimpleNamespace(name="alpha"),
+            ],
+        )
+
+        assert honcho_cli.sync_honcho_profiles_quiet() == 1
+
+        local_path = alpha_root / "honcho.json"
+        local_before = local_path.read_bytes()
+        assert json.loads(local_before) == {
+            "hosts": {"hermes_alpha": canonical},
+        }
+        assert local_path.stat().st_mode & 0o777 == 0o600
+        assert shared_path.read_bytes() == shared_before
+        context = HonchoProfileContext.for_profile(
+            "alpha",
+            alpha_root,
+            default_root=default_root,
+        )
+        runtime = HonchoClientConfig.from_global_config(context=context)
+        assert runtime.config_path == local_path
+        assert runtime.enabled is True
+        assert runtime.api_key == "alpha-local-key"
+        assert runtime.workspace_id == "hermes"
+        assert runtime.peer_name == "owner-alpha-private-v1"
+        assert runtime.ai_peer == "alpha-private-v1"
+        assert runtime.session_peer_prefix is True
+        assert runtime.isolate_peer_tools is True
+
+        assert honcho_cli.sync_honcho_profiles_quiet() == 0
+        assert local_path.read_bytes() == local_before
+        assert shared_path.read_bytes() == shared_before
+        peer_setup.assert_called_once_with("hermes_alpha")
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("workspace", "foreign-workspace"),
+            ("peerName", "owner-beta"),
+            ("aiPeer", "beta-private-v1"),
+            ("sessionPeerPrefix", False),
+            ("pinUserPeer", True),
+            ("isolatePeerTools", False),
+            (
+                "userPeerAliases",
+                {"runtime-owner-alpha": "owner-beta"},
+            ),
+        ],
+    )
+    def test_rejects_malformed_or_foreign_shared_block(
+        self, monkeypatch, tmp_path, field, value,
+    ):
+        canonical = {
+            "workspace": "hermes",
+            "peerName": "owner-alpha-private-v1",
+            "aiPeer": "alpha-private-v1",
+            "enabled": True,
+            "sessionStrategy": "per-directory",
+            "sessionPeerPrefix": True,
+            "pinUserPeer": False,
+            "isolatePeerTools": True,
+            "userPeerAliases": {
+                "runtime-owner-alpha": "owner-alpha-private-v1",
+            },
+        }
+        canonical[field] = value
+        honcho_cli, _, alpha_root, _, _, _ = self._setup(
+            monkeypatch,
+            tmp_path,
+            block=canonical,
+        )
+
+        with pytest.raises(ValueError):
+            honcho_cli.clone_honcho_for_profile("alpha")
+
+        assert not (alpha_root / "honcho.json").exists()
+
+    def test_rejects_shared_config_symlink(self, monkeypatch, tmp_path):
+        honcho_cli, _, alpha_root, shared_path, _, _ = self._setup(
+            monkeypatch,
+            tmp_path,
+        )
+        real_shared = tmp_path / "shared-real.json"
+        shared_path.replace(real_shared)
+        shared_path.symlink_to(real_shared)
+
+        with pytest.raises(ValueError, match="symlink"):
+            honcho_cli.clone_honcho_for_profile("alpha")
+
+        assert not (alpha_root / "honcho.json").exists()
+
+    def test_rejects_local_config_symlink_without_touching_target(
+        self, monkeypatch, tmp_path,
+    ):
+        honcho_cli, _, alpha_root, _, _, _ = self._setup(
+            monkeypatch,
+            tmp_path,
+        )
+        outside = tmp_path / "outside.json"
+        outside.write_text('{"sentinel": true}')
+        os.chmod(outside, 0o600)
+        (alpha_root / "honcho.json").symlink_to(outside)
+        before = outside.read_bytes()
+
+        with pytest.raises(ValueError, match="symlink"):
+            honcho_cli.clone_honcho_for_profile("alpha")
+
+        assert outside.read_bytes() == before
+
+    def test_rejects_symlinked_profile_root(self, monkeypatch, tmp_path):
+        honcho_cli, default_root, alpha_root, _, _, _ = self._setup(
+            monkeypatch,
+            tmp_path,
+        )
+        real_alpha = tmp_path / "real-alpha"
+        alpha_root.replace(real_alpha)
+        alpha_root.symlink_to(real_alpha, target_is_directory=True)
+        monkeypatch.setattr(
+            "hermes_cli.profiles.resolve_profile_env",
+            lambda name: str(alpha_root if name == "alpha" else default_root),
+        )
+
+        with pytest.raises(ValueError, match="symlink"):
+            honcho_cli.clone_honcho_for_profile("alpha")
+
+        assert not (real_alpha / "honcho.json").exists()
+
+    @pytest.mark.parametrize("unsafe_target", ["shared", "profile"])
+    def test_rejects_unsafe_source_or_profile_mode(
+        self, monkeypatch, tmp_path, unsafe_target,
+    ):
+        honcho_cli, _, alpha_root, shared_path, _, _ = self._setup(
+            monkeypatch,
+            tmp_path,
+        )
+        unsafe_path = shared_path if unsafe_target == "shared" else alpha_root
+        os.chmod(unsafe_path, 0o644 if unsafe_target == "shared" else 0o755)
+
+        with pytest.raises(PermissionError, match="mode"):
+            honcho_cli.clone_honcho_for_profile("alpha")
+
+        assert not (alpha_root / "honcho.json").exists()
 
 
 class TestSetupWizardDeploymentShape:
