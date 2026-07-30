@@ -38,6 +38,7 @@ _OP_ITEMS = {
 }
 
 _NO_OP_FALLBACK = ContextVar("agent_photo_no_op_fallback", default=False)
+WRAPPER_CONTRACT = "hermes-agent-photo/no-op-fallback/v1"
 
 
 def _get_api_key(provider: str, *, allow_op_fallback: bool | None = None) -> str:
@@ -610,6 +611,11 @@ You just provide the scene (pose, outfit, location, lighting, expression).
         action='store_true',
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        '--wrapper-contract',
+        action='store_true',
+        help=argparse.SUPPRESS,
+    )
     return parser
 
 
@@ -635,6 +641,10 @@ def _output_path(profile_dir: Path, agent_name: str, scene: str, requested: str 
 def main(argv: list[str] | None = None, providers: dict | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.wrapper_contract:
+        print(WRAPPER_CONTRACT)
+        return 0
 
     if not args.preview_prompt and not args.approved:
         print(

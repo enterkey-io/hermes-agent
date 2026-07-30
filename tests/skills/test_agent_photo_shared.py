@@ -12,6 +12,7 @@ import pytest
 
 SKILL_DIR = Path(__file__).parents[2] / "skills" / "media" / "agent-photo"
 SCRIPTS_DIR = SKILL_DIR / "scripts"
+AUTHORIZED_WRAPPER = "/home/elliott/.local/bin/hermes-agent-photo"
 
 
 def _load_module(name: str, filename: str):
@@ -40,6 +41,39 @@ def generate():
 @pytest.fixture(scope="module")
 def prompt_profiles():
     return _load_module("shared_agent_photo_prompt_profiles", "prompt_profiles.py")
+
+
+def test_skill_instructions_require_authorized_wrapper_without_direct_bypass():
+    instructions = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+    normalized = instructions.lower()
+
+    assert AUTHORIZED_WRAPPER in instructions
+    assert "uv " not in normalized
+    assert "generate.py" not in normalized
+
+
+def test_generator_reports_no_op_fallback_wrapper_contract(
+    monkeypatch, capsys, generate
+):
+    monkeypatch.setattr(
+        generate,
+        "resolve_profile_dir",
+        lambda: pytest.fail("contract probe must not inspect a profile"),
+    )
+    monkeypatch.setattr(
+        generate,
+        "load_workspace_agent",
+        lambda: pytest.fail("contract probe must not load identity"),
+    )
+    for name in ("GEMINI_API_KEY", "NOVITA_API_KEY", "XAI_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+
+    result = generate.main(["--wrapper-contract", "compatibility-probe"])
+
+    assert result == 0
+    assert capsys.readouterr().out.strip() == (
+        "hermes-agent-photo/no-op-fallback/v1"
+    )
 
 
 def test_profile_root_prefers_hermes_home(monkeypatch, tmp_path, identity_parser):

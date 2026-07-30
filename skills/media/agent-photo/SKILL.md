@@ -6,7 +6,7 @@ author: Elliott Hermes
 license: MIT
 platforms: [linux]
 prerequisites:
-  commands: [uv]
+  commands: [hermes-agent-photo]
 metadata:
   hermes:
     tags: [media, image-generation, identity, hermes]
@@ -61,6 +61,10 @@ Use one provider per request. The script does not switch providers after failure
 
 ## Workflow
 
+The sole execution path for previews and paid generation is
+`/home/elliott/.local/bin/hermes-agent-photo`. Never invoke the underlying
+generator or a package runner directly.
+
 ### 1. Confirm authority
 
 The current message must explicitly ask for a new or edited photo. A general permission, old request, check-in schedule, or implied desire is not enough. Completion criterion: you can point to the current request that authorizes one paid generation call.
@@ -73,11 +77,8 @@ Read `references/photo-prompting-rules.md` when the scene is unusual, close-up, 
 
 ### 3. Preview without spending
 
-`SKILL_DIR` means the directory containing this file.
-
 ```bash
-uv run --with-requirements "$SKILL_DIR/requirements.txt" \
-  python "$SKILL_DIR/scripts/generate.py" \
+/home/elliott/.local/bin/hermes-agent-photo \
   --preview-prompt \
   "close portrait, looking into the lens, relaxed half-smile, leather jacket, warm window light"
 ```
@@ -87,8 +88,7 @@ Review the final prompt for contradictory poses, invented identity traits, repea
 ### 4. Generate once
 
 ```bash
-uv run --with-requirements "$SKILL_DIR/requirements.txt" \
-  python "$SKILL_DIR/scripts/generate.py" \
+/home/elliott/.local/bin/hermes-agent-photo \
   --approved \
   --model gemini \
   "close portrait, looking into the lens, relaxed half-smile, leather jacket, warm window light"
@@ -97,8 +97,7 @@ uv run --with-requirements "$SKILL_DIR/requirements.txt" \
 For an existing profile-local baseline or source image:
 
 ```bash
-uv run --with-requirements "$SKILL_DIR/requirements.txt" \
-  python "$SKILL_DIR/scripts/generate.py" \
+/home/elliott/.local/bin/hermes-agent-photo \
   --approved \
   --model grok \
   --source "$HERMES_HOME/baselines/full-body.jpg" \
