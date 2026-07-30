@@ -13,6 +13,7 @@ import stat
 import threading
 import uuid
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
 from hermes_constants import get_hermes_home
@@ -164,6 +165,55 @@ def _normalize_execution_store_permissions(
             directory=False,
             missing_ok=True,
         )
+
+
+def _open_private_cron_lock(lock_path: Path) -> int:
+    """Create or open a cron lock without following any path symlink."""
+    absolute_lock = Path(os.path.abspath(os.fspath(lock_path)))
+    if absolute_lock.name not in {".jobs.lock", ".tick.lock"}:
+        raise _PrivateStatePermissionError(
+            f"unexpected cron private lock path: {lock_path}"
+        )
+
+    # Keep the complete cron-store normalization contract in force before
+    # creating a previously missing lock file.
+    _normalize_execution_store_permissions(
+        absolute_lock.with_name("executions.db")
+    )
+    parent_fd = _open_execution_state_path(
+        absolute_lock.parent,
+        directory=True,
+    )
+    assert parent_fd is not None
+    flags = (
+        os.O_RDWR
+        | os.O_CREAT
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        fd = os.open(absolute_lock.name, flags, 0o600, dir_fd=parent_fd)
+    except OSError as exc:
+        raise _PrivateStatePermissionError(
+            f"cannot safely open cron private lock {lock_path}: {exc}"
+        ) from exc
+    finally:
+        os.close(parent_fd)
+
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise _PrivateStatePermissionError(
+                f"cron private lock has unexpected type: {lock_path}"
+            )
+        os.fchmod(fd, 0o600)
+        if stat.S_IMODE(os.fstat(fd).st_mode) != 0o600:
+            raise _PrivateStatePermissionError(
+                f"cron private lock {lock_path} is not mode 0o600"
+            )
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 def _connect() -> sqlite3.Connection:

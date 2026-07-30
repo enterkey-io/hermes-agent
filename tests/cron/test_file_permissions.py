@@ -104,6 +104,36 @@ class TestCronFilePermissions(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(outside.stat().st_mode), 0o664)
         self.assertTrue(tick_lock.is_symlink())
 
+    def _assert_execution_store_rejects_exact_sidecar_symlink(self, sidecar_name):
+        import cron.executions as executions
+
+        cron_dir = Path(self.tmpdir) / "cron"
+        cron_dir.mkdir(parents=True)
+        executions_db = cron_dir / "executions.db"
+        executions_db.write_bytes(b"sqlite contents")
+        outside = Path(self.tmpdir) / f"outside-{sidecar_name}"
+        outside.write_bytes(b"outside sidecar")
+        outside.chmod(0o664)
+        sidecar = cron_dir / sidecar_name
+        sidecar.symlink_to(outside)
+
+        with self.assertRaises(OSError):
+            executions._normalize_execution_store_permissions(executions_db)
+
+        self.assertTrue(sidecar.is_symlink())
+        self.assertEqual(outside.read_bytes(), b"outside sidecar")
+        self.assertEqual(stat.S_IMODE(outside.stat().st_mode), 0o664)
+
+    def test_execution_store_permissions_reject_exact_wal_symlink(self):
+        self._assert_execution_store_rejects_exact_sidecar_symlink(
+            "executions.db-wal"
+        )
+
+    def test_execution_store_permissions_reject_exact_shm_symlink(self):
+        self._assert_execution_store_rejects_exact_sidecar_symlink(
+            "executions.db-shm"
+        )
+
     def test_execution_store_rejects_ancestor_symlink(self):
         import cron.executions as executions
 
@@ -204,6 +234,43 @@ class TestCronFilePermissions(unittest.TestCase):
             job_dir = output_dir / "test-job"
             dir_mode = stat.S_IMODE(os.stat(job_dir).st_mode)
             self.assertEqual(dir_mode, 0o700)
+
+    def test_jobs_lock_is_created_0600_with_permissive_umask(self):
+        import cron.jobs as jobs
+
+        cron_dir = Path(self.tmpdir) / "cron"
+        output_dir = cron_dir / "output"
+        with (
+            patch.object(jobs, "CRON_DIR", cron_dir),
+            patch.object(jobs, "JOBS_FILE", cron_dir / "jobs.json"),
+            patch.object(jobs, "OUTPUT_DIR", output_dir),
+        ):
+            previous_umask = os.umask(0)
+            try:
+                with jobs._jobs_lock():
+                    pass
+            finally:
+                os.umask(previous_umask)
+
+        self.assertEqual(
+            stat.S_IMODE((cron_dir / ".jobs.lock").stat().st_mode), 0o600
+        )
+
+    def test_tick_lock_is_created_0600_with_permissive_umask(self):
+        import cron.scheduler as scheduler
+
+        cron_dir = Path(self.tmpdir) / "cron"
+        lock_file = cron_dir / ".tick.lock"
+        with patch.object(
+            scheduler, "_get_lock_paths", return_value=(cron_dir, lock_file)
+        ):
+            previous_umask = os.umask(0)
+            try:
+                self.assertEqual(scheduler.tick(verbose=False), 0)
+            finally:
+                os.umask(previous_umask)
+
+        self.assertEqual(stat.S_IMODE(lock_file.stat().st_mode), 0o600)
 
 
 class TestConfigFilePermissions(unittest.TestCase):

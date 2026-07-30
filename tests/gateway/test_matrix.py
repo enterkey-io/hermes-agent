@@ -317,6 +317,29 @@ class TestMatrixConfigLoading:
         assert stat.S_IMODE(outside.stat().st_mode) == 0o664
         assert crypto_db.is_symlink()
 
+    @pytest.mark.parametrize("sidecar_name", ("crypto.db-wal", "crypto.db-shm"))
+    def test_matrix_store_permissions_reject_exact_crypto_sidecar_symlink(
+        self, tmp_path, sidecar_name
+    ):
+        from plugins.platforms.matrix.adapter import _normalize_matrix_store_permissions
+
+        store_dir = tmp_path / "matrix" / "store"
+        store_dir.mkdir(parents=True)
+        crypto_db = store_dir / "crypto.db"
+        crypto_db.write_bytes(b"sqlite contents")
+        outside = tmp_path / f"outside-{sidecar_name}"
+        outside.write_bytes(b"outside sidecar")
+        outside.chmod(0o664)
+        sidecar = store_dir / sidecar_name
+        sidecar.symlink_to(outside)
+
+        with pytest.raises(OSError):
+            _normalize_matrix_store_permissions(store_dir, crypto_db)
+
+        assert sidecar.is_symlink()
+        assert outside.read_bytes() == b"outside sidecar"
+        assert stat.S_IMODE(outside.stat().st_mode) == 0o664
+
     def test_apply_env_overrides_with_access_token(self, monkeypatch):
         monkeypatch.setenv("MATRIX_ACCESS_TOKEN", "syt_abc123")
         monkeypatch.setenv("MATRIX_HOMESERVER", "https://matrix.example.org")

@@ -292,7 +292,12 @@ _LEGACY_HOME_TARGET_ENV_VARS = {
 }
 
 from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_runs, claim_dispatch, heartbeat_run_claim
-from cron.executions import create_execution, finish_execution, mark_execution_running
+from cron.executions import (
+    _open_private_cron_lock,
+    create_execution,
+    finish_execution,
+    mark_execution_running,
+)
 
 # Sentinel: when a cron agent has nothing new to report, it can start its
 # response with this marker to suppress delivery.  Output is still saved
@@ -4877,12 +4882,14 @@ def tick(
         Number of jobs executed (0 if another tick is already running)
     """
     lock_dir, lock_file = _get_lock_paths()
-    lock_dir.mkdir(parents=True, exist_ok=True)
-
     # Cross-platform file locking: fcntl on Unix, msvcrt on Windows
     lock_fd = None
     try:
-        lock_fd = open(lock_file, "w", encoding="utf-8")
+        lock_fd = os.fdopen(
+            _open_private_cron_lock(lock_file),
+            "r+",
+            encoding="utf-8",
+        )
         if fcntl:
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         elif msvcrt:

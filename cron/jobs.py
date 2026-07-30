@@ -308,7 +308,13 @@ def _jobs_lock():
         try:
             try:
                 ensure_dirs()
-                lock_fd = open(_jobs_lock_file(), "a+", encoding="utf-8")
+                from cron.executions import _open_private_cron_lock
+
+                lock_fd = os.fdopen(
+                    _open_private_cron_lock(_jobs_lock_file()),
+                    "r+",
+                    encoding="utf-8",
+                )
                 lock_fd.seek(0)
                 if fcntl is not None:
                     # Bounded acquisition (#60703): a plain blocking
