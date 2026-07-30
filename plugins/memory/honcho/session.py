@@ -582,6 +582,24 @@ class HonchoSessionManager:
 
         return self._session_key_fallback_peer_id(key)
 
+    def _resolve_honcho_session_id(self, key: str) -> str:
+        """Keep every remote session inside this profile's namespace."""
+        session_id = self._sanitize_id(key)
+        if (
+            not self._config
+            or not self._config.session_peer_prefix
+            or not getattr(self._config, "isolate_peer_tools", False)
+        ):
+            return session_id
+        peer_name = self._sanitize_id(str(self._config.peer_name or "").strip())
+        if (
+            not peer_name
+            or session_id == peer_name
+            or session_id.startswith(f"{peer_name}-")
+        ):
+            return session_id
+        return f"{peer_name}-{session_id}"
+
     def get_or_create(self, key: str) -> HonchoSession:
         """
         Get an existing session or create a new one.
@@ -611,7 +629,7 @@ class HonchoSessionManager:
         )
 
         # All expensive I/O outside the lock — Honcho's persistence is source of truth
-        honcho_session_id = self._sanitize_id(key)
+        honcho_session_id = self._resolve_honcho_session_id(key)
         user_peer = self._get_or_create_peer(user_peer_id)
         assistant_peer = self._get_or_create_peer(assistant_peer_id)
         honcho_session, existing_messages = self._get_or_create_honcho_session(

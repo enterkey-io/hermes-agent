@@ -135,6 +135,34 @@ class TestManagerCacheOps:
         assert s1_info["message_count"] == 1
 
 
+class TestProfileSessionIsolation:
+    def test_foreign_looking_session_key_is_prefixed_before_honcho_lookup(self):
+        config = HonchoClientConfig(
+            host="hermes_grace",
+            peer_name="elliott-grace-private-synthetic",
+            ai_peer="grace-private-synthetic",
+            session_peer_prefix=True,
+            isolate_peer_tools=True,
+            write_frequency="session",
+        )
+        honcho_client = MagicMock()
+        honcho_session = MagicMock()
+        honcho_session.context.return_value = SimpleNamespace(messages=[])
+        honcho_client.session.return_value = honcho_session
+        manager = HonchoSessionManager(honcho=honcho_client, config=config)
+
+        with patch.object(
+            HonchoSessionManager,
+            "honcho",
+            new_callable=lambda: property(lambda self: honcho_client),
+        ):
+            local = manager.get_or_create("xenia-foreign-session")
+
+        expected = "elliott-grace-private-synthetic-xenia-foreign-session"
+        assert local.honcho_session_id == expected
+        honcho_client.session.assert_called_once_with(expected)
+
+
 class TestPeerLookupHelpers:
     def _make_cached_manager(self):
         mgr = HonchoSessionManager()

@@ -171,11 +171,71 @@ class TestResolveConfigPath:
 
         monkeypatch.setattr(Path, "home", lambda: fake_home)
         monkeypatch.setenv("HERMES_HOME", str(profile_home))
+        monkeypatch.delenv("HERMES_HONCHO_HOST", raising=False)
 
         result = resolve_config_path()
 
         assert _get_default_hermes_home() == default_home
         assert result == default_cfg
+
+    def test_falls_back_to_global_without_hermes_home_env(self, tmp_path):
+        fake_home = tmp_path / "fakehome"
+        fake_home.mkdir()
+
+        with patch.dict(os.environ, {}, clear=False), \
+             patch.object(Path, "home", return_value=fake_home):
+            os.environ.pop("HERMES_HOME", None)
+            result = resolve_config_path()
+        assert result == fake_home / ".honcho" / "config.json"
+
+    def test_global_fallback_uses_home_at_call_time(self, tmp_path):
+        fake_home = tmp_path / "fakehome"
+        fake_home.mkdir()
+        hermes_home = tmp_path / "hermes"
+        hermes_home.mkdir()
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(hermes_home)}), \
+             patch.object(Path, "home", return_value=fake_home):
+            assert resolve_global_config_path() == fake_home / ".honcho" / "config.json"
+            assert resolve_config_path() == fake_home / ".honcho" / "config.json"
+
+    def test_from_global_config_uses_default_profile_fallback(self, tmp_path, monkeypatch):
+        # Profile mode: from_global_config() reads the default-profile honcho.json
+        # via the HOME-anchored helper, not Path.home() / ".hermes".
+        fake_home = tmp_path / "fakehome"
+        fake_home.mkdir()
+        default_home = fake_home / ".hermes"
+        profile_home = default_home / "profiles" / "work"
+        profile_home.mkdir(parents=True)
+        default_cfg = default_home / "honcho.json"
+        default_cfg.write_text(json.dumps({
+            "apiKey": "default-key",
+            "workspace": "default-ws",
+        }))
+
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+        monkeypatch.setenv("HERMES_HOME", str(profile_home))
+        monkeypatch.delenv("HERMES_HONCHO_HOST", raising=False)
+
+        config = HonchoClientConfig.from_global_config()
+
+        assert config.api_key == "default-key"
+        assert config.workspace_id == "default-ws"
+
+    def test_from_global_config_uses_local_path(self, tmp_path):
+        hermes_home = tmp_path / "hermes"
+        hermes_home.mkdir()
+        local_cfg = hermes_home / "honcho.json"
+        local_cfg.write_text(json.dumps({
+            "apiKey": "***",
+            "workspace": "local-ws",
+        }))
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(hermes_home)}), \
+             patch.object(Path, "home", return_value=tmp_path):
+            config = HonchoClientConfig.from_global_config()
+        assert config.api_key == "***"
+        assert config.workspace_id == "local-ws"
 
 
 class TestResolveActiveHost:
@@ -185,9 +245,70 @@ class TestResolveActiveHost:
 
 
     def test_explicit_env_var_wins(self):
-        with patch.dict(os.environ, {"HERMES_HONCHO_HOST": "hermes.coder"}):
-            assert resolve_active_host() == "hermes.coder"
+        with patch.dict(os.environ, {"HERMES_HONCHO_HOST": "hermes_coder"}), \
+             patch("hermes_cli.profiles.get_active_profile_name", return_value="coder"):
+            assert resolve_active_host() == "hermes_coder"
 
+    @pytest.mark.parametrize("override", ["hermes_alina", "hermes_unknown"])
+    def test_foreign_or_unknown_env_host_fails_closed(self, override):
+        with patch.dict(os.environ, {"HERMES_HONCHO_HOST": override}), \
+             patch("hermes_cli.profiles.get_active_profile_name", return_value="grace"):
+            with pytest.raises(ValueError, match="not allowed for profile 'grace'"):
+                resolve_active_host()
+
+    def test_profile_name_derives_host(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("HERMES_HONCHO_HOST", None)
+            with patch("hermes_cli.profiles.get_active_profile_name", return_value="coder"):
+                assert resolve_active_host() == "hermes_coder"
+
+    def test_default_host_does_not_override_named_profile(self, tmp_path):
+        """defaultHost is not applied before active-profile resolution."""
+        config_file = tmp_path / "honcho.json"
+        config_file.write_text(json.dumps({
+            "defaultHost": "local",
+            "hosts": {"local": {"workspace": "local-ws"}},
+        }))
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("HERMES_HONCHO_HOST", None)
+            with patch("hermes_cli.profiles.get_active_profile_name", return_value="coder"), \
+                 patch("plugins.memory.honcho.client.resolve_config_path", return_value=config_file):
+                assert resolve_active_host() == "hermes_coder"
+
+    def test_default_host_applies_to_default_profile_only(self, tmp_path):
+        """default profile remains on its canonical host despite defaultHost."""
+        config_file = tmp_path / "honcho.json"
+        config_file.write_text(json.dumps({
+            "defaultHost": "local",
+            "hosts": {"local": {"workspace": "local-ws"}},
+        }))
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("HERMES_HONCHO_HOST", None)
+            with patch("hermes_cli.profiles.get_active_profile_name", return_value="default"), \
+                 patch("plugins.memory.honcho.client.resolve_config_path", return_value=config_file):
+                assert resolve_active_host() == "hermes"
+
+    def test_default_profile_returns_hermes(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("HERMES_HONCHO_HOST", None)
+            with patch("hermes_cli.profiles.get_active_profile_name", return_value="default"), \
+                 patch(
+                     "plugins.memory.honcho.client.resolve_config_path",
+                     return_value=Path("/nonexistent/honcho.json"),
+                 ):
+                assert resolve_active_host() == "hermes"
+
+    def test_custom_profile_returns_hermes(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("HERMES_HONCHO_HOST", None)
+            with patch("hermes_cli.profiles.get_active_profile_name", return_value="custom"), \
+                 patch(
+                     "plugins.memory.honcho.client.resolve_config_path",
+                     return_value=Path("/nonexistent/honcho.json"),
+                 ):
+                assert resolve_active_host() == "hermes"
 
     def test_profiles_import_failure_falls_back(self):
         import sys
@@ -210,11 +331,79 @@ class TestResolveActiveHost:
 
 class TestProfileScopedConfig:
     def test_from_env_uses_profile_host(self):
-        with patch.dict(os.environ, {"HONCHO_API_KEY": "key"}):
+        with patch.dict(os.environ, {"HONCHO_API_KEY": "key"}), \
+             patch("hermes_cli.profiles.get_active_profile_name", return_value="coder"):
             config = HonchoClientConfig.from_env(host="hermes_coder")
         assert config.host == "hermes_coder"
         assert config.workspace_id == "hermes"  # shared workspace
         assert config.ai_peer == "hermes_coder"
+
+    def test_from_env_default_workspace_preserved_for_default_host(self):
+        with patch.dict(os.environ, {"HONCHO_API_KEY": "key"}):
+            config = HonchoClientConfig.from_env(host="hermes")
+        assert config.host == "hermes"
+        assert config.workspace_id == "hermes"
+
+    def test_from_global_config_reads_profile_host_block(self, tmp_path):
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({
+            "apiKey": "shared-key",
+            "hosts": {
+                "hermes": {"aiPeer": "hermes", "peerName": "alice"},
+                "hermes_coder": {
+                    "aiPeer": "hermes_coder",
+                    "peerName": "alice-coder",
+                    "workspace": "coder-ws",
+                },
+            },
+        }))
+        with patch("hermes_cli.profiles.get_active_profile_name", return_value="coder"):
+            config = HonchoClientConfig.from_global_config(
+                host="hermes_coder", config_path=config_file,
+            )
+        assert config.host == "hermes_coder"
+        assert config.workspace_id == "coder-ws"
+        assert config.ai_peer == "hermes_coder"
+        assert config.peer_name == "alice-coder"
+
+    def test_from_global_config_rejects_foreign_explicit_host(self, tmp_path):
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({"apiKey": "neutral-key"}))
+        with patch("hermes_cli.profiles.get_active_profile_name", return_value="grace"):
+            with pytest.raises(ValueError, match="not allowed for profile 'grace'"):
+                HonchoClientConfig.from_global_config(
+                    host="hermes_alina", config_path=config_file,
+                )
+
+    def test_from_global_config_auto_resolves_host(self, tmp_path):
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({
+            "apiKey": "key",
+            "hosts": {
+                "hermes_dreamer": {"peerName": "dreamer-user"},
+            },
+        }))
+        with patch("plugins.memory.honcho.client.resolve_active_host", return_value="hermes_dreamer"):
+            config = HonchoClientConfig.from_global_config(config_path=config_file)
+        assert config.host == "hermes_dreamer"
+        assert config.peer_name == "dreamer-user"
+
+    def test_from_global_config_reads_legacy_dot_profile_host_block(self, tmp_path):
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({
+            "apiKey": "key",
+            "hosts": {
+                "hermes.dreamer": {"peerName": "dreamer-user"},
+            },
+        }))
+        with patch("hermes_cli.profiles.get_active_profile_name", return_value="dreamer"):
+            config = HonchoClientConfig.from_global_config(
+                host="hermes_dreamer",
+                config_path=config_file,
+            )
+        assert config.host == "hermes_dreamer"
+        assert config.peer_name == "dreamer-user"
+        assert config.workspace_id == "hermes_dreamer"
 
 
 class TestObservationModeMigration:
@@ -519,10 +708,10 @@ class TestGetHonchoClientBaseUrlDoublePrefixFix:
         must not pass an empty/None api_key to the SDK for a no-auth local server."""
         config_file = tmp_path / "honcho.json"
         config_file.write_text(json.dumps({
-            "defaultHost": "local",
+            "defaultHost": "hermes",
             "baseUrl": "http://192.168.2.112:8000",
             "hosts": {
-                "local": {
+                "hermes": {
                     "workspace": "local-ws",
                     "aiPeer": "local-ai",
                     "apiKey": "",
@@ -535,7 +724,7 @@ class TestGetHonchoClientBaseUrlDoublePrefixFix:
              patch("plugins.memory.honcho.client.resolve_config_path", return_value=config_file):
             cfg = HonchoClientConfig.from_global_config(config_path=config_file)
 
-        assert cfg.host == "local"
+        assert cfg.host == "hermes"
         assert cfg.workspace_id == "local-ws"
         assert cfg.ai_peer == "local-ai"
         assert cfg.api_key is None
@@ -552,6 +741,84 @@ class TestGetHonchoClientBaseUrlDoublePrefixFix:
         assert mock_honcho.call_args.kwargs["api_key"] == "local"
         assert mock_honcho.call_args.kwargs["base_url"] == "http://192.168.2.112:8000"
 
+    def test_lan_default_host_explicit_host_key_preserved(self, tmp_path):
+        """A host-block local JWT still wins for LAN/VPN local URLs."""
+        config_file = tmp_path / "honcho.json"
+        config_file.write_text(json.dumps({
+            "defaultHost": "hermes",
+            "baseUrl": "http://192.168.2.112:8000",
+            "hosts": {
+                "hermes": {
+                    "workspace": "local-ws",
+                    "aiPeer": "local-ai",
+                    "apiKey": "local-jwt",
+                },
+            },
+        }))
+
+        with patch.dict(os.environ, {}, clear=True), \
+             patch("hermes_cli.profiles.get_active_profile_name", return_value="default"), \
+             patch("plugins.memory.honcho.client.resolve_config_path", return_value=config_file):
+            cfg = HonchoClientConfig.from_global_config(config_path=config_file)
+
+        fake_honcho = MagicMock(name="Honcho")
+        mock_honcho = MagicMock(return_value=fake_honcho)
+        fake_honcho_module = types.SimpleNamespace(Honcho=mock_honcho)
+        with patch.dict(sys.modules, {"honcho": fake_honcho_module}), \
+             patch("hermes_cli.config.load_config", return_value={}):
+            get_honcho_client(cfg)
+
+        mock_honcho.assert_called_once()
+        assert mock_honcho.call_args.kwargs["api_key"] == "local-jwt"
+
+    @pytest.mark.skipif(
+        not importlib.util.find_spec("honcho"),
+        reason="honcho SDK not installed"
+    )
+    def test_cloud_base_url_without_version_unchanged(self):
+        """A cloud base_url with no version segment must pass through untouched."""
+        fake_honcho = MagicMock(name="Honcho")
+        cfg = HonchoClientConfig(
+            api_key="cloud-key",
+            base_url="https://api.honcho.dev",
+            workspace_id="hermes",
+            environment="production",
+        )
+
+        with patch("honcho.Honcho", return_value=fake_honcho) as mock_honcho, \
+             patch("hermes_cli.config.load_config", return_value={}):
+            get_honcho_client(cfg)
+
+        mock_honcho.assert_called_once()
+        passed_base_url = mock_honcho.call_args.kwargs.get("base_url")
+        assert passed_base_url == "https://api.honcho.dev", (
+            f"Expected 'https://api.honcho.dev', got {passed_base_url!r}"
+        )
+
+    @pytest.mark.skipif(
+        not importlib.util.find_spec("honcho"),
+        reason="honcho SDK not installed"
+    )
+    def test_cloud_base_url_with_version_stripped(self):
+        """A version segment double-prefixes regardless of host, so a cloud
+        base_url that ends in '/v3' must also be stripped (the SDK re-adds it)."""
+        fake_honcho = MagicMock(name="Honcho")
+        cfg = HonchoClientConfig(
+            api_key="cloud-key",
+            base_url="https://api.honcho.dev/v3",
+            workspace_id="hermes",
+            environment="production",
+        )
+
+        with patch("honcho.Honcho", return_value=fake_honcho) as mock_honcho, \
+             patch("hermes_cli.config.load_config", return_value={}):
+            get_honcho_client(cfg)
+
+        mock_honcho.assert_called_once()
+        passed_base_url = mock_honcho.call_args.kwargs.get("base_url")
+        assert passed_base_url == "https://api.honcho.dev", (
+            f"Expected 'https://api.honcho.dev', got {passed_base_url!r}"
+        )
 
     @pytest.mark.skipif(
         not importlib.util.find_spec("honcho"),
@@ -595,4 +862,3 @@ class TestGetHonchoClientBaseUrlDoublePrefixFix:
         assert passed_base_url == expected, (
             f"Expected {expected!r}, got {passed_base_url!r}"
         )
-

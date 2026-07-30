@@ -44,6 +44,35 @@ def profile_host_key(profile: str | None) -> str:
     return f"{HOST}_{sanitized or 'profile'}"
 
 
+def _active_profile_name() -> str:
+    """Return the profile identity used to authorize Honcho host selection."""
+    try:
+        from hermes_cli.profiles import get_active_profile_name
+
+        return get_active_profile_name() or "default"
+    except Exception:
+        return "default"
+
+
+def _validate_profile_host(
+    host: str,
+    profile: str | None = None,
+    *,
+    allow_custom_legacy: bool = False,
+) -> str:
+    """Reject a host that is outside the current profile's Honcho namespace."""
+    active_profile = profile or _active_profile_name()
+    allowed = profile_host_key(active_profile)
+    if host != allowed:
+        if allow_custom_legacy and host.startswith("hermes."):
+            return host
+        raise ValueError(
+            f"Honcho host {host!r} is not allowed for profile {active_profile!r}; "
+            f"expected {allowed!r}"
+        )
+    return host
+
+
 def _host_block(raw: dict, host: str) -> dict:
     """Return host config, accepting legacy dot-form profile host keys."""
     hosts = raw.get("hosts") or {}
@@ -58,38 +87,15 @@ def resolve_active_host() -> str:
     """Derive the Honcho host key from the active Hermes profile.
 
     Resolution order:
-      1. HERMES_HONCHO_HOST env var (explicit override)
+      1. HERMES_HONCHO_HOST env var (explicit override, profile-validated)
       2. Active profile name via profiles system -> ``hermes_<profile>``
-      3. defaultHost from the active config, but only for the default profile
-      4. Fallback: ``"hermes"`` (default profile)
+      3. Fallback: ``"hermes"`` (default profile)
     """
     explicit = os.environ.get("HERMES_HONCHO_HOST", "").strip()
     if explicit:
-        return explicit
+        return _validate_profile_host(explicit)
 
-    try:
-        from hermes_cli.profiles import get_active_profile_name
-        profile = get_active_profile_name()
-        profile_host = profile_host_key(profile)
-    except Exception:
-        profile_host = HOST
-
-    # Honcho's generic config can carry a defaultHost (for example "local"),
-    # but applying it before profile resolution makes every named Hermes
-    # profile share that same host.  Keep named profiles isolated; only the
-    # default Hermes profile may opt into the config's default host.
-    if profile_host == HOST:
-        try:
-            path = resolve_config_path()
-            if path.exists():
-                raw = json.loads(path.read_text(encoding="utf-8"))
-                default_host = str(raw.get("defaultHost", "")).strip()
-                if default_host:
-                    return default_host
-        except Exception:
-            pass
-
-    return profile_host
+    return profile_host_key(_active_profile_name())
 
 
 def resolve_global_config_path() -> Path:
@@ -472,7 +478,7 @@ class HonchoClientConfig:
         host: str | None = None,
     ) -> HonchoClientConfig:
         """Create config from environment variables (fallback)."""
-        resolved_host = host or resolve_active_host()
+        resolved_host = _validate_profile_host(host) if host else resolve_active_host()
         api_key = get_secret("HONCHO_API_KEY")
         base_url = os.environ.get("HONCHO_BASE_URL", "").strip() or None
         timeout = _resolve_optional_float(os.environ.get("HONCHO_TIMEOUT"))
@@ -502,13 +508,35 @@ class HonchoClientConfig:
         path = config_path or resolve_config_path()
         if not path.exists():
             logger.debug("No global Honcho config at %s, falling back to env", path)
+            if host:
+                _validate_profile_host(host)
             return cls.from_env(host=resolved_host)
 
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError) as e:
             logger.warning("Failed to read %s: %s, falling back to env", path, e)
+            if host:
+                _validate_profile_host(host)
             return cls.from_env(host=resolved_host)
+
+        if host:
+            active_profile = _active_profile_name()
+            try:
+                native_root = (Path.home() / ".hermes").resolve()
+                current_home = get_hermes_home().resolve()
+                custom_root = not current_home.is_relative_to(native_root)
+            except (OSError, ValueError):
+                custom_root = False
+            _validate_profile_host(
+                host,
+                allow_custom_legacy=(
+                    active_profile == "default"
+                    and custom_root
+                    and bool(_host_block(raw, host))
+                    and host.startswith("hermes.")
+                ),
+            )
 
         host_block = _host_block(raw, resolved_host)
         # A hosts.hermes block or explicit enabled flag means the user
@@ -987,6 +1015,8 @@ def get_honcho_client(config: HonchoClientConfig | None = None) -> Honcho:
     threads can't each construct a client and leak the loser's connection.
     """
     global _cached_timeout
+    if config is not None:
+        _validate_profile_host(config.host)
     cached = _honcho_client_slot.peek()
     if cached is not None:
         # Detect timeout config changes in long-lived processes (gateway,
