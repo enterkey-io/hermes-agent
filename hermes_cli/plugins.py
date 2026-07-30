@@ -436,6 +436,13 @@ class PluginContext:
 
     # -- tool registration --------------------------------------------------
 
+    @staticmethod
+    def cron_job_capability(job_id: str):
+        """Require a tool to run only during one exact trusted cron job."""
+        from agent.execution_capabilities import cron_job_capability
+
+        return cron_job_capability(job_id)
+
     def register_tool(
         self,
         name: str,
@@ -448,6 +455,7 @@ class PluginContext:
         description: str = "",
         emoji: str = "",
         override: bool = False,
+        execution_capability=None,
     ) -> None:
         """Register a tool in the global registry **and** track it as plugin-provided.
 
@@ -485,6 +493,7 @@ class PluginContext:
             is_async=is_async,
             description=description,
             emoji=emoji,
+            execution_capability=execution_capability,
             override=override,
         )
         self._manager._plugin_tool_names.add(name)

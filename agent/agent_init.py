@@ -532,6 +532,7 @@ def init_agent(
     checkpoint_max_file_size_mb: int = 10,
     pass_session_id: bool = False,
     requested_provider: str = None,
+    execution_context=None,
 ):
     """
     Initialize the AI Agent.
@@ -583,6 +584,12 @@ def init_agent(
             remain skipped.
     """
     _install_safe_stdio()
+
+    agent.execution_context = execution_context
+    if execution_context is not None:
+        from agent.execution_capabilities import _bind_execution_context
+
+        _bind_execution_context(execution_context, agent)
 
     agent.model = model
     agent.max_iterations = max_iterations
@@ -1453,6 +1460,7 @@ def init_agent(
         enabled_toolsets=enabled_toolsets,
         disabled_toolsets=disabled_toolsets,
         quiet_mode=agent.quiet_mode,
+        execution_context=agent.execution_context,
     )
     
     # Show tool configuration and store valid tool names for validation

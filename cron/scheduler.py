@@ -3505,6 +3505,7 @@ def run_job(
     logger.info("Prompt: %s", prompt[:100])
 
     agent = None
+    _execution_context = None
 
     # Use ContextVars for per-job session/delivery state so parallel jobs
     # don't clobber each other's targets (os.environ is process-global).
@@ -3657,6 +3658,10 @@ def run_job(
         # concurrent cron jobs on the parallel pool.  contextvars.copy_context()
         # at the run_conversation hop carries this into the agent thread.
         _non_dispatcher_token = enter_non_dispatcher_owned_context()
+
+        from agent.execution_capabilities import _issue_cron_job_execution_context
+
+        _execution_context = _issue_cron_job_execution_context(job_id)
         if _job_workdir:
             os.environ["TERMINAL_CWD"] = _job_workdir
             logger.info("Job '%s': using workdir %s", job_id, _job_workdir)
@@ -4116,6 +4121,7 @@ def run_job(
             platform="cron",
             session_id=_cron_session_id,
             session_db=_session_db,
+            execution_context=_execution_context,
         )
         
         # Run the agent with an *inactivity*-based timeout: the job can run
@@ -4404,6 +4410,16 @@ def run_job(
         return False, output, "", error_msg
 
     finally:
+        if _execution_context is not None:
+            try:
+                from agent.execution_capabilities import _revoke_execution_context
+
+                _revoke_execution_context(_execution_context)
+            except Exception:
+                logger.exception(
+                    "Job '%s': failed to revoke execution capability",
+                    job_id,
+                )
         # Restore TERMINAL_CWD to whatever it was before this job ran.  We
         # only ever mutate it when the job has a workdir AND actually held
         # the write lock — a fail-closed timeout raised before the env-set,

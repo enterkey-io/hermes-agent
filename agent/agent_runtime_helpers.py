@@ -2810,6 +2810,24 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
             )
 
 
+def issue_execution_capability_grant(agent, function_name: str):
+    """Mint a one-use grant only for a protected registry tool."""
+    try:
+        from agent.execution_capabilities import _issue_tool_invocation_grant
+        from tools.registry import registry
+
+        entry = registry.get_entry(function_name)
+        if entry is None or entry.execution_capability is None:
+            return None
+        return _issue_tool_invocation_grant(
+            getattr(agent, "execution_context", None),
+            owner=agent,
+            tool_name=function_name,
+        )
+    except Exception:
+        return None
+
+
 def invoke_tool(agent, function_name: str, function_args: dict, effective_task_id: str,
                  tool_call_id: Optional[str] = None, messages: list = None,
                  pre_tool_block_checked: bool = False,
@@ -3029,6 +3047,14 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
                 disabled_toolsets=getattr(agent, "disabled_toolsets", None),
                 tool_request_middleware_trace=list(_tool_middleware_trace),
             )
+            execution_capability_grant = issue_execution_capability_grant(
+                agent,
+                function_name,
+            )
+            if execution_capability_grant is not None:
+                dispatch_kwargs["_execution_capability_grant"] = (
+                    execution_capability_grant
+                )
             if skip_tool_execution_middleware:
                 dispatch_kwargs["skip_tool_execution_middleware"] = True
             if approval_provenance is not None:
