@@ -2256,9 +2256,14 @@ def clear_preflight_alerted(job_id: str) -> None:
     _set_preflight_alerted(job_id, False)
 
 
-def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
-                 delivery_error: Optional[str] = None,
-                 status: Optional[str] = None):
+def mark_job_run(
+    job_id: str,
+    success: bool,
+    error: Optional[str] = None,
+    delivery_error: Optional[str] = None,
+    status: Optional[str] = None,
+    workflow_status: Optional[str] = None,
+):
     """
     Mark a job as having been run.
     
@@ -2267,12 +2272,13 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
 
     ``delivery_error`` is tracked separately from the agent error — a job
     can succeed (agent produced output) but fail delivery (platform down).
-
     ``status`` overrides the derived ``last_status`` ("ok"/"error") with a
     specific terminal status for this run — e.g. ``"blocked_config"`` when
     the pre-dispatch configuration validation refused to run the agent
     (T1-26), so `cronjob list` distinguishes "your config is broken" from
     "the run itself failed".
+    ``workflow_status`` separately records whether an opt-in business workflow
+    completed, was blocked, or failed to report a machine-readable outcome.
     """
     with _jobs_lock():
         jobs = load_jobs()
@@ -2289,6 +2295,18 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                     job.pop("preflight_alerted", None)
                 # Track delivery failures separately — cleared on successful delivery
                 job["last_delivery_error"] = delivery_error
+                if workflow_status is not None:
+                    allowed_workflow_statuses = {
+                        "blocked",
+                        "completed",
+                        "execution_error",
+                        "unknown",
+                    }
+                    if workflow_status not in allowed_workflow_statuses:
+                        raise ValueError(
+                            f"Invalid workflow status: {workflow_status!r}"
+                        )
+                    job["last_workflow_status"] = workflow_status
                 # Clear any external-fire claim so a re-armed recurring job can
                 # be claimed again on its next fire (Phase 4C CAS).
                 job["fire_claim"] = None

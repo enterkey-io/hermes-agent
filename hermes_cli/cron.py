@@ -184,6 +184,20 @@ def cron_list(show_all: bool = False):
                 status_display = color(f"{last_status}: {job.get('last_error', '?')}", Colors.RED)
             print(f"    Last run:  {last_run}  {status_display}")
 
+        workflow_status = job.get("last_workflow_status")
+        if workflow_status:
+            workflow_color = (
+                Colors.GREEN
+                if workflow_status == "completed"
+                else Colors.YELLOW
+                if workflow_status == "blocked"
+                else Colors.RED
+            )
+            print(
+                "    Workflow:  "
+                + color(workflow_status, workflow_color)
+            )
+
         latest_execution = job.get("latest_execution")
         if latest_execution:
             print(

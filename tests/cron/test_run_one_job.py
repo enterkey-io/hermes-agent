@@ -66,6 +66,66 @@ def test_run_one_job_success_sequence(monkeypatch):
     assert calls[-1] == ("mark", "j2", True)
 
 
+def test_workflow_status_marker_is_stripped_and_stored(monkeypatch):
+    delivered = []
+    marked = []
+
+    monkeypatch.setattr(
+        s,
+        "run_job",
+        lambda job, **kwargs: (
+            True,
+            "out",
+            "The source CSV has no data row.\n\n[WORKFLOW_STATUS:blocked]",
+            None,
+        ),
+    )
+    monkeypatch.setattr(s, "save_job_output", lambda jid, out: "/tmp/out")
+    monkeypatch.setattr(
+        s,
+        "_deliver_result",
+        lambda job, content, **kwargs: delivered.append(content),
+    )
+    monkeypatch.setattr(
+        s,
+        "mark_job_run",
+        lambda jid, ok, err=None, delivery_error=None, workflow_status=None: marked.append(
+            (jid, ok, workflow_status)
+        ),
+    )
+
+    assert s.run_one_job(
+        {"id": "workflow-job", "name": "prepare", "track_workflow_status": True}
+    )
+
+    assert delivered == ["The source CSV has no data row."]
+    assert marked == [("workflow-job", True, "blocked")]
+
+
+def test_tracked_workflow_without_marker_is_unknown(monkeypatch):
+    marked = []
+    monkeypatch.setattr(
+        s,
+        "run_job",
+        lambda job, **kwargs: (True, "out", "Prepared the report.", None),
+    )
+    monkeypatch.setattr(s, "save_job_output", lambda jid, out: "/tmp/out")
+    monkeypatch.setattr(s, "_deliver_result", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        s,
+        "mark_job_run",
+        lambda jid, ok, err=None, delivery_error=None, workflow_status=None: marked.append(
+            (ok, workflow_status)
+        ),
+    )
+
+    s.run_one_job(
+        {"id": "workflow-unknown", "name": "prepare", "track_workflow_status": True}
+    )
+
+    assert marked == [(True, "unknown")]
+
+
 def test_run_one_job_silent_skips_delivery(monkeypatch):
     """A [SILENT] final response saves output + marks the run but does NOT
     deliver."""

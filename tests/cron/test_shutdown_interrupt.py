@@ -95,6 +95,26 @@ class TestMarkRunningJobsInterrupted:
 
         assert "job-1" in sched._interrupted_job_ids
 
+    def test_tracked_workflow_records_execution_error(self, monkeypatch):
+        import cron.scheduler as sched
+
+        sched._running_job_ids.add("workflow-job")
+        monkeypatch.setattr(
+            sched,
+            "get_job",
+            lambda job_id: {"id": job_id, "track_workflow_status": True},
+        )
+
+        with patch("cron.scheduler.mark_job_run") as mock_mark:
+            sched.mark_running_jobs_interrupted("shutdown")
+
+        mock_mark.assert_called_once_with(
+            "workflow-job",
+            False,
+            "shutdown",
+            workflow_status="execution_error",
+        )
+
     def test_one_job_marking_failure_does_not_block_the_others(self):
         """mark_job_run raising for one job (e.g. a jobs.json write race)
         must not prevent the rest from being marked -- this runs during

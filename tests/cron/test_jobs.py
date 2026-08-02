@@ -484,6 +484,39 @@ class TestMarkJobRun:
         assert updated["last_error"] is None
         assert updated["last_delivery_error"] == "platform 'telegram' not configured"
 
+    def test_workflow_outcome_tracked_separately(self, tmp_cron_dir):
+        job = create_job(prompt="Prepare report", schedule="every 1h")
+
+        mark_job_run(
+            job["id"],
+            success=True,
+            workflow_status="blocked",
+        )
+
+        updated = get_job(job["id"])
+        assert updated["last_status"] == "ok"
+        assert updated["last_workflow_status"] == "blocked"
+
+    def test_delivery_error_cleared_on_success(self, tmp_cron_dir):
+        """Successful delivery clears the previous delivery error."""
+        job = create_job(prompt="Report", schedule="every 1h")
+        mark_job_run(job["id"], success=True, delivery_error="network timeout")
+        updated = get_job(job["id"])
+        assert updated["last_delivery_error"] == "network timeout"
+        # Next run delivers successfully
+        mark_job_run(job["id"], success=True, delivery_error=None)
+        updated = get_job(job["id"])
+        assert updated["last_delivery_error"] is None
+
+    def test_both_agent_and_delivery_error(self, tmp_cron_dir):
+        """Agent fails AND delivery fails — both errors recorded."""
+        job = create_job(prompt="Report", schedule="every 1h")
+        mark_job_run(job["id"], success=False, error="model timeout",
+                     delivery_error="platform 'discord' not enabled")
+        updated = get_job(job["id"])
+        assert updated["last_status"] == "error"
+        assert updated["last_error"] == "model timeout"
+        assert updated["last_delivery_error"] == "platform 'discord' not enabled"
 
     def test_recurring_cron_not_disabled_when_croniter_missing(self, tmp_cron_dir, monkeypatch):
         """Regression test for issue #16265.

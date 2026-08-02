@@ -291,7 +291,7 @@ _LEGACY_HOME_TARGET_ENV_VARS = {
     "QQBOT_HOME_CHANNEL": "QQ_HOME_CHANNEL",
 }
 
-from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_runs, claim_dispatch, heartbeat_run_claim
+from cron.jobs import get_due_jobs, get_job, mark_job_run, save_job_output, advance_next_runs, claim_dispatch, heartbeat_run_claim
 from cron.executions import (
     _PrivateStatePermissionError,
     _open_private_cron_lock,
@@ -304,6 +304,23 @@ from cron.executions import (
 # response with this marker to suppress delivery.  Output is still saved
 # locally for audit.
 SILENT_MARKER = "[SILENT]"
+_WORKFLOW_STATUS_LINE = re.compile(
+    r"^\[WORKFLOW_STATUS:(blocked|completed)\]$",
+    re.IGNORECASE,
+)
+
+
+def _extract_workflow_status(response: str) -> tuple[str, str]:
+    """Strip an exact final workflow marker and return its normalized status."""
+    lines = response.rstrip().splitlines()
+    if not lines:
+        return "unknown", response
+    match = _WORKFLOW_STATUS_LINE.fullmatch(lines[-1].strip())
+    if match is None:
+        return "unknown", response
+    return match.group(1).lower(), "\n".join(lines[:-1]).rstrip()
+
+
 OPERATOR_ONLY_SCRIPT_FAILURE = "[operator-only-script-failure] "
 _PROTECTED_HANDLER_TIMEOUT_SECONDS = 10.0
 _PROTECTED_SETTLEMENT_TIMEOUT_SECONDS = 11.0
@@ -503,7 +520,11 @@ def mark_running_jobs_interrupted(reason: str) -> list:
     marked = []
     for job_id in job_ids:
         try:
-            mark_job_run(job_id, False, reason)
+            mark_kwargs = {}
+            job = get_job(job_id)
+            if job and job.get("track_workflow_status"):
+                mark_kwargs["workflow_status"] = "execution_error"
+            mark_job_run(job_id, False, reason, **mark_kwargs)
             marked.append(job_id)
         except Exception as e:
             logger.warning("Failed to mark job %s interrupted: %s", job_id, e)
@@ -5101,6 +5122,11 @@ def run_one_job(
         # swallow the error and leak the agent's subprocesses/clients (#10200).
         delivery_error = None
         blocked_config = False
+        workflow_status = None
+        if job.get("track_workflow_status"):
+            workflow_status, final_response = _extract_workflow_status(
+                final_response
+            )
         try:
             output_file = save_job_output(job["id"], output)
             if verbose:
@@ -5203,14 +5229,16 @@ def run_one_job(
             success = False
             error = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
 
+        if job.get("track_workflow_status") and not success:
+            workflow_status = "execution_error"
+
         if not _consume_interrupted_flag(job["id"]):
+            mark_kwargs = {"delivery_error": delivery_error}
             if blocked_config:
-                mark_job_run(
-                    job["id"], success, error, delivery_error=delivery_error,
-                    status="blocked_config",
-                )
-            else:
-                mark_job_run(job["id"], success, error, delivery_error=delivery_error)
+                mark_kwargs["status"] = "blocked_config"
+            if workflow_status is not None:
+                mark_kwargs["workflow_status"] = workflow_status
+            mark_job_run(job["id"], success, error, **mark_kwargs)
         durable_error = (
             error.durable_error()
             if isinstance(error, ProtectedMutationFailure)
@@ -5249,7 +5277,10 @@ def run_one_job(
         logger.error("Error processing job %s: %s", job['id'], _err_text)
         try:
             if not _consume_interrupted_flag(job["id"]):
-                mark_job_run(job["id"], False, _err_text)
+                mark_kwargs = {}
+                if job.get("track_workflow_status"):
+                    mark_kwargs["workflow_status"] = "execution_error"
+                mark_job_run(job["id"], False, _err_text, **mark_kwargs)
         except Exception as record_err:
             # Never let bookkeeping mask the original interruption.
             logger.error(
