@@ -6,6 +6,7 @@ import asyncio
 from contextvars import ContextVar
 import json
 import logging
+import re
 from typing import Any, Dict
 
 try:
@@ -23,6 +24,37 @@ from gateway.platforms.base import (
 from gateway.session import SessionSource, build_session_key
 
 logger = logging.getLogger(__name__)
+
+VOICE_CONTEXT_PREFIX = (
+    "[Voice call context: This is live speech. Reply conversationally in short "
+    "spoken turns. Do not read system messages, context compaction, tool output, "
+    "file contents, logs, markdown, or long lists aloud. If tools or files are "
+    "needed, give only a brief spoken summary and ask before continuing.]\n\n"
+)
+
+SUPPRESSED_TEXT_PREFIXES = (
+    "⚡ Interrupting current task",
+    "⏳ Queued for the next turn",
+    "⏩ Steered into current run",
+    "⏳ Subagent working",
+    "⏳ Compressing context",
+    "⚕ Hermes Gateway Starting",
+    "Hermes Gateway Starting",
+    "Context compaction",
+    "Compaction",
+)
+
+SUPPRESSED_TEXT_SNIPPETS = (
+    "Claude Code returned an error result",
+    "Codex app-server exited",
+    "Codex streaming attempt superseded",
+    "No conversation found with session ID",
+    "Tool ",
+    " returned error",
+    "Traceback (most recent call last)",
+)
+
+LONG_MARKDOWN_LINE_LIMIT = 18
 
 _ACTIVE_TRANSPORT_CALL: ContextVar[tuple[int, str] | None] = ContextVar(
     "voice_active_transport_call",
@@ -182,6 +214,9 @@ class VoiceAdapter(BasePlatformAdapter):
                         f"your response.]\n\n{content}"
                     )
                     call["context_sent"] = True
+            elif not call.get("context_sent"):
+                content = VOICE_CONTEXT_PREFIX + content
+                call["context_sent"] = True
 
             message_id = f"voice-{call_id}-{id(msg)}"
             event = MessageEvent(
@@ -203,6 +238,13 @@ class VoiceAdapter(BasePlatformAdapter):
                 await self.handle_message(event)
             finally:
                 _ACTIVE_TRANSPORT_CALL.reset(token)
+            return
+
+        if msg_type == "turn_end":
+            call_id = str(msg.get("callId", ""))
+            self._deactivate_call(call_id)
+            self._rejected_calls.discard(call_id)
+            logger.info("Voice turn ended: %s", call_id)
             return
 
         if msg_type == "call_end":
@@ -244,6 +286,9 @@ class VoiceAdapter(BasePlatformAdapter):
             stream=is_stream,
         )
         if call_id is None:
+            return SendResult(success=True, message_id=message_id)
+
+        if self._should_suppress_voice_output(content, metadata=metadata):
             return SendResult(success=True, message_id=message_id)
 
         if is_stream:
@@ -291,7 +336,7 @@ class VoiceAdapter(BasePlatformAdapter):
             if str(message_id).startswith("voice-stream-"):
                 return SendResult(success=True, message_id=message_id)
             call_id = self._resolve_call_id(chat_id)
-            if call_id is not None:
+            if call_id is not None and not self._should_suppress_voice_output(content):
                 await self._send_to_vox(
                     {"type": "text", "content": content, "callId": call_id}
                 )
@@ -307,6 +352,9 @@ class VoiceAdapter(BasePlatformAdapter):
                 return SendResult(success=True, message_id=message_id)
 
             current = self._clean_stream_content(content, stream["cursor"])
+            if self._should_suppress_voice_output(current):
+                await self._finalize_stream_locked(message_id, stream)
+                return SendResult(success=True, message_id=message_id)
             suffix, safe = self._safe_stream_suffix(stream["last_content"], current)
             if not safe:
                 await self._finalize_stream_locked(message_id, stream)
@@ -403,6 +451,46 @@ class VoiceAdapter(BasePlatformAdapter):
     def _clean_stream_content(content: str, cursor: str) -> str:
         text = str(content or "")
         return text[:-len(cursor)] if cursor and text.endswith(cursor) else text
+
+    @classmethod
+    def _should_suppress_voice_output(
+        cls,
+        content: str,
+        *,
+        metadata: dict | None = None,
+    ) -> bool:
+        if isinstance(metadata, dict) and metadata.get("non_conversational") is True:
+            return True
+        text = str(content or "").strip()
+        if not text:
+            return False
+        if text.startswith(SUPPRESSED_TEXT_PREFIXES):
+            return True
+        if any(snippet in text for snippet in SUPPRESSED_TEXT_SNIPPETS):
+            return True
+        if cls._looks_like_file_or_log_dump(text):
+            logger.info("Suppressed long file/log-style output on voice channel")
+            return True
+        return False
+
+    @staticmethod
+    def _looks_like_file_or_log_dump(text: str) -> bool:
+        if len(text) < 900:
+            return False
+        lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+        if len(lines) < LONG_MARKDOWN_LINE_LIMIT:
+            return False
+        markdown_or_log_lines = 0
+        for line in lines:
+            stripped = line.lstrip()
+            if (
+                stripped.startswith(("#", "-", "*", "```", ">", "|"))
+                or re.match(r"^\d+[\.\)]\s+", stripped)
+                or re.match(r"^[A-Z][A-Za-z0-9_.-]+Error:", stripped)
+                or re.match(r"^[A-Z][A-Za-z0-9_.-]+\s+(WARNING|ERROR|INFO):", stripped)
+            ):
+                markdown_or_log_lines += 1
+        return markdown_or_log_lines >= 8
 
     @staticmethod
     def _safe_stream_suffix(previous: str, current: str) -> tuple[str, bool]:

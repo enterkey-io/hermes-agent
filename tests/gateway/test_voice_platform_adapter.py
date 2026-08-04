@@ -230,7 +230,8 @@ async def test_regular_voice_transcript_remains_plain_text(monkeypatch):
 
     assert len(events) == 1
     assert events[0].source.user_id == "elliott"
-    assert events[0].text == "Hello."
+    assert events[0].text.startswith("[Voice call context: This is live speech.")
+    assert events[0].text.endswith("\n\nHello.")
 
 
 @pytest.mark.asyncio
@@ -688,6 +689,64 @@ async def test_non_streaming_response_keeps_legacy_text_shape(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_voice_suppresses_non_conversational_metadata(monkeypatch):
+    adapter = _make_voice_adapter()
+    sent = []
+
+    async def send_to_vox(message):
+        sent.append(message)
+
+    monkeypatch.setattr(adapter, "_send_to_vox", send_to_vox)
+    await adapter._handle_vox_message(
+        {
+            "type": "call_start",
+            "callId": "speech-status",
+            "sessionId": "vox-kenzie-status",
+            "agent": "kenzie",
+            "source": "voice",
+        }
+    )
+
+    result = await adapter.send(
+        "voice:vox-kenzie-status",
+        "⏳ Compressing context, your message is queued.",
+        metadata={"non_conversational": True},
+    )
+    await adapter.edit_message(
+        "voice:vox-kenzie-status",
+        result.message_id,
+        "Tool memory returned error: details",
+    )
+
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_voice_suppresses_long_file_or_log_dump(monkeypatch):
+    adapter = _make_voice_adapter()
+    sent = []
+
+    async def send_to_vox(message):
+        sent.append(message)
+
+    monkeypatch.setattr(adapter, "_send_to_vox", send_to_vox)
+    await adapter._handle_vox_message(
+        {
+            "type": "call_start",
+            "callId": "speech-file",
+            "sessionId": "vox-kenzie-file",
+            "agent": "kenzie",
+            "source": "voice",
+        }
+    )
+
+    long_markdown = "\n".join(f"- line {index}: configuration value" for index in range(40))
+    await adapter.send("voice:vox-kenzie-file", long_markdown)
+
+    assert sent == []
+
+
+@pytest.mark.asyncio
 async def test_listener_processes_call_end_while_generation_is_running(monkeypatch):
     adapter = _make_voice_adapter()
     handler_started = asyncio.Event()
@@ -733,6 +792,70 @@ async def test_listener_processes_call_end_while_generation_is_running(monkeypat
     release_handler.set()
     await _drain_background_tasks(adapter)
     assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_turn_end_only_deactivates_call_without_cancelling_session_task():
+    adapter = _make_voice_adapter()
+    handler_started = asyncio.Event()
+    handler_cancelled = asyncio.Event()
+    release_handler = asyncio.Event()
+    events = []
+    task = None
+
+    async def handle_message(event):
+        events.append(event)
+        handler_started.set()
+        try:
+            await release_handler.wait()
+        except asyncio.CancelledError:
+            handler_cancelled.set()
+            raise
+
+    adapter.set_message_handler(handle_message)
+    await adapter._handle_vox_message(
+        {
+            "type": "call_start",
+            "callId": "speech-turn-end",
+            "sessionId": "vox-kenzie-turn-end",
+            "agent": "kenzie",
+            "source": "voice",
+        }
+    )
+    await adapter._handle_vox_message(
+        {
+            "type": "text",
+            "callId": "speech-turn-end",
+            "content": "Keep this session alive.",
+        }
+    )
+    await asyncio.wait_for(handler_started.wait(), timeout=1)
+
+    session_key = build_session_key(
+        events[0].source,
+        group_sessions_per_user=adapter.config.extra.get(
+            "group_sessions_per_user", True
+        ),
+        thread_sessions_per_user=adapter.config.extra.get(
+            "thread_sessions_per_user", False
+        ),
+    )
+    task = adapter._session_tasks[session_key]
+
+    try:
+        await adapter._handle_vox_message(
+            {"type": "turn_end", "callId": "speech-turn-end"}
+        )
+        await asyncio.sleep(0)
+
+        assert handler_cancelled.is_set() is False
+        assert task.done() is False
+        assert session_key in adapter._session_tasks
+        assert "speech-turn-end" not in adapter._active_calls
+    finally:
+        release_handler.set()
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
