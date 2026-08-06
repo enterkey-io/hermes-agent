@@ -395,17 +395,23 @@ def _get_session_platform() -> str:
 def _is_cron_approval_context() -> bool:
     """True when the current approval decision is running inside cron.
 
-    Prefer the session ContextVar so one cron job cannot taint unrelated
-    gateway/API/TUI turns in the same process. If the session context layer is
-    not engaged or unavailable, fall back to the legacy process env var for CLI
-    tests and older entrypoints.
+    An explicitly bound cron ContextVar wins, including when the job also has a
+    delivery platform. A bound gateway platform with no cron binding disproves
+    a stale process-wide cron flag. Standalone callers retain the legacy env
+    fallback.
     """
     try:
-        from gateway.session_context import get_session_env
+        from gateway.session_context import _UNSET, _VAR_MAP
 
-        return is_truthy_value(get_session_env("HERMES_CRON_SESSION", ""))
+        cron_value = _VAR_MAP["HERMES_CRON_SESSION"].get()
+        if cron_value is not _UNSET:
+            return is_truthy_value(cron_value)
+        platform_value = _VAR_MAP["HERMES_SESSION_PLATFORM"].get()
+        if platform_value is not _UNSET and str(platform_value or ""):
+            return False
     except Exception:
-        return env_var_enabled("HERMES_CRON_SESSION")
+        pass
+    return env_var_enabled("HERMES_CRON_SESSION")
 
 
 def _is_gateway_approval_context() -> bool:

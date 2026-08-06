@@ -83,6 +83,53 @@ class TestSmartApproval:
         assert is_approved(session_key, pattern_key) is False
 
 
+def test_gateway_context_overrides_stale_cron_env_for_tool_approval(monkeypatch):
+    """A live gateway turn must not inherit cron approval mode from the process."""
+    from gateway.session_context import reset_session_vars, set_session_vars
+
+    session_key = "telegram-live-session"
+    approval_module._gateway_queues.clear()
+    approval_module._gateway_notify_cbs.clear()
+    approval_module._session_approved.clear()
+    approval_module._permanent_approved.clear()
+    monkeypatch.setenv("HERMES_CRON_SESSION", "1")
+    monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
+    monkeypatch.delenv("HERMES_INTERACTIVE", raising=False)
+    monkeypatch.setattr(approval_module, "_YOLO_MODE_FROZEN", False)
+    monkeypatch.setattr(
+        approval_module,
+        "_get_approval_config",
+        lambda: {"mode": "manual", "timeout": 5, "cron_mode": "deny"},
+    )
+
+    notified = []
+
+    def approve_once(data):
+        notified.append(data)
+        approval_module.resolve_gateway_approval(session_key, "once")
+
+    tokens = set_session_vars(platform="telegram", session_key=session_key)
+    approval_token = approval_module.set_current_session_key(session_key)
+    approval_module.register_gateway_notify(session_key, approve_once)
+    try:
+        result = approval_module.request_tool_approval(
+            "finance_execute_qbo_invoice",
+            "Create and send the exact approved QBO invoice draft.",
+            rule_key="finance:qbo-invoice:honk-2026-07",
+            allow_session=False,
+            allow_permanent=False,
+            allow_yolo=False,
+            allow_cron=False,
+        )
+    finally:
+        approval_module.unregister_gateway_notify(session_key)
+        approval_module.reset_current_session_key(approval_token)
+        reset_session_vars()
+
+    assert result["approved"] is True
+    assert len(notified) == 1
+
+
 class TestDetectDangerousRm:
     def test_rm_flags_after_operands_detected(self):
         # GNU rm permutes options: `rm build/ -rf` == `rm -rf build/`.
