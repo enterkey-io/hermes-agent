@@ -102,6 +102,63 @@ def test_workflow_status_marker_is_stripped_and_stored(monkeypatch):
     assert marked == [("workflow-job", True, "blocked")]
 
 
+def test_run_one_job_records_workflow_registry_run(monkeypatch):
+    from hermes_cli import workflow_registry as reg
+
+    with reg.connect_closing() as conn:
+        reg.create_definition(
+            conn,
+            id="wf-cron",
+            slug="cron-workflow",
+            name="Cron Workflow",
+            owner_profile="default",
+            status="active",
+            runtime_kind="hermes",
+        )
+        reg.replace_steps(
+            conn,
+            "wf-cron",
+            [{"step_key": "collect", "position": 0, "name": "Collect"}],
+        )
+
+    monkeypatch.setattr(
+        s,
+        "run_job",
+        lambda job, **kwargs: (
+            True,
+            "out",
+            "Collected context.\n[WORKFLOW_STATUS:completed]",
+            None,
+        ),
+    )
+    monkeypatch.setattr(s, "save_job_output", lambda jid, out: "/tmp/out")
+    monkeypatch.setattr(s, "_deliver_result", lambda *args, **kwargs: None)
+    monkeypatch.setattr(s, "mark_job_run", lambda *args, **kwargs: None)
+
+    assert s.run_one_job(
+        {
+            "id": "workflow-job",
+            "name": "workflow job",
+            "workflow_id": "wf-cron",
+            "workflow_step_key": "collect",
+            "track_workflow_status": True,
+        }
+    )
+
+    with reg.connect_closing() as conn:
+        runs = reg.list_runs(conn, "wf-cron")
+        step_runs = conn.execute("SELECT * FROM workflow_step_runs").fetchall()
+
+    assert len(runs) == 1
+    assert runs[0].status == "succeeded"
+    assert runs[0].trigger_kind == "cron"
+    assert runs[0].trigger_ref == "workflow-job"
+    assert len(step_runs) == 1
+    assert step_runs[0]["step_key"] == "collect"
+    assert step_runs[0]["status"] == "succeeded"
+    assert step_runs[0]["summary"] == "Collected context."
+
+
 def test_tracked_workflow_without_marker_is_unknown(monkeypatch):
     marked = []
     monkeypatch.setattr(

@@ -264,6 +264,9 @@ def _sync_runbook_projection(record: runbook_store.RunbookRecord) -> dict[str, A
                     cron_job_id=str(cron_job_id),
                     enabled=bool(schedule.get("enabled", True)),
                 )
+        from hermes_cli.workflow_runtime import sync_runbook_cron_jobs
+
+        sync_runbook_cron_jobs(metadata["slug"])
         return _definition_dict(conn, definition.id)
 
 

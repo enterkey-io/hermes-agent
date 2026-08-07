@@ -4996,6 +4996,53 @@ def _fail_stop_after_uncooperative_handler(
     _complete_fail_stop_after_teardown(pending)
 
 
+def _finish_workflow_registry_run(
+    *,
+    workflow_run_id: str | None,
+    workflow_step_run_id: str | None,
+    success: bool,
+    workflow_status: str | None,
+    summary: str | None,
+    error: Any,
+) -> None:
+    """Best-effort Workflow Registry ledger settlement for a cron fire."""
+    if not workflow_run_id:
+        return
+    try:
+        from hermes_cli import workflow_registry as workflow_registry
+
+        step_status = "succeeded"
+        if not success or workflow_status == "execution_error":
+            step_status = "failed"
+        elif workflow_status == "blocked":
+            step_status = "waiting_for_approval"
+
+        with workflow_registry.connect_closing() as workflow_conn:
+            if workflow_step_run_id:
+                workflow_registry.finish_step(
+                    workflow_conn,
+                    workflow_step_run_id,
+                    status=step_status,
+                    summary=summary,
+                    error=str(error) if error else None,
+                )
+            if step_status == "waiting_for_approval":
+                return
+            workflow_registry.complete_run(
+                workflow_conn,
+                workflow_run_id,
+                status="succeeded" if step_status == "succeeded" else "failed",
+                summary=summary,
+                error=str(error) if error else None,
+            )
+    except Exception as exc:
+        logger.warning(
+            "Workflow registry run settlement failed for %s: %s",
+            workflow_run_id,
+            exc,
+        )
+
+
 def run_one_job(
     job: dict,
     *,
@@ -5061,6 +5108,36 @@ def run_one_job(
         # The attempt is claimed durably before executor/provider dispatch and
         # becomes running only immediately before the actual run.
         mark_execution_running(execution_id)
+
+        workflow_run_id = None
+        workflow_step_run_id = None
+        workflow_step_key = str(job.get("workflow_step_key") or "run")
+        if job.get("workflow_id"):
+            try:
+                from hermes_cli import workflow_registry as workflow_registry
+
+                with workflow_registry.connect_closing() as workflow_conn:
+                    workflow_run = workflow_registry.start_run(
+                        workflow_conn,
+                        str(job["workflow_id"]),
+                        trigger_kind="cron",
+                        trigger_ref=str(job["id"]),
+                        dedupe_key=f"cron:{job['id']}:{execution_id}",
+                        kanban_task_id=job.get("kanban_task_id"),
+                    )
+                    workflow_run_id = workflow_run.id
+                    workflow_step_run = workflow_registry.start_step(
+                        workflow_conn,
+                        workflow_run.id,
+                        workflow_step_key,
+                    )
+                    workflow_step_run_id = workflow_step_run.id
+            except Exception as exc:
+                logger.warning(
+                    "Job '%s': workflow registry run start failed: %s",
+                    job.get("id", "?"),
+                    exc,
+                )
 
         # Run the job under the profile's secret scope. get_secret() fails
         # closed outside a scope once profile isolation is in play (multiple
@@ -5253,6 +5330,14 @@ def run_one_job(
             delivery_outcome = "delivered"
         else:
             delivery_outcome = "suppressed"
+        _finish_workflow_registry_run(
+            workflow_run_id=workflow_run_id,
+            workflow_step_run_id=workflow_step_run_id,
+            success=success,
+            workflow_status=workflow_status,
+            summary=final_response,
+            error=durable_error,
+        )
         finish_execution(
             execution_id,
             success=success,
@@ -5261,7 +5346,15 @@ def run_one_job(
         )
         return True
 
-    except GatewayFailStopRequired:
+    except GatewayFailStopRequired as e:
+        _finish_workflow_registry_run(
+            workflow_run_id=locals().get("workflow_run_id"),
+            workflow_step_run_id=locals().get("workflow_step_run_id"),
+            success=False,
+            workflow_status="execution_error",
+            summary=None,
+            error=str(e),
+        )
         raise
     except BaseException as e:  # noqa: BLE001 — deliberate: see below
         # BaseException, not Exception (#73973): the inner run_job handler
@@ -5287,6 +5380,14 @@ def run_one_job(
                 "Failed to record interrupted run for job %s: %s",
                 job["id"], record_err,
             )
+        _finish_workflow_registry_run(
+            workflow_run_id=locals().get("workflow_run_id"),
+            workflow_step_run_id=locals().get("workflow_step_run_id"),
+            success=False,
+            workflow_status="execution_error",
+            summary=None,
+            error=_err_text,
+        )
         try:
             finish_execution(execution_id, success=False, error=_err_text)
         except Exception as record_err:

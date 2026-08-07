@@ -1722,6 +1722,12 @@ def create_job(
     reasoning_effort: Optional[str] = None,
     speed: Optional[str] = None,
     service_tier: Optional[str] = None,
+    workflow_id: Optional[str] = None,
+    workflow_slug: Optional[str] = None,
+    workflow_step_key: Optional[str] = None,
+    workflow_schedule_id: Optional[str] = None,
+    runbook_slug: Optional[str] = None,
+    track_workflow_status: bool = False,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -1818,6 +1824,12 @@ def create_job(
 
     # Monitor-mode validation: exactly one source, and monitor mode only
     # makes sense when there IS an agent to suppress/wake.
+    normalized_workflow_id = _normalize_job_optional_text(workflow_id)
+    normalized_workflow_slug = _normalize_job_optional_text(workflow_slug)
+    normalized_workflow_step_key = _normalize_job_optional_text(workflow_step_key)
+    normalized_workflow_schedule_id = _normalize_job_optional_text(workflow_schedule_id)
+    normalized_runbook_slug = _normalize_job_optional_text(runbook_slug)
+
     # no_agent jobs are meaningless without a script — the script IS the job.
     # Surface these as clear ValueErrors at create time so bad configs never
     # reach the scheduler (shared with update_job, see
@@ -1909,6 +1921,18 @@ def create_job(
         "enabled_toolsets": normalized_toolsets,
         "workdir": normalized_workdir,
     }
+    if normalized_workflow_id:
+        job["workflow_id"] = normalized_workflow_id
+    if normalized_workflow_slug:
+        job["workflow_slug"] = normalized_workflow_slug
+    if normalized_workflow_step_key:
+        job["workflow_step_key"] = normalized_workflow_step_key
+    if normalized_workflow_schedule_id:
+        job["workflow_schedule_id"] = normalized_workflow_schedule_id
+    if normalized_runbook_slug:
+        job["runbook_slug"] = normalized_runbook_slug
+    if track_workflow_status or normalized_workflow_id:
+        job["track_workflow_status"] = True
     # Only persist attach_to_session when explicitly set, so existing jobs and
     # the common case stay byte-identical (absent key => fall back to the
     # global cron.mirror_delivery config, default off).
