@@ -1,0 +1,189 @@
+.hermes-runbooks {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: calc(100vh - 96px);
+}
+
+.hermes-runbooks-topbar,
+.hermes-runbooks-editor-head,
+.hermes-runbooks-actions,
+.hermes-runbooks-savebar {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.hermes-runbooks-topbar h1,
+.hermes-runbooks-panel h2,
+.hermes-runbooks-panel h3 {
+  letter-spacing: 0;
+  margin: 0;
+}
+
+.hermes-runbooks-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+}
+
+.hermes-runbooks-sidebar,
+.hermes-runbooks-main,
+.hermes-runbooks-list,
+.hermes-runbooks-runs,
+.hermes-runbooks-panel,
+.hermes-runbooks-steps,
+.hermes-runbooks-history {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.hermes-runbooks-list {
+  max-height: 50vh;
+  overflow: auto;
+}
+
+.hermes-runbooks-list-item {
+  background: hsl(var(--card));
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  color: hsl(var(--foreground));
+  cursor: pointer;
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  text-align: left;
+}
+
+.hermes-runbooks-list-item.is-active {
+  border-color: hsl(var(--primary));
+}
+
+.hermes-runbooks-list-title {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.hermes-runbooks-list-meta,
+.hermes-runbooks-muted {
+  color: hsl(var(--muted-foreground));
+  font-size: 12px;
+}
+
+.hermes-runbooks-status {
+  border-radius: 999px;
+  border: 1px solid hsl(var(--border));
+  font-size: 11px;
+  justify-self: start;
+  padding: 2px 8px;
+}
+
+.hermes-runbooks-status-active {
+  border-color: #168a4a;
+  color: #168a4a;
+}
+
+.hermes-runbooks-status-paused,
+.hermes-runbooks-status-degraded {
+  border-color: #a16207;
+  color: #a16207;
+}
+
+.hermes-runbooks-status-retired {
+  color: hsl(var(--muted-foreground));
+}
+
+.hermes-runbooks-error {
+  background: #7f1d1d;
+  border-radius: 8px;
+  color: #fff;
+  padding: 10px 12px;
+}
+
+.hermes-runbooks-textarea {
+  background: hsl(var(--background));
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  color: hsl(var(--foreground));
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.45;
+  min-height: 520px;
+  padding: 12px;
+  resize: vertical;
+  width: 100%;
+}
+
+.hermes-runbooks-preview {
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  min-height: 520px;
+  padding: 16px;
+}
+
+.hermes-runbooks-diff {
+  background: hsl(var(--muted));
+  border-radius: 8px;
+  font-size: 12px;
+  min-height: 520px;
+  overflow: auto;
+  padding: 12px;
+  white-space: pre-wrap;
+}
+
+.hermes-runbooks-savebar {
+  border-top: 1px solid hsl(var(--border));
+  display: grid;
+  grid-template-columns: auto minmax(120px, 180px) auto minmax(160px, 1fr) auto;
+  padding-top: 10px;
+}
+
+.hermes-runbooks-run,
+.hermes-runbooks-step {
+  align-items: center;
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  padding: 8px 10px;
+}
+
+.hermes-runbooks-run code,
+.hermes-runbooks-history code {
+  overflow-wrap: anywhere;
+}
+
+.hermes-runbooks-history {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.hermes-runbooks-empty {
+  border: 1px dashed hsl(var(--border));
+  border-radius: 8px;
+  color: hsl(var(--muted-foreground));
+  padding: 28px;
+  text-align: center;
+}
+
+@media (max-width: 900px) {
+  .hermes-runbooks-grid,
+  .hermes-runbooks-history,
+  .hermes-runbooks-savebar {
+    grid-template-columns: 1fr;
+  }
+
+  .hermes-runbooks-topbar,
+  .hermes-runbooks-editor-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .hermes-runbooks-actions {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+}
