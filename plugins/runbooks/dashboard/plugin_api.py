@@ -255,7 +255,7 @@ def _sync_runbook_projection(record: runbook_store.RunbookRecord) -> dict[str, A
             if not isinstance(schedule, dict):
                 continue
             profile = str(schedule.get("profile") or metadata["owner_profile"])
-            cron_job_id = schedule.get("cron_job_id") or schedule.get("id")
+            cron_job_id = schedule.get("cron_job_id")
             if cron_job_id:
                 registry.link_schedule(
                     conn,
