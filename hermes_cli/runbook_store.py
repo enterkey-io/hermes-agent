@@ -202,7 +202,7 @@ def _record_from(path: Path, parsed: ParsedRunbook) -> RunbookRecord:
         status=metadata["status"],
         path=str(path),
         source_hash=source_hash,
-        revision=str(metadata.get("source_revision") or source_hash),
+        revision=str(metadata.get("source_revision") or f"sha256:{source_hash[:16]}"),
     )
 
 
