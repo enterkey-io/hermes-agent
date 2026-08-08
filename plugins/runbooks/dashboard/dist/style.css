@@ -5,6 +5,10 @@
   min-height: calc(100vh - 96px);
 }
 
+.hermes-runbooks button {
+  letter-spacing: 0;
+}
+
 .hermes-runbooks-topbar,
 .hermes-runbooks-editor-head,
 .hermes-runbooks-actions,

@@ -244,7 +244,6 @@
     return h("div", { className: "hermes-runbooks" },
       h("div", { className: "hermes-runbooks-topbar" },
         h("div", null,
-          h("h1", null, "Runbooks"),
           h("div", { className: "hermes-runbooks-muted" },
             overview ? [
               overview.counts.runbooks + " runbooks",
@@ -271,7 +270,7 @@
         h(Button, {
           variant: view === "migration" ? "default" : "outline",
           onClick: function () { setView("migration"); },
-        }, "Evernote migration"),
+        }, "Evernote"),
         h(Button, {
           variant: view === "legacy" ? "default" : "outline",
           onClick: function () { setView("legacy"); setTimeout(searchLegacy, 0); },

@@ -224,7 +224,7 @@ def test_preview_diff_and_bundle_registration(client):
     assert "Approve Save" in bundle
     assert "Start Run" in bundle
     assert '"Approver"' not in bundle
-    assert "Evernote migration" in bundle
+    assert '}, "Evernote")' in bundle
     assert "Schedules" in bundle
     assert "Legacy Work" in bundle
 
