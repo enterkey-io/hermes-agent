@@ -53,7 +53,14 @@ logger = logging.getLogger(__name__)
 _MAX_AUTH_REFRESH_ATTEMPTS = 2
 
 
-_REASONING_TAG_NAMES = ("think", "thinking", "reasoning", "REASONING_SCRATCHPAD", "thought")
+_REASONING_TAG_NAMES = (
+    "think",
+    "thinking",
+    "reasoning",
+    "REASONING_SCRATCHPAD",
+    "thought",
+    "internal",
+)
 _TOOL_CALL_TAG_NAMES = ("tool_call", "tool_calls", "tool_result", "function_call", "function_calls")
 
 _REASONING_BLOCK_PATTERNS = tuple(

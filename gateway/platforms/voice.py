@@ -33,6 +33,8 @@ VOICE_CONTEXT_PREFIX = (
 )
 
 SUPPRESSED_TEXT_PREFIXES = (
+    "[This response was interrupted",
+    "ℹ Codex",
     "⚡ Interrupting current task",
     "⏳ Queued for the next turn",
     "⏩ Steered into current run",
@@ -45,13 +47,32 @@ SUPPRESSED_TEXT_PREFIXES = (
 )
 
 SUPPRESSED_TEXT_SNIPPETS = (
+    "AUTH_REFRESH_FAILED",
+    "auto-compaction was raised",
     "Claude Code returned an error result",
+    "Codex error",
     "Codex app-server exited",
     "Codex streaming attempt superseded",
+    "Error: Codex",
     "No conversation found with session ID",
     "Tool ",
     " returned error",
     "Traceback (most recent call last)",
+    "execute_code",
+    "mcp__",
+    "read_file(",
+    "read_file ",
+)
+
+SUPPRESSED_TEXT_REGEXES = (
+    re.compile(r"^Conversation compact(?:ed|ion)\b", re.IGNORECASE),
+    re.compile(r"^Context compact(?:ed|ion)\b", re.IGNORECASE),
+    re.compile(r"^(?:We|Need) need to continue from (?:the )?summary\b", re.IGNORECASE),
+    re.compile(r"^Summary from previous conversation\b", re.IGNORECASE),
+    re.compile(r"^System (?:message|note|event):", re.IGNORECASE),
+    re.compile(r"^(?:WARNING|ERROR|INFO|DEBUG)\s+[\w.:-]+:", re.IGNORECASE),
+    re.compile(r"^File \"[^\"]+\", line \d+", re.IGNORECASE),
+    re.compile(r"^<[/]?(?:analysis|commentary|tool|function|message|system)[\s>]", re.IGNORECASE),
 )
 
 LONG_MARKDOWN_LINE_LIMIT = 18
@@ -465,6 +486,8 @@ class VoiceAdapter(BasePlatformAdapter):
         if not text:
             return False
         if text.startswith(SUPPRESSED_TEXT_PREFIXES):
+            return True
+        if any(pattern.search(text) for pattern in SUPPRESSED_TEXT_REGEXES):
             return True
         if any(snippet in text for snippet in SUPPRESSED_TEXT_SNIPPETS):
             return True

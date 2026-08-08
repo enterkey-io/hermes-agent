@@ -3709,10 +3709,14 @@ class BasePlatformAdapter(ABC):
     def _history_media_paths_for_session(self, session_key: str) -> Optional[set]:
         """Return media paths already delivered in prior turns of this session.
 
-        Loads the persisted transcript, drops the most recent assistant entry
-        (which belongs to the current response), and scans the remaining history
-        for MEDIA: tags and image_generate JSON payloads.  Used to prevent the
-        model from re-delivering the same file when it echoes an old MEDIA tag.
+        Loads the persisted transcript, drops the entire current user turn, and
+        scans the remaining history for MEDIA: tags and image_generate JSON
+        payloads.  Dropping only the final assistant entry is insufficient:
+        media-producing tool results (notably text_to_speech) are persisted before
+        the final assistant response, so treating those current-turn tool results
+        as history suppresses the first and only delivery of the generated file.
+        Used to prevent the model from re-delivering the same file when it echoes
+        a tag from a genuinely prior turn.
         """
         store = getattr(self, "_session_store", None)
         if not store:

@@ -14,6 +14,7 @@ Covers the follow-up wave after PR #72170:
 """
 
 import os
+from types import SimpleNamespace
 
 import pytest
 
@@ -100,3 +101,50 @@ class TestHistoryMediaDedupe:
 
     def test_empty_history_empty_set(self):
         assert _collect_history_media_paths([]) == set()
+
+    def test_current_turn_tts_tool_result_is_not_treated_as_delivered(self):
+        class Store:
+            def peek_session_id(self, _key):
+                return "session-id"
+
+            def load_transcript(self, _session_id):
+                return [
+                    {"role": "user", "content": "reply with TTS"},
+                    {
+                        "role": "assistant",
+                        "tool_calls": [{
+                            "id": "tts-call",
+                            "function": {"name": "text_to_speech"},
+                        }],
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": "tts-call",
+                        "content": "[[audio_as_voice]]\nMEDIA:/tmp/new-voice.ogg",
+                    },
+                    {
+                        "role": "assistant",
+                        "content": "[[audio_as_voice]]\nMEDIA:/tmp/new-voice.ogg",
+                    },
+                ]
+
+        adapter = SimpleNamespace(_session_store=Store())
+        paths = BasePlatformAdapter._history_media_paths_for_session(adapter, "key")
+        assert "/tmp/new-voice.ogg" not in (paths or set())
+
+    def test_prior_turn_media_is_still_deduplicated(self):
+        class Store:
+            def peek_session_id(self, _key):
+                return "session-id"
+
+            def load_transcript(self, _session_id):
+                return [
+                    {"role": "user", "content": "make the first file"},
+                    {"role": "assistant", "content": "MEDIA:/tmp/old.pdf"},
+                    {"role": "user", "content": "make another file"},
+                    {"role": "assistant", "content": "MEDIA:/tmp/new.pdf"},
+                ]
+
+        adapter = SimpleNamespace(_session_store=Store())
+        paths = BasePlatformAdapter._history_media_paths_for_session(adapter, "key")
+        assert paths == {"/tmp/old.pdf"}
