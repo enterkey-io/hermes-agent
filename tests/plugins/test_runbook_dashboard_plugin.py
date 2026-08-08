@@ -7,6 +7,7 @@ import json
 import sys
 from pathlib import Path
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
@@ -281,3 +282,45 @@ def test_legacy_work_is_read_only_and_searchable(client, tmp_path):
     assert detail.status_code == 200
     assert detail.json()["entity"]["title"] == "Migration history"
     assert client.post("/api/plugins/runbooks/legacy", json={}).status_code == 405
+
+
+def test_mutations_deny_non_elliott_and_cross_origin(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def add_session(request, call_next):
+        request.state.session = SimpleNamespace(
+            user_id=request.headers.get("x-test-user", "viewer")
+        )
+        return await call_next(request)
+
+    app.include_router(_load_plugin_router(), prefix="/api/plugins/runbooks")
+    guarded = TestClient(app)
+    body = {"markdown": _runbook_markdown(), "approved_by": "spoofed"}
+
+    denied = guarded.put(
+        "/api/plugins/runbooks/runbooks/daily-brief",
+        json=body,
+        headers={"origin": "http://testserver"},
+    )
+    assert denied.status_code == 403
+    cross_origin = guarded.put(
+        "/api/plugins/runbooks/runbooks/daily-brief",
+        json=body,
+        headers={"x-test-user": "elliott", "origin": "https://attacker.invalid"},
+    )
+    assert cross_origin.status_code == 403
+    allowed = guarded.put(
+        "/api/plugins/runbooks/runbooks/daily-brief",
+        json=body,
+        headers={"x-test-user": "elliott", "origin": "http://testserver"},
+    )
+    assert allowed.status_code == 200, allowed.text
+    index = json.loads(
+        (home / "runbooks" / "daily-brief" / ".index.json").read_text(encoding="utf-8")
+    )
+    assert index["approved_by"] == "elliott"

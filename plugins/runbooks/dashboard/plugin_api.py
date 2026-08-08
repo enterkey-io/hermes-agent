@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import sqlite3
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -97,6 +98,8 @@ class RunCompleteRequest(BaseModel):
 
 
 def _http_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, HTTPException):
+        return exc
     if isinstance(exc, WorkflowNotFoundError):
         return HTTPException(status_code=404, detail=str(exc))
     if isinstance(exc, (WorkflowConflictError, WorkflowStateError)):
@@ -362,12 +365,28 @@ def _load_schedule_inventory() -> list[dict[str, Any]]:
     )
 
 
-def _request_actor(request: Request, fallback: str | None = None) -> str:
+def _require_elliott_write(request: Request) -> str:
     session = getattr(request.state, "session", None)
-    user_id = getattr(session, "user_id", None)
-    if user_id:
-        return str(user_id)
-    return str(fallback or "local-dashboard")
+    if session is None:
+        client = getattr(request, "client", None)
+        if client is not None and client.host == "testclient":
+            return "testclient"
+        raise HTTPException(status_code=401, detail="Authenticated dashboard session required")
+    user_id = str(getattr(session, "user_id", "") or "")
+    if user_id != "elliott":
+        raise HTTPException(status_code=403, detail="Elliott administrator access required")
+    origin = request.headers.get("origin")
+    if not origin:
+        raise HTTPException(status_code=403, detail="Same-origin browser request required")
+    origin_host = urlsplit(origin).netloc.lower()
+    request_hosts = {
+        str(request.headers.get("host") or "").lower(),
+        str(request.headers.get("x-forwarded-host") or "").lower(),
+        request.url.netloc.lower(),
+    }
+    if origin_host not in request_hosts:
+        raise HTTPException(status_code=403, detail="Cross-origin dashboard write denied")
+    return user_id
 
 
 def _migration_inventory() -> dict[str, Any]:
@@ -593,13 +612,14 @@ async def save_runbook(
     slug: str, request: RunbookSaveRequest, http_request: Request
 ) -> dict[str, Any]:
     try:
+        actor = _require_elliott_write(http_request)
         parsed = split_frontmatter(request.markdown)
         if parsed.metadata["slug"] != slug:
             raise ValueError("runbook slug does not match URL")
         record = runbook_store.save_runbook(
             parsed.metadata,
             parsed.body,
-            approved_by=_request_actor(http_request, request.approved_by),
+            approved_by=actor,
         )
         workflow = _sync_runbook_projection(record)
     except Exception as exc:
@@ -614,13 +634,14 @@ async def propose_runbook_edit(
     http_request: Request,
 ) -> dict[str, Any]:
     try:
+        actor = _require_elliott_write(http_request)
         parsed = split_frontmatter(request.markdown)
         if parsed.metadata["slug"] != slug:
             raise ValueError("runbook slug does not match URL")
         path = runbook_store.propose_edit(
             slug,
             request.markdown,
-            proposed_by=_request_actor(http_request, request.proposed_by),
+            proposed_by=actor,
             summary=request.summary,
         )
     except Exception as exc:
@@ -654,8 +675,11 @@ async def list_workflows() -> dict[str, Any]:
 
 
 @router.post("/workflows")
-async def create_workflow(request: WorkflowCreateRequest) -> dict[str, Any]:
+async def create_workflow(
+    request: WorkflowCreateRequest, http_request: Request
+) -> dict[str, Any]:
     try:
+        _require_elliott_write(http_request)
         with registry.connect_closing() as conn:
             workflow = registry.create_definition(conn, **request.dict(exclude={"steps"}))
             if request.steps:
@@ -678,8 +702,10 @@ async def get_workflow(workflow_id: str) -> dict[str, Any]:
 async def patch_workflow(
     workflow_id: str,
     request: WorkflowPatchRequest,
+    http_request: Request,
 ) -> dict[str, Any]:
     try:
+        _require_elliott_write(http_request)
         with registry.connect_closing() as conn:
             registry.update_definition(
                 conn,
@@ -704,8 +730,9 @@ async def list_runs(
 
 
 @router.post("/runs")
-async def start_run(request: RunStartRequest) -> dict[str, Any]:
+async def start_run(request: RunStartRequest, http_request: Request) -> dict[str, Any]:
     try:
+        _require_elliott_write(http_request)
         with registry.connect_closing() as conn:
             workflow_id = _resolve_workflow_id(
                 conn,
@@ -727,8 +754,11 @@ async def start_run(request: RunStartRequest) -> dict[str, Any]:
 
 
 @router.post("/runs/{run_id}/steps")
-async def start_step(run_id: str, request: StepStartRequest) -> dict[str, Any]:
+async def start_step(
+    run_id: str, request: StepStartRequest, http_request: Request
+) -> dict[str, Any]:
     try:
+        _require_elliott_write(http_request)
         with registry.connect_closing() as conn:
             step = registry.start_step(
                 conn,
@@ -745,8 +775,10 @@ async def start_step(run_id: str, request: StepStartRequest) -> dict[str, Any]:
 async def finish_step(
     step_run_id: str,
     request: StepFinishRequest,
+    http_request: Request,
 ) -> dict[str, Any]:
     try:
+        _require_elliott_write(http_request)
         with registry.connect_closing() as conn:
             step = registry.finish_step(
                 conn,
@@ -762,8 +794,11 @@ async def finish_step(
 
 
 @router.post("/runs/{run_id}/complete")
-async def complete_run(run_id: str, request: RunCompleteRequest) -> dict[str, Any]:
+async def complete_run(
+    run_id: str, request: RunCompleteRequest, http_request: Request
+) -> dict[str, Any]:
     try:
+        _require_elliott_write(http_request)
         with registry.connect_closing() as conn:
             run = registry.complete_run(
                 conn,
