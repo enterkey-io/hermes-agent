@@ -523,6 +523,8 @@ async def search_legacy_work(
             if entity_type:
                 conditions.append("e.entity_type = ?")
                 params.append(entity_type)
+            else:
+                conditions.append("e.entity_type IN ('project', 'goal', 'issue', 'routine')")
             if status:
                 conditions.append("e.status = ?")
                 params.append(status)

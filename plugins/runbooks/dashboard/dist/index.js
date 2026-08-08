@@ -481,7 +481,7 @@
         ),
         h("div", { className: "hermes-runbooks-legacy-layout" },
           h("div", { className: "hermes-runbooks-table-wrap" },
-            h("table", { className: "hermes-runbooks-table" },
+            h("table", { className: "hermes-runbooks-table hermes-runbooks-legacy-table" },
               h("thead", null, h("tr", null,
                 h("th", null, "Legacy item"),
                 h("th", null, "Type"),

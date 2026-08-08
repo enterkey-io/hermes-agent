@@ -270,11 +270,20 @@ def test_legacy_work_is_read_only_and_searchable(client, tmp_path):
         "INSERT INTO legacy_search VALUES (?, ?, ?, ?, ?, ?, ?)",
         ("issue", "issue-1", "EK-100", "Migration history", "Archived task", "agent-1", "done"),
     )
+    conn.execute(
+        "INSERT INTO legacy_entities VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("comment", "comment-1", "comment-1", "comment-1", "", "", "2026-08-08", json.dumps({"id": "comment-1", "body": "migration note"})),
+    )
+    conn.execute(
+        "INSERT INTO legacy_search VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("comment", "comment-1", "comment-1", "comment-1", "migration note", "", ""),
+    )
     conn.commit()
     conn.close()
 
     response = client.get("/api/plugins/runbooks/legacy?q=migration")
     assert response.status_code == 200, response.text
+    assert len(response.json()["results"]) == 1
     assert response.json()["results"][0]["legacy_identifier"] == "EK-100"
     assert response.json()["summary"]["source_counts"]["issues"] == 1
 

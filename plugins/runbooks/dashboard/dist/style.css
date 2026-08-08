@@ -333,6 +333,13 @@
     grid-template-columns: 1fr;
   }
 
+  .hermes-runbooks-legacy-table th:nth-child(2),
+  .hermes-runbooks-legacy-table td:nth-child(2),
+  .hermes-runbooks-legacy-table th:nth-child(4),
+  .hermes-runbooks-legacy-table td:nth-child(4) {
+    display: none;
+  }
+
   .hermes-runbooks-textarea,
   .hermes-runbooks-preview,
   .hermes-runbooks-diff {
