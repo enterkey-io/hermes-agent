@@ -7,6 +7,7 @@ from hermes_cli import runbook_store
 from hermes_cli.runbook_projection import project_runbook
 from hermes_cli import workflow_registry as workflow_registry
 from tools import runbook_tools
+from tools.registry import registry
 
 
 def _metadata() -> dict:
@@ -116,3 +117,14 @@ def test_legacy_work_search_and_get_are_read_only(tmp_path, monkeypatch) -> None
     )
     assert fetched["entity"]["title"] == "Historical migration"
     assert json.loads(runbook_tools._legacy_get({"entity_type": "issue", "entity_id": "missing"}))["error"]
+
+
+def test_registry_dispatch_accepts_runtime_context_kwargs() -> None:
+    slug = _save()
+
+    fetched = json.loads(
+        registry.dispatch("runbook_get", {"slug": slug}, task_id="runtime-probe")
+    )
+
+    assert fetched["runbook"]["slug"] == slug
+    assert fetched["runbook"]["revision"].startswith("sha256:")

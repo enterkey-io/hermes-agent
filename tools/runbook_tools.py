@@ -23,7 +23,7 @@ def _actor() -> str:
     return "agent"
 
 
-def _list(args: dict[str, Any]) -> str:
+def _list(args: dict[str, Any], **_kwargs: Any) -> str:
     query = str(args.get("query") or "").strip()
     owner = str(args.get("owner_profile") or "").strip().lower()
     status = str(args.get("status") or "").strip().lower()
@@ -36,7 +36,7 @@ def _list(args: dict[str, Any]) -> str:
     return tool_result({"count": len(items), "runbooks": items})
 
 
-def _get(args: dict[str, Any]) -> str:
+def _get(args: dict[str, Any], **_kwargs: Any) -> str:
     slug = str(args.get("slug") or "").strip()
     if not slug:
         return tool_error("slug is required")
@@ -56,7 +56,7 @@ def _get(args: dict[str, Any]) -> str:
     )
 
 
-def _validate(args: dict[str, Any]) -> str:
+def _validate(args: dict[str, Any], **_kwargs: Any) -> str:
     markdown = str(args.get("markdown") or "")
     try:
         parsed = split_frontmatter(markdown)
@@ -69,7 +69,7 @@ def _validate(args: dict[str, Any]) -> str:
     )
 
 
-def _propose(args: dict[str, Any]) -> str:
+def _propose(args: dict[str, Any], **_kwargs: Any) -> str:
     slug = str(args.get("slug") or "").strip()
     markdown = str(args.get("markdown") or "")
     if not slug:
@@ -91,7 +91,7 @@ def _propose(args: dict[str, Any]) -> str:
     return tool_result(success=True, slug=slug, proposal_path=str(path))
 
 
-def _runs(args: dict[str, Any]) -> str:
+def _runs(args: dict[str, Any], **_kwargs: Any) -> str:
     slug = str(args.get("slug") or "").strip()
     limit = max(1, min(int(args.get("limit") or 20), 100))
     if not slug:
@@ -139,7 +139,7 @@ def _legacy_match(value: str) -> str:
     return " ".join(f'"{token}"*' for token in tokens[:12])
 
 
-def _legacy_search(args: dict[str, Any]) -> str:
+def _legacy_search(args: dict[str, Any], **_kwargs: Any) -> str:
     query = str(args.get("query") or "").strip()
     entity_type = str(args.get("entity_type") or "").strip()
     limit = max(1, min(int(args.get("limit") or 20), 100))
@@ -169,7 +169,7 @@ def _legacy_search(args: dict[str, Any]) -> str:
     return tool_result({"count": len(rows), "results": [dict(row) for row in rows]})
 
 
-def _legacy_get(args: dict[str, Any]) -> str:
+def _legacy_get(args: dict[str, Any], **_kwargs: Any) -> str:
     entity_type = str(args.get("entity_type") or "").strip()
     entity_id = str(args.get("entity_id") or "").strip()
     if not entity_type or not entity_id:
