@@ -382,6 +382,27 @@
     max-height: 34vh;
   }
 
+  .hermes-runbooks-list-item {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .hermes-runbooks-list-title {
+    grid-column: 1 / -1;
+  }
+
+  .hermes-runbooks-list-purpose {
+    display: none;
+  }
+
+  .hermes-runbooks-list-item .hermes-runbooks-status {
+    grid-column: 2;
+    grid-row: 2;
+  }
+
+  .hermes-runbooks-main.is-empty {
+    display: none;
+  }
+
   .hermes-runbooks-legacy-head,
   .hermes-runbooks-legacy-search {
     align-items: stretch;

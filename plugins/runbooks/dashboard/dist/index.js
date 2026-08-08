@@ -288,7 +288,15 @@
               return h("button", {
                 key: item.slug,
                 className: "hermes-runbooks-list-item " + (selectedSlug === item.slug ? "is-active" : ""),
-                onClick: function () { setSelectedSlug(item.slug); },
+                onClick: function () {
+                  setSelectedSlug(item.slug);
+                  if (window.matchMedia("(max-width: 900px)").matches) {
+                    setTimeout(function () {
+                      var detail = document.querySelector(".hermes-runbooks-main");
+                      if (detail) detail.scrollIntoView({ behavior: "smooth", block: "start" });
+                    }, 0);
+                  }
+                },
               },
                 h("span", { className: "hermes-runbooks-list-title" }, item.title),
                 h("span", { className: "hermes-runbooks-list-meta" }, item.owner_profile),
@@ -298,7 +306,9 @@
             })
           )
         ),
-        h("main", { className: "hermes-runbooks-main" },
+        h("main", {
+          className: "hermes-runbooks-main" + (selectedSlug ? "" : " is-empty"),
+        },
           selectedSlug ? h(Card, null,
             h(CardContent, { className: "hermes-runbooks-panel" },
               h("div", { className: "hermes-runbooks-editor-head" },

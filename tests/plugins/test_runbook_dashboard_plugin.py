@@ -229,6 +229,18 @@ def test_preview_diff_and_bundle_registration(client):
     assert "Schedules" in bundle
     assert '}, "Runs")' in bundle
     assert '}, "Archive")' in bundle
+    assert '"hermes-runbooks-main" + (selectedSlug ? "" : " is-empty")' in bundle
+
+    styles = (
+        Path(__file__).resolve().parents[2]
+        / "plugins"
+        / "runbooks"
+        / "dashboard"
+        / "dist"
+        / "style.css"
+    ).read_text(encoding="utf-8")
+    assert ".hermes-runbooks-main.is-empty" in styles
+    assert ".hermes-runbooks-list-purpose" in styles
 
 
 def test_legacy_work_is_read_only_and_searchable(client, tmp_path):
