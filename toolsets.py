@@ -215,6 +215,15 @@ TOOLSETS = {
         "tools": ["cronjob"],
         "includes": []
     },
+
+    "runbook": {
+        "description": "Canonical workflow procedures, proposals, validation, and execution history",
+        "tools": [
+            "runbook_list", "runbook_search", "runbook_get",
+            "runbook_validate", "runbook_propose_edit", "runbook_runs",
+        ],
+        "includes": [],
+    },
     
 
     "file": {

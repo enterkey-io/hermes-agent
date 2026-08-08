@@ -428,6 +428,16 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             f"after explicit direction."
         )
 
+    if "runbook_get" in getattr(agent, "valid_tool_names", []):
+        post_workspace_parts.append(
+            "Canonical runbook protocol: before executing a recurring or named "
+            "operational procedure, use runbook_search/runbook_get to resolve the "
+            "current Hermes runbook and follow that revision. Evernote and Paperclip "
+            "runbook records are historical provenance after migration, not writable "
+            "or active procedure authorities. Use runbook_propose_edit for changes; "
+            "ordinary agents must not activate edits or change schedules."
+        )
+
     platform_key = (agent.platform or "").lower().strip()
     # Resolve the built-in/plugin default hint for this platform, then apply
     # any per-platform override from config (platform_hints.<platform>).
