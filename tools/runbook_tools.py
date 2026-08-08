@@ -5,11 +5,14 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
+import sqlite3
 from typing import Any
 
 from hermes_cli import runbook_store
 from hermes_cli import workflow_registry as registry_db
 from hermes_cli.runbook_schema import render_frontmatter, split_frontmatter
+from hermes_constants import get_default_hermes_root
 from tools.registry import registry, tool_error, tool_result
 
 
@@ -116,6 +119,74 @@ def _runs(args: dict[str, Any]) -> str:
     return tool_result({"slug": slug, "count": len(runs), "runs": runs})
 
 
+def _legacy_connect() -> sqlite3.Connection:
+    path = (
+        get_default_hermes_root()
+        / "archives"
+        / "paperclip"
+        / "current"
+        / "legacy-work.db"
+    )
+    if not path.is_file():
+        raise FileNotFoundError("Paperclip Legacy Work archive is not available")
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _legacy_match(value: str) -> str:
+    tokens = re.findall(r"[A-Za-z0-9_-]+", value)
+    return " ".join(f'"{token}"*' for token in tokens[:12])
+
+
+def _legacy_search(args: dict[str, Any]) -> str:
+    query = str(args.get("query") or "").strip()
+    entity_type = str(args.get("entity_type") or "").strip()
+    limit = max(1, min(int(args.get("limit") or 20), 100))
+    if not query:
+        return tool_error("query is required")
+    match = _legacy_match(query)
+    if not match:
+        return tool_result({"count": 0, "results": []})
+    conditions = ["legacy_search MATCH ?"]
+    params: list[Any] = [match]
+    if entity_type:
+        conditions.append("e.entity_type = ?")
+        params.append(entity_type)
+    try:
+        with _legacy_connect() as conn:
+            rows = conn.execute(
+                "SELECT e.entity_type, e.entity_id, e.legacy_identifier, e.title, "
+                "e.status, e.owner, e.updated_at FROM legacy_entities e "
+                "JOIN legacy_search ON legacy_search.entity_type=e.entity_type "
+                "AND legacy_search.entity_id=e.entity_id WHERE "
+                + " AND ".join(conditions)
+                + " ORDER BY e.updated_at DESC LIMIT ?",
+                (*params, limit),
+            ).fetchall()
+    except (FileNotFoundError, sqlite3.Error) as exc:
+        return tool_error(str(exc))
+    return tool_result({"count": len(rows), "results": [dict(row) for row in rows]})
+
+
+def _legacy_get(args: dict[str, Any]) -> str:
+    entity_type = str(args.get("entity_type") or "").strip()
+    entity_id = str(args.get("entity_id") or "").strip()
+    if not entity_type or not entity_id:
+        return tool_error("entity_type and entity_id are required")
+    try:
+        with _legacy_connect() as conn:
+            row = conn.execute(
+                "SELECT payload_json FROM legacy_entities WHERE entity_type=? AND entity_id=?",
+                (entity_type, entity_id),
+            ).fetchone()
+    except (FileNotFoundError, sqlite3.Error) as exc:
+        return tool_error(str(exc))
+    if row is None:
+        return tool_error("Legacy Work item not found")
+    return tool_result({"entity_type": entity_type, "entity": json.loads(row["payload_json"])})
+
+
 def _always() -> bool:
     return True
 
@@ -212,4 +283,42 @@ registry.register(
     ),
     handler=_runs,
     check_fn=_always,
+)
+registry.register(
+    name="legacy_work_search",
+    toolset="runbook",
+    schema=_schema(
+        "legacy_work_search",
+        "Search the sanitized read-only Paperclip Legacy Work archive for historical projects, tasks, comments, routines, and runs.",
+        {
+            "query": {"type": "string"},
+            "entity_type": {
+                "type": "string",
+                "enum": ["project", "goal", "issue", "comment", "routine", "routine_run"],
+            },
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+        },
+        ["query"],
+    ),
+    handler=_legacy_search,
+    check_fn=_always,
+)
+registry.register(
+    name="legacy_work_get",
+    toolset="runbook",
+    schema=_schema(
+        "legacy_work_get",
+        "Read one sanitized historical item from the read-only Paperclip Legacy Work archive.",
+        {
+            "entity_type": {
+                "type": "string",
+                "enum": ["project", "goal", "issue", "comment", "routine", "routine_run"],
+            },
+            "entity_id": {"type": "string"},
+        },
+        ["entity_type", "entity_id"],
+    ),
+    handler=_legacy_get,
+    check_fn=_always,
+    max_result_size_chars=100000,
 )

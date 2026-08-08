@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 
 from hermes_cli import runbook_store
 from hermes_cli.runbook_projection import project_runbook
@@ -76,3 +77,42 @@ def test_proposal_does_not_activate_and_runs_are_readable(monkeypatch) -> None:
     runs = json.loads(runbook_tools._runs({"slug": slug}))
     assert runs["count"] == 1
     assert runs["runs"][0]["status"] == "running"
+
+
+def test_legacy_work_search_and_get_are_read_only(tmp_path, monkeypatch) -> None:
+    root = tmp_path / ".hermes"
+    archive = root / "archives" / "paperclip" / "current"
+    archive.mkdir(parents=True)
+    conn = sqlite3.connect(archive / "legacy-work.db")
+    conn.executescript(
+        """
+        CREATE TABLE legacy_entities (
+            entity_type TEXT, entity_id TEXT, legacy_identifier TEXT, title TEXT,
+            status TEXT, owner TEXT, updated_at TEXT, payload_json TEXT
+        );
+        CREATE VIRTUAL TABLE legacy_search USING fts5(
+            entity_type UNINDEXED, entity_id UNINDEXED, legacy_identifier,
+            title, body, owner, status, tokenize='unicode61'
+        );
+        """
+    )
+    payload = {"id": "issue-1", "identifier": "EK-42", "title": "Historical migration"}
+    conn.execute(
+        "INSERT INTO legacy_entities VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("issue", "issue-1", "EK-42", "Historical migration", "done", "agent-1", "2026-08-07", json.dumps(payload)),
+    )
+    conn.execute(
+        "INSERT INTO legacy_search VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("issue", "issue-1", "EK-42", "Historical migration", "Archived work", "agent-1", "done"),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("HERMES_HOME", str(root / "profiles" / "grace"))
+
+    searched = json.loads(runbook_tools._legacy_search({"query": "migration"}))
+    assert searched["results"][0]["legacy_identifier"] == "EK-42"
+    fetched = json.loads(
+        runbook_tools._legacy_get({"entity_type": "issue", "entity_id": "issue-1"})
+    )
+    assert fetched["entity"]["title"] == "Historical migration"
+    assert json.loads(runbook_tools._legacy_get({"entity_type": "issue", "entity_id": "missing"}))["error"]

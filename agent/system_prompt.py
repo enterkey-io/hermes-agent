@@ -434,7 +434,9 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             "operational procedure, use runbook_search/runbook_get to resolve the "
             "current Hermes runbook and follow that revision. Evernote and Paperclip "
             "runbook records are historical provenance after migration, not writable "
-            "or active procedure authorities. Use runbook_propose_edit for changes; "
+            "or active procedure authorities. Use legacy_work_search/legacy_work_get "
+            "only when historical Paperclip evidence is needed; those tools cannot "
+            "dispatch work or mutate the archive. Use runbook_propose_edit for changes; "
             "ordinary agents must not activate edits or change schedules."
         )
 
