@@ -53,6 +53,12 @@ export function gatewayLine(
   t: ReturnType<typeof useI18n>["t"],
 ): { label: string; tone: string } {
   const g = t.app.gatewayStrip;
+  if (!status.gateway_running && (status.gateway_count ?? 0) > 0) {
+    return {
+      label: `${g.running} (${status.gateway_count})`,
+      tone: "text-success",
+    };
+  }
   const byState: Record<string, { label: string; tone: string }> = {
     running: { label: g.running, tone: "text-success" },
     starting: { label: g.starting, tone: "text-warning" },

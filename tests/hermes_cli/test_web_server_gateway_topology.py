@@ -76,6 +76,7 @@ class TestCollectProfileGatewayTopology:
         topo = _collect_profile_gateway_topology()
         assert topo["profiles"] == ["default", "coder"]
         assert topo["gateway_mode"] == "none"
+        assert topo["gateway_count"] == 0
         assert topo["gateways"] == []
 
 
@@ -89,7 +90,12 @@ class TestCollectProfileGatewayTopology:
 
         monkeypatch.setattr(profiles_mod, "profiles_to_serve", _boom)
         topo = _collect_profile_gateway_topology()
-        assert topo == {"profiles": [], "gateway_mode": "unknown", "gateways": []}
+        assert topo == {
+            "profiles": [],
+            "gateway_mode": "unknown",
+            "gateway_count": 0,
+            "gateways": [],
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +126,7 @@ class TestStatusEndpointTopology:
             lambda: {
                 "profiles": ["default", "coder"],
                 "gateway_mode": "single",
+                "gateway_count": 1,
                 "gateways": [{"profile": "default", "ports": {}}],
             },
         )
@@ -128,6 +135,7 @@ class TestStatusEndpointTopology:
         data = resp.json()
         assert data["profiles"] == ["default", "coder"]
         assert data["gateway_mode"] == "single"
+        assert data["gateway_count"] == 1
         # The per-gateway detail (host ports) is loopback-only recon.
         assert data["gateways"] == [{"profile": "default", "ports": {}}]
 
@@ -140,6 +148,7 @@ class TestStatusEndpointTopology:
             lambda: {
                 "profiles": ["default", "coder"],
                 "gateway_mode": "multiplex",
+                "gateway_count": 1,
                 "gateways": [{"profile": "default", "ports": {"webhook": 8644}}],
             },
         )
@@ -150,6 +159,7 @@ class TestStatusEndpointTopology:
             data = resp.json()
             assert data["profiles"] == ["default", "coder"]
             assert data["gateway_mode"] == "multiplex"
+            assert data["gateway_count"] == 1
             # But the per-gateway detail (host ports = recon) stays gated,
             # alongside hermes_home / gateway_pid.
             assert "gateways" not in data

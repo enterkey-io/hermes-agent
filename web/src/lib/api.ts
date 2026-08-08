@@ -1875,6 +1875,8 @@ export interface StatusResponse {
   env_path: string;
   gateway_exit_reason: string | null;
   gateway_health_url: string | null;
+  /** Number of live gateways across all configured profiles. */
+  gateway_count?: number;
   gateway_pid: number | null;
   gateway_platforms: Record<string, PlatformStatus>;
   gateway_running: boolean;

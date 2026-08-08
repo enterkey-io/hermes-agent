@@ -2894,7 +2894,8 @@ def _profile_platform_ports(profile_home: Path, runtime: Optional[dict]) -> Dict
 def _collect_profile_gateway_topology() -> Dict[str, Any]:
     """Enumerate profiles and the gateways serving them for ``/api/status``.
 
-    Returns ``{"profiles": [...], "gateway_mode": ..., "gateways": [...]}``:
+    Returns ``{"profiles": [...], "gateway_mode": ..., "gateway_count": ...,
+    "gateways": [...]}``:
 
     * ``profiles`` — every profile on the host (default + named), from
       ``profiles_to_serve(True)`` (the cheap enumeration chokepoint — no
@@ -2913,7 +2914,12 @@ def _collect_profile_gateway_topology() -> Dict[str, Any]:
         homes = profiles_to_serve(True)
     except Exception:
         _log.debug("profile/gateway topology enumeration failed", exc_info=True)
-        return {"profiles": [], "gateway_mode": "unknown", "gateways": []}
+        return {
+            "profiles": [],
+            "gateway_mode": "unknown",
+            "gateway_count": 0,
+            "gateways": [],
+        }
 
     profile_names = [name for name, _home in homes]
     gateways: List[Dict[str, Any]] = []
@@ -2948,7 +2954,12 @@ def _collect_profile_gateway_topology() -> Dict[str, Any]:
     else:
         mode = "none"
 
-    return {"profiles": profile_names, "gateway_mode": mode, "gateways": gateways}
+    return {
+        "profiles": profile_names,
+        "gateway_mode": mode,
+        "gateway_count": len(gateways),
+        "gateways": gateways,
+    }
 
 
 # /api/status is polled ~1/s by the desktop app while it waits for the backend
@@ -3344,6 +3355,7 @@ async def get_status(profile: Optional[str] = None):
         )
         status["profiles"] = topology["profiles"]
         status["gateway_mode"] = topology["gateway_mode"]
+        status["gateway_count"] = topology["gateway_count"]
 
         # Absolute host paths, the gateway PID, the internal gateway health
         # URL, and per-gateway ports are deployment recon a liveness probe never
