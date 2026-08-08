@@ -201,6 +201,44 @@
   overflow-wrap: anywhere;
 }
 
+.hermes-runbooks-legacy-head,
+.hermes-runbooks-legacy-search {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.hermes-runbooks-legacy-search {
+  min-width: min(420px, 100%);
+}
+
+.hermes-runbooks-legacy-layout {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 3fr) minmax(280px, 2fr);
+}
+
+.hermes-runbooks-clickable-row {
+  cursor: pointer;
+}
+
+.hermes-runbooks-clickable-row:hover {
+  background: hsl(var(--muted));
+}
+
+.hermes-runbooks-legacy-detail {
+  background: hsl(var(--muted));
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  font-size: 12px;
+  margin: 0;
+  max-height: 64vh;
+  overflow: auto;
+  padding: 12px;
+  white-space: pre-wrap;
+}
+
 .hermes-runbooks-status-registered {
   border-color: #168a4a;
   color: #168a4a;
@@ -267,7 +305,7 @@
   .hermes-runbooks-tabs {
     align-items: stretch;
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .hermes-runbooks-tabs button {
@@ -279,6 +317,16 @@
 
   .hermes-runbooks-list {
     max-height: 34vh;
+  }
+
+  .hermes-runbooks-legacy-head,
+  .hermes-runbooks-legacy-search {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .hermes-runbooks-legacy-layout {
+    grid-template-columns: 1fr;
   }
 
   .hermes-runbooks-textarea,

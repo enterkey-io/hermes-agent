@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
+import sqlite3
 
 import pytest
 from fastapi import FastAPI
@@ -223,3 +225,59 @@ def test_preview_diff_and_bundle_registration(client):
     assert '"Approver"' not in bundle
     assert "Evernote migration" in bundle
     assert "Schedules" in bundle
+    assert "Legacy Work" in bundle
+
+
+def test_legacy_work_is_read_only_and_searchable(client, tmp_path):
+    archive = (
+        tmp_path
+        / ".hermes"
+        / "archives"
+        / "paperclip"
+        / "current"
+    )
+    archive.mkdir(parents=True)
+    conn = sqlite3.connect(archive / "legacy-work.db")
+    conn.executescript(
+        """
+        CREATE TABLE archive_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE legacy_entities (
+            entity_type TEXT, entity_id TEXT, legacy_identifier TEXT, title TEXT,
+            status TEXT, owner TEXT, updated_at TEXT, payload_json TEXT
+        );
+        CREATE VIRTUAL TABLE legacy_search USING fts5(
+            entity_type UNINDEXED, entity_id UNINDEXED, legacy_identifier,
+            title, body, owner, status, tokenize='unicode61'
+        );
+        """
+    )
+    manifest = {
+        "created_at": "2026-08-07T00:00:00Z",
+        "reconciliation": {
+            "source_counts": {"projects": 1, "issues": 1, "issue_comments": 2},
+            "count_mismatches": {},
+            "foreign_key_missing_counts": {},
+        },
+    }
+    conn.execute("INSERT INTO archive_metadata VALUES ('manifest', ?)", (json.dumps(manifest),))
+    payload = {"id": "issue-1", "identifier": "EK-100", "title": "Migration history"}
+    conn.execute(
+        "INSERT INTO legacy_entities VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("issue", "issue-1", "EK-100", "Migration history", "done", "agent-1", "2026-08-07", json.dumps(payload)),
+    )
+    conn.execute(
+        "INSERT INTO legacy_search VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("issue", "issue-1", "EK-100", "Migration history", "Archived task", "agent-1", "done"),
+    )
+    conn.commit()
+    conn.close()
+
+    response = client.get("/api/plugins/runbooks/legacy?q=migration")
+    assert response.status_code == 200, response.text
+    assert response.json()["results"][0]["legacy_identifier"] == "EK-100"
+    assert response.json()["summary"]["source_counts"]["issues"] == 1
+
+    detail = client.get("/api/plugins/runbooks/legacy/issue/issue-1")
+    assert detail.status_code == 200
+    assert detail.json()["entity"]["title"] == "Migration history"
+    assert client.post("/api/plugins/runbooks/legacy", json={}).status_code == 405

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import sqlite3
 from typing import Any
 
@@ -388,6 +389,58 @@ def _migration_inventory() -> dict[str, Any]:
     return {"counts": counts, "candidates": candidates, "sources": sources}
 
 
+def _legacy_database_path() -> Path:
+    return (
+        get_default_hermes_root()
+        / "archives"
+        / "paperclip"
+        / "current"
+        / "legacy-work.db"
+    )
+
+
+def _legacy_connect() -> sqlite3.Connection:
+    path = _legacy_database_path()
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Paperclip Legacy Work archive is not available")
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _legacy_query(value: str) -> str:
+    tokens = re.findall(r"[A-Za-z0-9_-]+", value)
+    return " ".join(f'"{token}"*' for token in tokens[:12])
+
+
+def _legacy_summary() -> dict[str, Any]:
+    try:
+        with _legacy_connect() as conn:
+            row = conn.execute(
+                "SELECT value FROM archive_metadata WHERE key = 'manifest'"
+            ).fetchone()
+            manifest = json.loads(row["value"]) if row else {}
+            entity_counts = {
+                item["entity_type"]: item["count"]
+                for item in conn.execute(
+                    "SELECT entity_type, COUNT(*) AS count FROM legacy_entities GROUP BY entity_type"
+                )
+            }
+    except (HTTPException, sqlite3.Error, json.JSONDecodeError):
+        return {"available": False, "entity_counts": {}, "source_counts": {}}
+    reconciliation = manifest.get("reconciliation", {})
+    return {
+        "available": True,
+        "created_at": manifest.get("created_at"),
+        "entity_counts": entity_counts,
+        "source_counts": reconciliation.get("source_counts", {}),
+        "count_mismatches": reconciliation.get("count_mismatches", {}),
+        "foreign_key_missing_counts": reconciliation.get(
+            "foreign_key_missing_counts", {}
+        ),
+    }
+
+
 @router.get("/overview")
 async def overview() -> dict[str, Any]:
     with registry.connect_closing() as conn:
@@ -400,6 +453,7 @@ async def overview() -> dict[str, Any]:
         item for item in enabled_schedules if item["registration_status"] == "registered"
     ]
     migration = _migration_inventory()
+    legacy = _legacy_summary()
     return {
         "counts": {
             "runbooks": len(runbooks),
@@ -411,11 +465,13 @@ async def overview() -> dict[str, Any]:
             "registered_schedules": len(registered_schedules),
             "unregistered_schedules": len(enabled_schedules) - len(registered_schedules),
             "migration_candidates": len(migration["candidates"]),
+            "legacy_issues": legacy["source_counts"].get("issues", 0),
         },
         "runbooks": runbooks,
         "workflows": definitions,
         "schedules": schedules,
         "migration": migration,
+        "legacy": legacy,
         "recent_runs": runs,
     }
 
@@ -426,6 +482,60 @@ async def list_schedules(include_disabled: bool = False) -> dict[str, Any]:
     if not include_disabled:
         schedules = [item for item in schedules if item["enabled"]]
     return {"schedules": schedules}
+
+
+@router.get("/legacy")
+async def search_legacy_work(
+    q: str = "",
+    entity_type: str | None = None,
+    status: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> dict[str, Any]:
+    try:
+        with _legacy_connect() as conn:
+            conditions: list[str] = []
+            params: list[Any] = []
+            if q.strip():
+                match = _legacy_query(q)
+                if not match:
+                    return {"results": [], "summary": _legacy_summary()}
+                conditions.append("legacy_search MATCH ?")
+                params.append(match)
+            if entity_type:
+                conditions.append("e.entity_type = ?")
+                params.append(entity_type)
+            if status:
+                conditions.append("e.status = ?")
+                params.append(status)
+            where = " WHERE " + " AND ".join(conditions) if conditions else ""
+            rows = conn.execute(
+                "SELECT e.entity_type, e.entity_id, e.legacy_identifier, e.title, "
+                "e.status, e.owner, e.updated_at "
+                "FROM legacy_entities e JOIN legacy_search ON "
+                "legacy_search.entity_type=e.entity_type AND "
+                "legacy_search.entity_id=e.entity_id"
+                + where
+                + " ORDER BY e.updated_at DESC LIMIT ?",
+                (*params, limit),
+            ).fetchall()
+    except sqlite3.Error as exc:
+        raise _http_error(exc)
+    return {"results": [dict(row) for row in rows], "summary": _legacy_summary()}
+
+
+@router.get("/legacy/{entity_type}/{entity_id}")
+async def get_legacy_entity(entity_type: str, entity_id: str) -> dict[str, Any]:
+    try:
+        with _legacy_connect() as conn:
+            row = conn.execute(
+                "SELECT payload_json FROM legacy_entities WHERE entity_type=? AND entity_id=?",
+                (entity_type, entity_id),
+            ).fetchone()
+    except sqlite3.Error as exc:
+        raise _http_error(exc)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Legacy Work item not found")
+    return {"entity_type": entity_type, "entity": json.loads(row["payload_json"])}
 
 
 @router.get("/runbooks")

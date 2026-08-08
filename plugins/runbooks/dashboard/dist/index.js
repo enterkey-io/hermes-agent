@@ -80,6 +80,10 @@
     const [filter, setFilter] = useState("");
     const [view, setView] = useState("runbooks");
     const [proposalSummary, setProposalSummary] = useState("");
+    const [legacyQuery, setLegacyQuery] = useState("");
+    const [legacyResults, setLegacyResults] = useState([]);
+    const [legacySummary, setLegacySummary] = useState(null);
+    const [legacySelected, setLegacySelected] = useState(null);
     const [error, setError] = useState("");
     const [busy, setBusy] = useState(false);
 
@@ -213,6 +217,26 @@
       setMode("edit");
     }
 
+    function searchLegacy() {
+      setBusy(true);
+      setError("");
+      const suffix = legacyQuery.trim() ? "?q=" + encodeURIComponent(legacyQuery.trim()) : "";
+      fetchJSON("/legacy" + suffix).then(function (data) {
+        setLegacyResults(data.results || []);
+        setLegacySummary(data.summary || null);
+      }).catch(function (err) {
+        setError(err.message || String(err));
+      }).finally(function () {
+        setBusy(false);
+      });
+    }
+
+    function openLegacy(item) {
+      fetchJSON("/legacy/" + encodeURIComponent(item.entity_type) + "/" + encodeURIComponent(item.entity_id))
+        .then(setLegacySelected)
+        .catch(function (err) { setError(err.message || String(err)); });
+    }
+
     const selectedWorkflow = workflows.find(function (workflow) {
       return selected && selected.metadata && workflow.id === selected.metadata.id;
     });
@@ -247,7 +271,11 @@
         h(Button, {
           variant: view === "migration" ? "default" : "outline",
           onClick: function () { setView("migration"); },
-        }, "Evernote migration")
+        }, "Evernote migration"),
+        h(Button, {
+          variant: view === "legacy" ? "default" : "outline",
+          onClick: function () { setView("legacy"); setTimeout(searchLegacy, 0); },
+        }, "Legacy Work")
       ),
       view === "runbooks" ? h("div", { className: "hermes-runbooks-grid" },
         h("aside", { className: "hermes-runbooks-sidebar" },
@@ -408,7 +436,7 @@
             }))
           )
         )
-      ) : h("section", { className: "hermes-runbooks-table-panel" },
+      ) : view === "migration" ? h("section", { className: "hermes-runbooks-table-panel" },
         h("div", { className: "hermes-runbooks-summary" },
           Object.keys(migration.counts || {}).sort().map(function (key) {
             return h("span", { key: key }, h("strong", null, migration.counts[key]), " " + key);
@@ -431,6 +459,53 @@
               );
             }))
           )
+        )
+      ) : h("section", { className: "hermes-runbooks-table-panel" },
+        h("div", { className: "hermes-runbooks-legacy-head" },
+          h("div", { className: "hermes-runbooks-summary" },
+            h("strong", null, legacySummary ? (legacySummary.source_counts.issues || 0) : 0),
+            h("span", null, " archived tasks"),
+            h("strong", null, legacySummary ? (legacySummary.source_counts.projects || 0) : 0),
+            h("span", null, " projects"),
+            h("strong", null, legacySummary ? (legacySummary.source_counts.routines || 0) : 0),
+            h("span", null, " routines")
+          ),
+          h("div", { className: "hermes-runbooks-legacy-search" },
+            h(Input, {
+              value: legacyQuery,
+              onChange: function (event) { setLegacyQuery(event.target.value); },
+              onKeyDown: function (event) { if (event.key === "Enter") searchLegacy(); },
+              placeholder: "Search archived work",
+            }),
+            h(Button, { onClick: searchLegacy, disabled: busy }, "Search")
+          )
+        ),
+        h("div", { className: "hermes-runbooks-legacy-layout" },
+          h("div", { className: "hermes-runbooks-table-wrap" },
+            h("table", { className: "hermes-runbooks-table" },
+              h("thead", null, h("tr", null,
+                h("th", null, "Legacy item"),
+                h("th", null, "Type"),
+                h("th", null, "Status"),
+                h("th", null, "Updated")
+              )),
+              h("tbody", null, legacyResults.map(function (item) {
+                return h("tr", {
+                  key: item.entity_type + ":" + item.entity_id,
+                  className: "hermes-runbooks-clickable-row",
+                  onClick: function () { openLegacy(item); },
+                },
+                  h("td", null, h("strong", null, item.title || item.legacy_identifier), h("code", null, item.legacy_identifier)),
+                  h("td", null, item.entity_type),
+                  h("td", null, item.status || "-"),
+                  h("td", null, item.updated_at || "-")
+                );
+              }))
+            )
+          ),
+          legacySelected ? h("pre", { className: "hermes-runbooks-legacy-detail" },
+            JSON.stringify(legacySelected.entity, null, 2)
+          ) : h("div", { className: "hermes-runbooks-empty" }, "Select an archived item.")
         )
       )
     );
