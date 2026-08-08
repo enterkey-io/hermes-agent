@@ -49,14 +49,19 @@ def main() -> int:
     raw = json.loads(jobs_path.read_text(encoding="utf-8"))
     jobs = raw.get("jobs", raw)
     indexed = {str(job["id"]): job for job in jobs}
-    updates: dict[str, str] = {}
+    updates: dict[str, dict[str, object]] = {}
     for job_id, (old, new) in REPLACEMENTS.items():
         prompt = str(indexed[job_id].get("prompt") or "")
-        if new in prompt:
-            continue
-        if prompt.count(old) != 1:
-            raise RuntimeError(f"expected one authority reference in {job_id}")
-        updates[job_id] = prompt.replace(old, new)
+        payload: dict[str, object] = {}
+        if new not in prompt:
+            if prompt.count(old) != 1:
+                raise RuntimeError(f"expected one authority reference in {job_id}")
+            payload["prompt"] = prompt.replace(old, new)
+        toolsets = indexed[job_id].get("enabled_toolsets")
+        if isinstance(toolsets, list) and "runbook" not in toolsets:
+            payload["enabled_toolsets"] = [*toolsets, "runbook"]
+        if payload:
+            updates[job_id] = payload
     if not updates:
         print(json.dumps({"updated": 0, "jobs": []}))
         return 0
@@ -68,8 +73,8 @@ def main() -> int:
     with _cron_store_for_profile("grace"):
         from cron import jobs as cron_jobs
 
-        for job_id, prompt in updates.items():
-            if cron_jobs.update_job(job_id, {"prompt": prompt}) is None:
+        for job_id, payload in updates.items():
+            if cron_jobs.update_job(job_id, payload) is None:
                 raise RuntimeError(f"job disappeared during update: {job_id}")
     print(json.dumps({"updated": len(updates), "jobs": sorted(updates), "backup": str(backup)}, indent=2))
     return 0
