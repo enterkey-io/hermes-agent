@@ -103,6 +103,11 @@ def test_save_runbook_projects_workflow_and_steps(client):
     overview = client.get("/api/plugins/runbooks/overview").json()
     assert overview["counts"]["runbooks"] == 1
     assert overview["counts"]["workflows"] == 1
+    assert overview["workflows"][0]["steps"][0]["step_key"] == "collect"
+    assert overview["workflows"][0]["steps"][0]["name"] == "Collect context"
+
+    workflows = client.get("/api/plugins/runbooks/workflows").json()["workflows"]
+    assert workflows[0]["steps"][0]["step_key"] == "collect"
     assert overview["counts"]["active_workflows"] == 1
 
 
@@ -234,6 +239,11 @@ def test_preview_diff_and_bundle_registration(client):
     assert 'window.location.assign("/cron?"' in bundle
     assert "schedulesFor" in bundle
     assert "runsFor" in bundle
+    assert "DialogContent" in bundle
+    assert "CardContent" in bundle
+    assert "TabsList" in bundle
+    assert "usefulPurpose" in bundle
+    assert "hermes-runbooks-workflow-detail" not in bundle
 
     styles = (
         Path(__file__).resolve().parents[2]
@@ -243,8 +253,11 @@ def test_preview_diff_and_bundle_registration(client):
         / "dist"
         / "style.css"
     ).read_text(encoding="utf-8")
-    assert ".hermes-runbooks-workflow-detail" in styles
-    assert ".hermes-runbooks-relationship-grid" in styles
+    assert ".hermes-runbooks-workflow-card" in styles
+    assert ".hermes-runbooks-dialog" in styles
+    assert ".hermes-runbooks-detail-section" in styles
+    assert ".hermes-runbooks-workflow-detail" not in styles
+    assert ".hermes-runbooks-relationship-grid" not in styles
     assert "max-height: 50vh" not in styles
     assert "max-height: 34vh" not in styles
 

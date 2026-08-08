@@ -121,6 +121,12 @@ def _definition_dict(conn, workflow_id: str) -> dict[str, Any]:
     return definition
 
 
+def _definition_summary_dict(conn, definition) -> dict[str, Any]:
+    item = definition.to_dict()
+    item["steps"] = [step.to_dict() for step in registry.list_steps(conn, definition.id)]
+    return item
+
+
 def _runs_for_workflow(conn, workflow_id: str, *, limit: int) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
@@ -463,7 +469,10 @@ def _legacy_summary() -> dict[str, Any]:
 @router.get("/overview")
 async def overview() -> dict[str, Any]:
     with registry.connect_closing() as conn:
-        definitions = [item.to_dict() for item in registry.list_definitions(conn)]
+        definitions = [
+            _definition_summary_dict(conn, item)
+            for item in registry.list_definitions(conn)
+        ]
         runs = _list_runs(conn, workflow_id=None, limit=50)
     runbooks = [record.to_dict() for record in runbook_store.list_runbooks()]
     schedules = _load_schedule_inventory()
@@ -672,7 +681,10 @@ async def diff_runbook(slug: str, request: MarkdownRequest) -> dict[str, str]:
 @router.get("/workflows")
 async def list_workflows() -> dict[str, Any]:
     with registry.connect_closing() as conn:
-        workflows = [item.to_dict() for item in registry.list_definitions(conn)]
+        workflows = [
+            _definition_summary_dict(conn, item)
+            for item in registry.list_definitions(conn)
+        ]
     return {"workflows": workflows}
 
 

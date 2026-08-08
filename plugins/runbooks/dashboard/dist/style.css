@@ -1,285 +1,365 @@
 .hermes-runbooks {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px;
   min-height: calc(100vh - 96px);
 }
 
-.hermes-runbooks button {
-  letter-spacing: 0;
-}
-
-.hermes-runbooks-topbar,
-.hermes-runbooks-editor-head,
+.hermes-runbooks-toolbar,
 .hermes-runbooks-actions,
-.hermes-runbooks-savebar,
-.hermes-runbooks-tabs,
-.hermes-runbooks-summary,
-.hermes-runbooks-view-head,
-.hermes-runbooks-detail-head,
-.hermes-runbooks-section-title,
-.hermes-runbooks-schedule,
-.hermes-runbooks-runtime {
+.hermes-runbooks-view-heading,
+.hermes-runbooks-workflow-content,
+.hermes-runbooks-workflow-title,
+.hermes-runbooks-signals,
+.hermes-runbooks-compact-content,
+.hermes-runbooks-section-heading,
+.hermes-runbooks-detail-row,
+.hermes-runbooks-activity,
+.hermes-runbooks-proposal,
+.hermes-runbooks-dialog-title,
+.hermes-runbooks-archive-tools,
+.hermes-runbooks-archive-search {
   align-items: center;
   display: flex;
-  gap: 10px;
+}
+
+.hermes-runbooks-toolbar,
+.hermes-runbooks-view-heading,
+.hermes-runbooks-workflow-content,
+.hermes-runbooks-section-heading,
+.hermes-runbooks-detail-row,
+.hermes-runbooks-archive-tools {
   justify-content: space-between;
 }
 
-.hermes-runbooks-kpis {
-  display: grid;
+.hermes-runbooks-actions,
+.hermes-runbooks-workflow-title,
+.hermes-runbooks-signals,
+.hermes-runbooks-activity,
+.hermes-runbooks-proposal,
+.hermes-runbooks-dialog-title,
+.hermes-runbooks-archive-search {
   gap: 8px;
-  grid-template-columns: repeat(3, minmax(130px, 1fr));
 }
 
-.hermes-runbooks-kpi {
-  border-left: 2px solid hsl(var(--border));
+.hermes-runbooks-overview,
+.hermes-runbooks-view-heading p,
+.hermes-runbooks-archive-tools > p {
+  color: color-mix(in srgb, var(--midground-base) 62%, transparent);
+  font-size: 12px;
+  margin: 0;
+}
+
+.hermes-runbooks-overview {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-  padding: 4px 12px;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
-.hermes-runbooks-kpi strong {
-  font-size: 20px;
-  line-height: 1.1;
-}
-
-.hermes-runbooks-kpi span {
-  color: hsl(var(--muted-foreground));
-  font-size: 11px;
+.hermes-runbooks-overview strong {
+  color: var(--midground);
 }
 
 .hermes-runbooks-tabs {
-  justify-content: flex-start;
+  align-self: flex-start;
+  max-width: 100%;
 }
 
-.hermes-runbooks-tabs button {
-  line-height: 1.1;
-  min-height: 36px;
-}
-
-.hermes-runbooks-workflows,
-.hermes-runbooks-list,
-.hermes-runbooks-definition,
-.hermes-runbooks-relationship,
-.hermes-runbooks-steps,
-.hermes-runbooks-history-grid {
+.hermes-runbooks-view,
+.hermes-runbooks-card-list,
+.hermes-runbooks-workflow-copy,
+.hermes-runbooks-compact-copy,
+.hermes-runbooks-dialog-body,
+.hermes-runbooks-detail-section,
+.hermes-runbooks-editor {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+}
+
+.hermes-runbooks-view,
+.hermes-runbooks-dialog-body,
+.hermes-runbooks-editor {
+  gap: 16px;
+}
+
+.hermes-runbooks-card-list,
+.hermes-runbooks-detail-section {
+  gap: 8px;
 }
 
 .hermes-runbooks-filter {
   display: grid;
   gap: 5px;
-  max-width: 440px;
+  max-width: 520px;
 }
 
-.hermes-runbooks-list {
-  overflow: visible;
+.hermes-runbooks-workflow-card,
+.hermes-runbooks-compact-card {
+  transition: background-color 120ms ease, border-color 120ms ease;
 }
 
-.hermes-runbooks-list-item {
-  align-items: center;
-  background: transparent;
-  border: 0;
-  border-bottom: 1px solid hsl(var(--border));
-  color: hsl(var(--foreground));
-  cursor: pointer;
-  display: grid;
-  gap: 10px;
-  grid-template-columns: minmax(220px, 2fr) minmax(80px, 0.7fr) auto minmax(100px, 0.8fr) minmax(170px, 1.2fr) minmax(110px, 0.8fr);
-  min-height: 62px;
-  padding: 10px 8px;
-  text-align: left;
-  width: 100%;
+.hermes-runbooks-workflow-card:hover,
+.hermes-runbooks-compact-card:hover {
+  background: color-mix(in srgb, var(--midground-base) 7%, var(--background-base));
+  border-color: color-mix(in srgb, var(--midground-base) 28%, transparent);
 }
 
-.hermes-runbooks-list-item:hover,
-.hermes-runbooks-list-item.is-active {
-  background: hsl(var(--muted));
+.hermes-runbooks-workflow-content {
+  gap: 20px;
+  min-height: 92px;
 }
 
-.hermes-runbooks-list-item.is-active {
-  box-shadow: inset 3px 0 0 hsl(var(--primary));
-}
-
-.hermes-runbooks-list-title {
-  font-size: 14px;
-  font-weight: 650;
+.hermes-runbooks-workflow-copy,
+.hermes-runbooks-compact-copy {
+  gap: 6px;
   min-width: 0;
-  overflow-wrap: anywhere;
 }
 
-.hermes-runbooks-list-owner,
-.hermes-runbooks-connection,
-.hermes-runbooks-muted {
-  color: hsl(var(--muted-foreground));
-  font-size: 12px;
-  min-width: 0;
-  overflow-wrap: anywhere;
+.hermes-runbooks-workflow-copy {
+  flex: 1;
 }
 
-.hermes-runbooks-status {
-  border: 1px solid hsl(var(--border));
-  border-radius: 999px;
-  display: inline-flex;
-  font-size: 11px;
-  justify-self: start;
-  padding: 2px 8px;
-  white-space: nowrap;
+.hermes-runbooks-workflow-title {
+  flex-wrap: wrap;
 }
 
-.hermes-runbooks-status-active,
-.hermes-runbooks-status-succeeded,
-.hermes-runbooks-status-completed,
-.hermes-runbooks-status-registered {
-  border-color: #168a4a;
-  color: #168a4a;
-}
-
-.hermes-runbooks-status-failed,
-.hermes-runbooks-status-execution_error {
-  border-color: #b42318;
-  color: #b42318;
-}
-
-.hermes-runbooks-status-paused,
-.hermes-runbooks-status-degraded,
-.hermes-runbooks-status-unregistered,
-.hermes-runbooks-status-unresolved {
-  border-color: #a16207;
-  color: #a16207;
-}
-
-.hermes-runbooks-status-retired {
-  color: hsl(var(--muted-foreground));
-}
-
-.hermes-runbooks-workflow-detail {
-  background: hsl(var(--card));
-  border-bottom: 1px solid hsl(var(--border));
-  border-left: 3px solid hsl(var(--primary));
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  padding: 18px 16px 20px;
-}
-
-.hermes-runbooks-detail-head h2,
-.hermes-runbooks-editor-head h3,
-.hermes-runbooks-section-title h3 {
+.hermes-runbooks-workflow-title h3,
+.hermes-runbooks-compact-copy h3,
+.hermes-runbooks-section-heading h3 {
   letter-spacing: 0;
   margin: 0;
+  overflow-wrap: anywhere;
 }
 
-.hermes-runbooks-detail-head h2 {
-  font-size: 18px;
+.hermes-runbooks-workflow-title h3,
+.hermes-runbooks-compact-copy h3 {
+  font-size: 14px;
+  font-weight: 650;
 }
 
-.hermes-runbooks-relationship-grid {
-  display: grid;
-  gap: 18px;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-.hermes-runbooks-relationship {
-  align-content: start;
-  border-top: 1px solid hsl(var(--border));
-  min-width: 0;
-  padding-top: 10px;
-}
-
-.hermes-runbooks-section-title h3 {
-  font-size: 13px;
-}
-
-.hermes-runbooks-section-title > span {
-  color: hsl(var(--muted-foreground));
+.hermes-runbooks-workflow-copy > p {
+  color: color-mix(in srgb, var(--midground-base) 62%, transparent);
   font-size: 12px;
+  line-height: 1.45;
+  margin: 0;
+  max-width: 820px;
 }
 
-.hermes-runbooks-schedule {
-  align-items: flex-start;
-  border-bottom: 1px solid hsl(var(--border));
-  padding: 7px 0 10px;
+.hermes-runbooks-signals {
+  color: color-mix(in srgb, var(--midground-base) 52%, transparent);
+  flex-wrap: wrap;
+  font-family: var(--theme-font-mono);
+  font-size: 11px;
+  gap: 7px 16px;
 }
 
-.hermes-runbooks-schedule-main,
-.hermes-runbooks-schedule-actions {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 0;
+.hermes-runbooks-compact-content {
+  gap: 14px;
+  min-height: 68px;
 }
 
-.hermes-runbooks-schedule-main code,
-.hermes-runbooks-runtime code {
+.hermes-runbooks-next-time {
+  color: var(--midground);
+  flex: 0 0 190px;
+  font-family: var(--theme-font-mono);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.hermes-runbooks-compact-copy {
+  flex: 1;
+}
+
+.hermes-runbooks-compact-copy > span {
+  color: color-mix(in srgb, var(--midground-base) 52%, transparent);
+  font-family: var(--theme-font-mono);
   font-size: 11px;
   overflow-wrap: anywhere;
 }
 
-.hermes-runbooks-schedule-actions {
-  align-items: flex-end;
-  flex: 0 0 auto;
+.hermes-runbooks-dialog {
+  display: flex !important;
+  flex-direction: column;
+  max-height: min(88dvh, 860px);
+  max-width: 720px !important;
+  overflow: hidden;
+  width: calc(100vw - 32px) !important;
 }
 
-.hermes-runbooks-runtime {
-  align-items: flex-start;
+.hermes-runbooks-create-dialog {
+  max-width: 480px !important;
+  width: calc(100vw - 32px) !important;
+}
+
+.hermes-runbooks-dialog-title {
+  padding-right: 28px;
+}
+
+.hermes-runbooks-dialog-body {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 18px 20px;
+}
+
+.hermes-runbooks-create-body {
+  display: grid;
+  gap: 6px;
+  padding: 18px 20px;
+}
+
+.hermes-runbooks-section-heading {
+  gap: 12px;
+}
+
+.hermes-runbooks-section-heading h3 {
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.hermes-runbooks-section-heading > span {
+  color: color-mix(in srgb, var(--midground-base) 48%, transparent);
+  font-size: 11px;
+}
+
+.hermes-runbooks-detail-row {
+  border-top: 1px solid color-mix(in srgb, var(--midground-base) 12%, transparent);
+  gap: 12px;
+  padding: 11px 0 3px;
+}
+
+.hermes-runbooks-detail-copy {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.hermes-runbooks-detail-copy strong {
   font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
-.hermes-runbooks-steps {
+.hermes-runbooks-detail-copy span,
+.hermes-runbooks-empty-copy,
+.hermes-runbooks-activity > span:not([class]) {
+  color: color-mix(in srgb, var(--midground-base) 55%, transparent);
+  font-size: 11px;
+}
+
+.hermes-runbooks-empty-copy {
+  margin: 0;
+  padding: 5px 0;
+}
+
+.hermes-runbooks-procedure {
   list-style: none;
   margin: 0;
   padding: 0;
 }
 
-.hermes-runbooks-run,
-.hermes-runbooks-step {
-  align-items: center;
-  border-bottom: 1px solid hsl(var(--border));
+.hermes-runbooks-procedure li {
+  align-items: flex-start;
+  border-top: 1px solid color-mix(in srgb, var(--midground-base) 12%, transparent);
   display: flex;
-  gap: 8px;
-  justify-content: space-between;
-  min-width: 0;
-  padding: 7px 0;
+  gap: 10px;
+  padding: 10px 0;
 }
 
-.hermes-runbooks-step > span:nth-child(2) {
-  flex: 1;
-  min-width: 0;
+.hermes-runbooks-step-number {
+  align-items: center;
+  border: 1px solid color-mix(in srgb, var(--midground-base) 22%, transparent);
+  display: inline-flex;
+  flex: 0 0 24px;
+  font-family: var(--theme-font-mono);
+  font-size: 10px;
+  height: 24px;
+  justify-content: center;
 }
 
-.hermes-runbooks-empty-inline {
-  color: hsl(var(--muted-foreground));
+.hermes-runbooks-procedure li > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.hermes-runbooks-procedure strong {
   font-size: 12px;
-  padding: 8px 0;
 }
 
-.hermes-runbooks-definition {
-  border-top: 1px solid hsl(var(--border));
-  padding-top: 14px;
+.hermes-runbooks-procedure li > div > span {
+  color: color-mix(in srgb, var(--midground-base) 48%, transparent);
+  font-size: 10px;
 }
 
-.hermes-runbooks-error {
-  background: #7f1d1d;
-  border-radius: 8px;
-  color: #fff;
-  padding: 10px 12px;
+.hermes-runbooks-text-link {
+  background: transparent;
+  border: 0;
+  color: color-mix(in srgb, var(--midground-base) 66%, transparent);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  padding: 0;
+}
+
+.hermes-runbooks-text-link:hover {
+  color: var(--midground);
+  text-decoration: underline;
+}
+
+.hermes-runbooks-advanced {
+  border-top: 1px solid color-mix(in srgb, var(--midground-base) 12%, transparent);
+  margin-top: 4px;
+  padding-top: 8px;
+}
+
+.hermes-runbooks-advanced summary {
+  color: color-mix(in srgb, var(--midground-base) 58%, transparent);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.hermes-runbooks-advanced > code {
+  display: block;
+  font-size: 10px;
+  margin-top: 8px;
+  overflow-wrap: anywhere;
+}
+
+.hermes-runbooks-advanced dl {
+  display: grid;
+  gap: 7px;
+  margin: 10px 0 0;
+}
+
+.hermes-runbooks-advanced dl > div {
+  display: grid;
+  font-size: 11px;
+  gap: 10px;
+  grid-template-columns: 100px minmax(0, 1fr);
+}
+
+.hermes-runbooks-advanced dt {
+  color: color-mix(in srgb, var(--midground-base) 45%, transparent);
+}
+
+.hermes-runbooks-advanced dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.hermes-runbooks-mode-tabs {
+  align-self: flex-start;
 }
 
 .hermes-runbooks-textarea {
-  background: hsl(var(--background));
-  border: 1px solid hsl(var(--border));
-  border-radius: 8px;
-  color: hsl(var(--foreground));
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 13px;
-  line-height: 1.45;
-  min-height: 520px;
+  background: var(--background-base);
+  border: 1px solid color-mix(in srgb, var(--midground-base) 18%, transparent);
+  color: var(--midground);
+  font-family: var(--theme-font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  min-height: 48vh;
   padding: 12px;
   resize: vertical;
   width: 100%;
@@ -287,297 +367,151 @@
 
 .hermes-runbooks-preview,
 .hermes-runbooks-diff {
-  border: 1px solid hsl(var(--border));
-  border-radius: 8px;
-  min-height: 360px;
-  padding: 16px;
+  border: 1px solid color-mix(in srgb, var(--midground-base) 18%, transparent);
+  font-size: 12px;
+  line-height: 1.5;
+  min-height: 38vh;
+  overflow: auto;
+  padding: 14px;
 }
 
 .hermes-runbooks-diff {
-  background: hsl(var(--muted));
-  font-size: 12px;
-  overflow: auto;
+  background: color-mix(in srgb, var(--midground-base) 5%, var(--background-base));
+  font-family: var(--theme-font-mono);
+  margin: 0;
   white-space: pre-wrap;
 }
 
-.hermes-runbooks-savebar {
-  border-top: 1px solid hsl(var(--border));
+.hermes-runbooks-proposal > :first-child {
+  flex: 1;
+}
+
+.hermes-runbooks-error {
+  background: color-mix(in srgb, #b42318 24%, var(--background-base));
+  border: 1px solid #b42318;
+  color: var(--midground);
+  font-size: 12px;
+  padding: 10px 12px;
+}
+
+.hermes-runbooks-archive-layout {
   display: grid;
-  grid-template-columns: auto minmax(160px, 1fr) auto;
-  padding-top: 10px;
+  gap: 14px;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 0.65fr);
 }
 
-.hermes-runbooks-history {
-  border-top: 1px solid hsl(var(--border));
-  padding-top: 12px;
-}
-
-.hermes-runbooks-history summary {
-  cursor: pointer;
-  font-size: 13px;
-}
-
-.hermes-runbooks-history-grid {
-  display: grid;
-  gap: 16px;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  padding-top: 10px;
-}
-
-.hermes-runbooks-history-grid code {
-  display: block;
-  overflow-wrap: anywhere;
-}
-
-.hermes-runbooks-table-panel {
-  border-top: 1px solid hsl(var(--border));
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding-top: 12px;
-}
-
-.hermes-runbooks-view-head,
-.hermes-runbooks-summary {
-  flex-wrap: wrap;
-}
-
-.hermes-runbooks-summary {
-  justify-content: flex-start;
-}
-
-.hermes-runbooks-summary span,
-.hermes-runbooks-summary strong {
-  font-size: 13px;
-}
-
-.hermes-runbooks-table-wrap {
-  max-width: 100%;
-  overflow-x: auto;
-}
-
-.hermes-runbooks-table {
-  border-collapse: collapse;
-  font-size: 13px;
-  width: 100%;
-}
-
-.hermes-runbooks-table th,
-.hermes-runbooks-table td {
-  border-bottom: 1px solid hsl(var(--border));
-  padding: 8px 10px;
-  text-align: left;
-  vertical-align: top;
-}
-
-.hermes-runbooks-table th {
-  color: hsl(var(--muted-foreground));
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-}
-
-.hermes-runbooks-table td:first-child {
-  min-width: 180px;
-}
-
-.hermes-runbooks-table td code {
-  display: block;
-  font-size: 11px;
-  margin-top: 3px;
-  overflow-wrap: anywhere;
-}
-
-.hermes-runbooks-link {
-  background: transparent;
-  border: 0;
-  color: hsl(var(--primary));
-  cursor: pointer;
-  display: block;
-  font: inherit;
-  font-weight: 650;
-  padding: 0;
-  text-align: left;
-}
-
-.hermes-runbooks-link:hover {
-  text-decoration: underline;
-}
-
-.hermes-runbooks-legacy-head,
-.hermes-runbooks-legacy-search {
-  align-items: center;
-  display: flex;
-  gap: 10px;
-  justify-content: space-between;
-}
-
-.hermes-runbooks-legacy-search {
+.hermes-runbooks-archive-search {
   min-width: min(420px, 100%);
 }
 
-.hermes-runbooks-legacy-layout {
-  display: grid;
-  gap: 12px;
-  grid-template-columns: minmax(0, 3fr) minmax(280px, 2fr);
-}
-
-.hermes-runbooks-clickable-row {
-  cursor: pointer;
-}
-
-.hermes-runbooks-clickable-row:hover {
-  background: hsl(var(--muted));
+.hermes-runbooks-archive-search > :first-child {
+  flex: 1;
 }
 
 .hermes-runbooks-legacy-detail {
-  background: hsl(var(--muted));
-  border: 1px solid hsl(var(--border));
-  border-radius: 8px;
-  font-size: 12px;
+  background: color-mix(in srgb, var(--midground-base) 5%, var(--background-base));
+  border: 1px solid color-mix(in srgb, var(--midground-base) 15%, transparent);
+  font-family: var(--theme-font-mono);
+  font-size: 11px;
   margin: 0;
-  max-height: 64vh;
+  max-height: 68vh;
   overflow: auto;
   padding: 12px;
   white-space: pre-wrap;
 }
 
-.hermes-runbooks-empty {
-  border: 1px dashed hsl(var(--border));
-  border-radius: 8px;
-  color: hsl(var(--muted-foreground));
-  padding: 28px;
-  text-align: center;
-}
-
-@media (max-width: 1100px) {
-  .hermes-runbooks-list-item {
-    grid-template-columns: minmax(180px, 1.7fr) minmax(70px, 0.7fr) auto minmax(100px, 0.8fr);
-  }
-
-  .hermes-runbooks-list-item .hermes-runbooks-connection:nth-last-child(2),
-  .hermes-runbooks-list-item .hermes-runbooks-connection:last-child {
-    display: none;
-  }
-
-  .hermes-runbooks-relationship-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-
-@media (max-width: 700px) {
+@media (max-width: 760px) {
   .hermes-runbooks {
-    gap: 10px;
+    gap: 12px;
     min-height: auto;
   }
 
-  .hermes-runbooks-topbar,
-  .hermes-runbooks-editor-head,
-  .hermes-runbooks-detail-head,
-  .hermes-runbooks-legacy-head,
-  .hermes-runbooks-legacy-search,
-  .hermes-runbooks-view-head {
+  .hermes-runbooks-toolbar,
+  .hermes-runbooks-view-heading,
+  .hermes-runbooks-archive-tools {
     align-items: stretch;
     flex-direction: column;
-  }
-
-  .hermes-runbooks-kpis {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .hermes-runbooks-kpi {
-    padding: 3px 6px;
-  }
-
-  .hermes-runbooks-kpi strong {
-    font-size: 17px;
+    gap: 10px;
   }
 
   .hermes-runbooks-actions {
-    flex-wrap: wrap;
     justify-content: flex-start;
   }
 
   .hermes-runbooks-tabs {
-    align-items: stretch;
     display: grid;
-    gap: 5px;
     grid-template-columns: repeat(4, minmax(0, 1fr));
+    width: 100%;
   }
 
   .hermes-runbooks-tabs button {
-    font-size: 12px;
-    line-height: 1.1;
-    min-height: 32px;
+    font-size: 11px;
     min-width: 0;
-    padding: 6px 2px;
-    white-space: normal;
+    padding-left: 4px;
+    padding-right: 4px;
   }
 
   .hermes-runbooks-filter {
     max-width: none;
   }
 
-  .hermes-runbooks-list-item {
-    gap: 5px 8px;
-    grid-template-columns: minmax(0, 1fr) auto;
-    min-height: 70px;
-    padding: 9px 7px;
+  .hermes-runbooks-workflow-content {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 12px;
   }
 
-  .hermes-runbooks-list-title {
-    grid-column: 1 / -1;
+  .hermes-runbooks-workflow-content > button {
+    align-self: flex-start;
   }
 
-  .hermes-runbooks-list-owner {
-    grid-column: 1;
+  .hermes-runbooks-signals {
+    gap: 4px 12px;
   }
 
-  .hermes-runbooks-list-item .hermes-runbooks-status {
-    grid-column: 2;
-    grid-row: 2;
+  .hermes-runbooks-compact-content {
+    align-items: flex-start;
+    flex-wrap: wrap;
   }
 
-  .hermes-runbooks-list-item .hermes-runbooks-connection:nth-child(4) {
-    display: block;
-    grid-column: 1 / -1;
+  .hermes-runbooks-next-time {
+    flex-basis: 100%;
   }
 
-  .hermes-runbooks-list-item .hermes-runbooks-connection:not(:nth-child(4)) {
-    display: none;
+  .hermes-runbooks-compact-copy {
+    flex-basis: 100%;
   }
 
-  .hermes-runbooks-workflow-detail {
-    padding: 14px 10px 18px;
+  .hermes-runbooks-dialog {
+    max-height: calc(100dvh - 20px);
+    width: calc(100vw - 20px) !important;
   }
 
-  .hermes-runbooks-relationship-grid,
-  .hermes-runbooks-history-grid,
-  .hermes-runbooks-savebar,
-  .hermes-runbooks-legacy-layout {
-    grid-template-columns: 1fr;
+  .hermes-runbooks-dialog-body {
+    padding: 14px;
   }
 
-  .hermes-runbooks-schedule {
+  .hermes-runbooks-detail-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .hermes-runbooks-activity {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .hermes-runbooks-proposal {
     align-items: stretch;
     flex-direction: column;
   }
 
-  .hermes-runbooks-schedule-actions {
-    align-items: flex-start;
-    flex-direction: row;
+  .hermes-runbooks-archive-layout {
+    grid-template-columns: 1fr;
   }
 
-  .hermes-runbooks-legacy-table th:nth-child(2),
-  .hermes-runbooks-legacy-table td:nth-child(2),
-  .hermes-runbooks-legacy-table th:nth-child(4),
-  .hermes-runbooks-legacy-table td:nth-child(4) {
-    display: none;
-  }
-
-  .hermes-runbooks-textarea,
-  .hermes-runbooks-preview,
-  .hermes-runbooks-diff {
-    min-height: 58vh;
+  .hermes-runbooks-archive-search {
+    align-items: stretch;
+    min-width: 0;
   }
 }

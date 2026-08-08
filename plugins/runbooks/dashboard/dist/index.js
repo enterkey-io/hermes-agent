@@ -7,21 +7,29 @@
   const { React } = SDK;
   const h = React.createElement;
   const { useEffect, useMemo, useState } = SDK.hooks;
-  const { Badge, Button, Input, Label } = SDK.components;
+  const {
+    Badge,
+    Button,
+    Card,
+    CardContent,
+    Dialog,
+    DialogContent,
+    DialogDescription,
+    DialogFooter,
+    DialogHeader,
+    DialogTitle,
+    Input,
+    Label,
+    Separator,
+    TabsList,
+    TabsTrigger,
+  } = SDK.components;
   const API = "/api/plugins/runbooks";
 
   function fetchJSON(path, options) {
-    return fetch(API + path, Object.assign({
+    return SDK.fetchJSON(API + path, Object.assign({
       headers: { "Content-Type": "application/json" },
-    }, options || {})).then(async function (response) {
-      const text = await response.text();
-      const data = text ? JSON.parse(text) : {};
-      if (!response.ok) {
-        const detail = data && data.detail ? data.detail : text;
-        throw new Error(detail || response.statusText);
-      }
-      return data;
-    });
+    }, options || {}));
   }
 
   function emptyMarkdown(slug) {
@@ -29,7 +37,7 @@
       "---",
       "id: wf_" + slug.replace(/[^a-zA-Z0-9_]/g, "_"),
       "slug: " + slug,
-      "title: New Runbook",
+      "title: New Workflow",
       "purpose: Describe the workflow outcome.",
       "owner_profile: root",
       "status: draft",
@@ -53,7 +61,7 @@
       "  strategy: manual",
       "related: {}",
       "---",
-      "# New Runbook",
+      "# New Workflow",
       "",
       "## Procedure",
       "",
@@ -62,28 +70,46 @@
     ].join("\n");
   }
 
-  function statusClass(status) {
-    return "hermes-runbooks-status hermes-runbooks-status-" + String(status || "draft");
-  }
-
-  function displayTime(value) {
-    if (!value) return "Not scheduled";
+  function displayTime(value, emptyLabel) {
+    if (!value) return emptyLabel || "Not scheduled";
     const date = new Date(typeof value === "number" ? value * 1000 : value);
     return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
   }
 
+  function statusTone(status) {
+    const value = String(status || "").toLowerCase();
+    if (["active", "ok", "succeeded", "completed", "registered", "enabled"].indexOf(value) !== -1) return "success";
+    if (["failed", "execution_error", "error"].indexOf(value) !== -1) return "destructive";
+    if (["paused", "degraded", "unregistered", "unresolved"].indexOf(value) !== -1) return "warning";
+    return "outline";
+  }
+
+  function usefulPurpose(value) {
+    const purpose = String(value || "").trim();
+    if (purpose.toLowerCase().indexOf("canonical registry record for existing hermes cron job") === 0) return "";
+    return purpose;
+  }
+
+  function StatusBadge(props) {
+    const value = props.value || "unknown";
+    return h(Badge, { tone: statusTone(value) }, props.label || value);
+  }
+
   function RunbooksApp() {
     const [overview, setOverview] = useState(null);
+    const [view, setView] = useState("workflows");
+    const [filter, setFilter] = useState("");
     const [selectedSlug, setSelectedSlug] = useState("");
-    const [markdown, setMarkdown] = useState("");
     const [selected, setSelected] = useState(null);
+    const [markdown, setMarkdown] = useState("");
     const [editorOpen, setEditorOpen] = useState(false);
     const [mode, setMode] = useState("edit");
     const [preview, setPreview] = useState("");
     const [diff, setDiff] = useState("");
-    const [filter, setFilter] = useState("");
-    const [view, setView] = useState("workflows");
     const [proposalSummary, setProposalSummary] = useState("");
+    const [createOpen, setCreateOpen] = useState(false);
+    const [newSlug, setNewSlug] = useState("");
+    const [newDraft, setNewDraft] = useState(false);
     const [legacyQuery, setLegacyQuery] = useState("");
     const [legacyResults, setLegacyResults] = useState([]);
     const [legacySummary, setLegacySummary] = useState(null);
@@ -103,12 +129,10 @@
       });
     }
 
-    useEffect(function () {
-      refresh();
-    }, []);
+    useEffect(function () { refresh(); }, []);
 
     useEffect(function () {
-      if (!selectedSlug) return;
+      if (!selectedSlug || newDraft) return;
       setError("");
       fetchJSON("/runbooks/" + encodeURIComponent(selectedSlug)).then(function (data) {
         setSelected(data);
@@ -116,11 +140,9 @@
         setMode("edit");
       }).catch(function (err) {
         setSelected(null);
-        setMarkdown(emptyMarkdown(selectedSlug));
-        setEditorOpen(true);
         setError(err.message || String(err));
       });
-    }, [selectedSlug]);
+    }, [selectedSlug, newDraft]);
 
     const visibleRunbooks = useMemo(function () {
       const q = filter.trim().toLowerCase();
@@ -133,14 +155,26 @@
 
     const enabledTimeline = useMemo(function () {
       return schedules.filter(function (item) { return item.enabled; }).sort(function (a, b) {
-        if (a.registration_status !== b.registration_status) {
-          return a.registration_status === "registered" ? 1 : -1;
-        }
+        if (a.registration_status !== b.registration_status) return a.registration_status === "registered" ? 1 : -1;
         const aTime = a.next_run_at ? new Date(a.next_run_at).getTime() : Number.MAX_SAFE_INTEGER;
         const bTime = b.next_run_at ? new Date(b.next_run_at).getTime() : Number.MAX_SAFE_INTEGER;
         return aTime - bTime;
       });
     }, [schedules]);
+
+    function workflowForRunbook(item) {
+      return workflows.find(function (entry) { return entry.id === item.id || entry.slug === item.slug; });
+    }
+
+    function workflowForSchedule(schedule) {
+      return workflows.find(function (workflow) {
+        return workflow.id === schedule.workflow_id || workflow.slug === schedule.workflow_slug;
+      });
+    }
+
+    function workflowForRun(run) {
+      return workflows.find(function (workflow) { return workflow.id === run.workflow_id; });
+    }
 
     function schedulesFor(workflow) {
       if (!workflow) return [];
@@ -154,26 +188,19 @@
       return recentRuns.filter(function (run) { return run.workflow_id === workflow.id; });
     }
 
-    function workflowForSchedule(schedule) {
-      return workflows.find(function (workflow) {
-        return workflow.id === schedule.workflow_id || workflow.slug === schedule.workflow_slug;
-      });
-    }
-
-    function workflowForRun(run) {
-      return workflows.find(function (workflow) { return workflow.id === run.workflow_id; });
-    }
-
     function openWorkflow(slug) {
-      if (!slug) return;
-      if (slug !== selectedSlug) setSelected(null);
-      setSelectedSlug(slug);
+      setNewDraft(false);
       setEditorOpen(false);
-      setView("workflows");
-      setTimeout(function () {
-        const detail = document.getElementById("workflow-" + slug);
-        if (detail) detail.scrollIntoView({ behavior: "smooth", block: "nearest" });
-      }, 0);
+      setSelected(null);
+      setSelectedSlug(slug);
+    }
+
+    function closeWorkflow() {
+      setSelectedSlug("");
+      setSelected(null);
+      setEditorOpen(false);
+      setNewDraft(false);
+      setMode("edit");
     }
 
     function openCron(schedule) {
@@ -184,6 +211,19 @@
       window.location.assign("/cron?" + query.toString());
     }
 
+    function beginNewWorkflow() {
+      const slug = newSlug.trim().toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
+      if (!slug) return;
+      setCreateOpen(false);
+      setNewSlug("");
+      setNewDraft(true);
+      setSelected(null);
+      setSelectedSlug(slug);
+      setMarkdown(emptyMarkdown(slug));
+      setEditorOpen(true);
+      setMode("edit");
+    }
+
     function saveActive() {
       setBusy(true);
       setError("");
@@ -191,15 +231,15 @@
         method: "PUT",
         body: JSON.stringify({ markdown: markdown }),
       }).then(refresh).then(function () {
+        setNewDraft(false);
         return fetchJSON("/runbooks/" + encodeURIComponent(selectedSlug));
       }).then(function (data) {
         setSelected(data);
         setMarkdown(data.markdown || markdown);
+        setEditorOpen(false);
       }).catch(function (err) {
         setError(err.message || String(err));
-      }).finally(function () {
-        setBusy(false);
-      });
+      }).finally(function () { setBusy(false); });
     }
 
     function propose() {
@@ -213,9 +253,7 @@
         return fetchJSON("/runbooks/" + encodeURIComponent(selectedSlug));
       }).then(setSelected).catch(function (err) {
         setError(err.message || String(err));
-      }).finally(function () {
-        setBusy(false);
-      });
+      }).finally(function () { setBusy(false); });
     }
 
     function renderPreview() {
@@ -223,11 +261,8 @@
       fetchJSON("/runbooks/preview", {
         method: "POST",
         body: JSON.stringify({ markdown: markdown }),
-      }).then(function (data) {
-        setPreview(data.html || "");
-      }).catch(function (err) {
-        setError(err.message || String(err));
-      });
+      }).then(function (data) { setPreview(data.html || ""); })
+        .catch(function (err) { setError(err.message || String(err)); });
     }
 
     function renderDiff() {
@@ -235,21 +270,8 @@
       fetchJSON("/runbooks/" + encodeURIComponent(selectedSlug) + "/diff", {
         method: "POST",
         body: JSON.stringify({ markdown: markdown }),
-      }).then(function (data) {
-        setDiff(data.diff || "");
-      }).catch(function (err) {
-        setError(err.message || String(err));
-      });
-    }
-
-    function newRunbook() {
-      const slug = window.prompt("Workflow slug");
-      if (!slug) return;
-      setSelectedSlug(slug.trim());
-      setSelected(null);
-      setMarkdown(emptyMarkdown(slug.trim()));
-      setEditorOpen(true);
-      setMode("edit");
+      }).then(function (data) { setDiff(data.diff || ""); })
+        .catch(function (err) { setError(err.message || String(err)); });
     }
 
     function searchLegacy() {
@@ -259,11 +281,8 @@
       fetchJSON("/legacy" + suffix).then(function (data) {
         setLegacyResults(data.results || []);
         setLegacySummary(data.summary || null);
-      }).catch(function (err) {
-        setError(err.message || String(err));
-      }).finally(function () {
-        setBusy(false);
-      });
+      }).catch(function (err) { setError(err.message || String(err)); })
+        .finally(function () { setBusy(false); });
     }
 
     function openLegacy(item) {
@@ -272,306 +291,301 @@
         .catch(function (err) { setError(err.message || String(err)); });
     }
 
-    function renderDefinitionEditor() {
-      if (!editorOpen || !selectedSlug) return null;
-      return h("section", { className: "hermes-runbooks-definition" },
-        h("div", { className: "hermes-runbooks-editor-head" },
-          h("h3", null, "Workflow definition"),
-          h("div", { className: "hermes-runbooks-actions" },
-            h(Button, {
-              variant: mode === "edit" ? "default" : "outline",
-              onClick: function () { setMode("edit"); },
-            }, "Edit"),
-            h(Button, { variant: "outline", onClick: renderPreview }, "Preview"),
-            h(Button, { variant: "outline", onClick: renderDiff }, "Diff"),
-            h(Button, { variant: "outline", onClick: function () { setEditorOpen(false); } }, "Close")
-          )
+    function renderEditor() {
+      return h("div", { className: "hermes-runbooks-editor" },
+        h(TabsList, { className: "hermes-runbooks-mode-tabs" },
+          h(TabsTrigger, { active: mode === "edit", value: "edit", onClick: function () { setMode("edit"); } }, "Edit"),
+          h(TabsTrigger, { active: mode === "preview", value: "preview", onClick: renderPreview }, "Preview"),
+          h(TabsTrigger, { active: mode === "diff", value: "diff", onClick: renderDiff }, "Changes")
         ),
         mode === "edit" ? h("textarea", {
           className: "hermes-runbooks-textarea",
           value: markdown,
           onChange: function (event) { setMarkdown(event.target.value); },
           spellCheck: false,
+          "aria-label": "Workflow definition",
         }) : null,
         mode === "preview" ? h("div", {
           className: "hermes-runbooks-preview",
           dangerouslySetInnerHTML: { __html: preview },
         }) : null,
         mode === "diff" ? h("pre", { className: "hermes-runbooks-diff" }, diff || "No changes") : null,
-        h("div", { className: "hermes-runbooks-savebar" },
-          h(Button, { onClick: saveActive, disabled: busy || !selectedSlug }, "Save definition"),
+        h("div", { className: "hermes-runbooks-proposal" },
           h(Input, {
             value: proposalSummary,
             onChange: function (event) { setProposalSummary(event.target.value); },
-            placeholder: "Proposal summary",
+            placeholder: "Proposal summary (optional)",
           }),
-          h(Button, { variant: "outline", onClick: propose, disabled: busy || !selectedSlug }, "Propose")
+          h(Button, { outlined: true, size: "sm", onClick: propose, disabled: busy || !selectedSlug }, "Propose")
         )
       );
     }
 
-    function renderWorkflowDetail(item, workflow) {
-      if (selectedSlug !== item.slug) return null;
+    function renderWorkflowDialog() {
+      const item = runbooks.find(function (entry) { return entry.slug === selectedSlug; });
+      const workflow = item ? workflowForRunbook(item) : null;
       const attached = schedulesFor(workflow);
-      const workflowRuns = runsFor(workflow).slice(0, 6);
       const steps = workflow ? workflow.steps || [] : [];
-      return h("div", { className: "hermes-runbooks-workflow-detail" },
-        h("div", { className: "hermes-runbooks-detail-head" },
-          h("div", null,
-            h("h2", null, item.title),
-            h("div", { className: "hermes-runbooks-muted" },
-              item.owner_profile + " | " + item.status + (workflow ? " | version " + workflow.version : "")
+      const workflowRuns = runsFor(workflow);
+      const latestRun = workflowRuns[0];
+      const title = item ? item.title : "New Workflow";
+      const purpose = item ? usefulPurpose(item.purpose) : "";
+
+      return h(Dialog, {
+        open: Boolean(selectedSlug),
+        onOpenChange: function (open) { if (!open) closeWorkflow(); },
+      },
+        h(DialogContent, { className: "hermes-runbooks-dialog" },
+          h(DialogHeader, null,
+            h("div", { className: "hermes-runbooks-dialog-title" },
+              h(DialogTitle, null, title),
+              item ? h(StatusBadge, { value: item.status }) : h(StatusBadge, { value: "draft" })
+            ),
+            h(DialogDescription, null,
+              item ? (purpose || "Owned by " + item.owner_profile) : "Create the workflow definition, then save it to the registry."
             )
           ),
-          h("div", { className: "hermes-runbooks-actions" },
-            h(Button, { variant: "outline", onClick: function () { setEditorOpen(!editorOpen); } },
-              editorOpen ? "Hide definition" : "Edit definition"
-            ),
-            h(Button, { variant: "outline", onClick: function () { setSelectedSlug(""); setSelected(null); } }, "Close")
-          )
-        ),
-        h("div", { className: "hermes-runbooks-relationship-grid" },
-          h("section", { className: "hermes-runbooks-relationship" },
-            h("div", { className: "hermes-runbooks-section-title" },
-              h("h3", null, "Attached schedules"),
-              h("span", null, String(attached.length))
-            ),
-            attached.length ? attached.map(function (schedule) {
-              return h("div", { key: schedule.profile + ":" + schedule.job_id, className: "hermes-runbooks-schedule" },
-                h("div", { className: "hermes-runbooks-schedule-main" },
-                  h("strong", null, schedule.name),
-                  h("code", null, schedule.schedule || "manual"),
-                  h("span", { className: "hermes-runbooks-muted" }, "Next: " + displayTime(schedule.next_run_at))
+          h("div", { className: "hermes-runbooks-dialog-body" },
+            editorOpen ? renderEditor() : h(React.Fragment, null,
+              h("section", { className: "hermes-runbooks-detail-section" },
+                h("div", { className: "hermes-runbooks-section-heading" },
+                  h("h3", null, "Schedule"),
+                  h("span", null, attached.length ? attached.length + " attached" : "Manual")
                 ),
-                h("div", { className: "hermes-runbooks-schedule-actions" },
-                  h("span", { className: statusClass(schedule.last_status || schedule.state) }, schedule.last_status || schedule.state),
-                  h(Button, { variant: "outline", onClick: function () { openCron(schedule); } }, "Edit in Cron")
-                )
-              );
-            }) : h("div", { className: "hermes-runbooks-empty-inline" }, "Manual workflow"),
-            workflow && workflow.runtime_ref ? h("div", { className: "hermes-runbooks-runtime" },
-              h("span", null, "Runtime"), h("code", null, workflow.runtime_ref)
-            ) : null
-          ),
-          h("section", { className: "hermes-runbooks-relationship" },
-            h("div", { className: "hermes-runbooks-section-title" },
-              h("h3", null, "Steps"),
-              h("span", null, String(steps.length))
-            ),
-            steps.length ? h("ol", { className: "hermes-runbooks-steps" }, steps.map(function (step) {
-              return h("li", { key: step.step_key, className: "hermes-runbooks-step" },
-                h(Badge, { variant: "secondary" }, step.step_key),
-                h("span", null, step.name),
-                h("span", { className: "hermes-runbooks-muted" }, step.executor_profile || workflow.owner_profile)
-              );
-            })) : h("div", { className: "hermes-runbooks-empty-inline" }, "No registered steps")
-          ),
-          h("section", { className: "hermes-runbooks-relationship" },
-            h("div", { className: "hermes-runbooks-section-title" },
-              h("h3", null, "Recent runs"),
-              h("span", null, String(workflowRuns.length))
-            ),
-            workflowRuns.length ? workflowRuns.map(function (run) {
-              return h("div", { key: run.id, className: "hermes-runbooks-run" },
-                h("span", { className: statusClass(run.status) }, run.status),
-                h("span", null, displayTime(run.started_at)),
-                h("span", { className: "hermes-runbooks-muted" }, run.current_step_key || "Complete")
-              );
-            }) : h("div", { className: "hermes-runbooks-empty-inline" }, "No recorded runs")
-          )
-        ),
-        renderDefinitionEditor(),
-        selected ? h("details", { className: "hermes-runbooks-history" },
-          h("summary", null, "Revision and proposal history"),
-          h("div", { className: "hermes-runbooks-history-grid" },
-            h("div", null,
-              h("h3", null, "Revisions"),
-              (selected.revisions || []).map(function (revision) {
-                return h("code", { key: revision.path }, revision.name);
-              })
-            ),
-            h("div", null,
-              h("h3", null, "Proposals"),
-              (selected.proposals || []).map(function (proposal) {
-                return h("code", { key: proposal.created_at }, proposal.created_at + " " + (proposal.summary || ""));
-              })
+                attached.length ? attached.map(function (schedule) {
+                  return h("div", { key: schedule.profile + ":" + schedule.job_id, className: "hermes-runbooks-detail-row" },
+                    h("div", { className: "hermes-runbooks-detail-copy" },
+                      h("strong", null, schedule.name),
+                      h("span", null, "Next run " + displayTime(schedule.next_run_at))
+                    ),
+                    h(StatusBadge, { value: schedule.last_status || schedule.state }),
+                    h(Button, { outlined: true, size: "sm", onClick: function () { openCron(schedule); } }, "Edit in Cron")
+                  );
+                }) : h("p", { className: "hermes-runbooks-empty-copy" }, "This workflow runs only when started manually."),
+                workflow && workflow.runtime_ref ? h("details", { className: "hermes-runbooks-advanced" },
+                  h("summary", null, "Runtime details"),
+                  h("code", null, workflow.runtime_ref)
+                ) : null
+              ),
+              h(Separator, null),
+              h("section", { className: "hermes-runbooks-detail-section" },
+                h("div", { className: "hermes-runbooks-section-heading" },
+                  h("h3", null, "Procedure"),
+                  h("span", null, steps.length ? steps.length + (steps.length === 1 ? " step" : " steps") : "No steps")
+                ),
+                steps.length ? h("ol", { className: "hermes-runbooks-procedure" }, steps.map(function (step, index) {
+                  return h("li", { key: step.step_key },
+                    h("span", { className: "hermes-runbooks-step-number" }, String(index + 1)),
+                    h("div", null,
+                      h("strong", null, step.name),
+                      h("span", null, step.executor_profile || workflow.owner_profile)
+                    )
+                  );
+                })) : h("p", { className: "hermes-runbooks-empty-copy" }, "No procedure steps are registered."),
+                h(Button, { ghost: true, size: "sm", onClick: function () { setEditorOpen(true); setMode("edit"); } }, "Edit procedure")
+              ),
+              h(Separator, null),
+              h("section", { className: "hermes-runbooks-detail-section" },
+                h("div", { className: "hermes-runbooks-section-heading" },
+                  h("h3", null, "Latest activity"),
+                  workflowRuns.length > 1 ? h("button", { className: "hermes-runbooks-text-link", onClick: function () { closeWorkflow(); setView("runs"); } }, "View all runs") : null
+                ),
+                latestRun ? h("div", { className: "hermes-runbooks-activity" },
+                  h(StatusBadge, { value: latestRun.status }),
+                  h("span", null, displayTime(latestRun.started_at)),
+                  latestRun.current_step_key ? h("span", null, latestRun.current_step_key) : null
+                ) : h("p", { className: "hermes-runbooks-empty-copy" }, "No runs have been recorded."),
+                workflow ? h("details", { className: "hermes-runbooks-advanced" },
+                  h("summary", null, "Advanced"),
+                  h("dl", null,
+                    h("div", null, h("dt", null, "Workflow ID"), h("dd", null, h("code", null, workflow.id))),
+                    h("div", null, h("dt", null, "Owner"), h("dd", null, workflow.owner_profile)),
+                    h("div", null, h("dt", null, "Version"), h("dd", null, workflow.version)),
+                    h("div", null, h("dt", null, "Revisions"), h("dd", null, selected ? (selected.revisions || []).length : 0)),
+                    h("div", null, h("dt", null, "Proposals"), h("dd", null, selected ? (selected.proposals || []).length : 0))
+                  )
+                ) : null
+              )
             )
+          ),
+          h(DialogFooter, null,
+            editorOpen ? h(React.Fragment, null,
+              h(Button, { ghost: true, size: "sm", onClick: function () { if (newDraft) closeWorkflow(); else setEditorOpen(false); } }, "Cancel"),
+              h(Button, { size: "sm", onClick: saveActive, disabled: busy || !selectedSlug }, busy ? "Saving" : "Save definition")
+            ) : h(Button, { outlined: true, size: "sm", onClick: function () { setEditorOpen(true); setMode("edit"); } }, "Edit definition")
           )
-        ) : null
+        )
+      );
+    }
+
+    function renderCreateDialog() {
+      return h(Dialog, { open: createOpen, onOpenChange: setCreateOpen },
+        h(DialogContent, { className: "hermes-runbooks-create-dialog" },
+          h(DialogHeader, null,
+            h(DialogTitle, null, "New Workflow"),
+            h(DialogDescription, null, "Choose a stable identifier. You can set the title, owner, procedure, and runtime next.")
+          ),
+          h("div", { className: "hermes-runbooks-create-body" },
+            h(Label, { htmlFor: "new-workflow-slug" }, "Workflow ID"),
+            h(Input, {
+              id: "new-workflow-slug",
+              value: newSlug,
+              onChange: function (event) { setNewSlug(event.target.value); },
+              onKeyDown: function (event) { if (event.key === "Enter") beginNewWorkflow(); },
+              placeholder: "daily-client-follow-up",
+            })
+          ),
+          h(DialogFooter, null,
+            h(Button, { ghost: true, size: "sm", onClick: function () { setCreateOpen(false); } }, "Cancel"),
+            h(Button, { size: "sm", onClick: beginNewWorkflow, disabled: !newSlug.trim() }, "Continue")
+          )
+        )
       );
     }
 
     function renderWorkflows() {
-      return h("section", { className: "hermes-runbooks-workflows" },
+      return h("section", { className: "hermes-runbooks-view" },
         h("div", { className: "hermes-runbooks-filter" },
-          h(Label, null, "Search workflows"),
+          h(Label, { htmlFor: "workflow-search" }, "Search workflows"),
           h(Input, {
+            id: "workflow-search",
             value: filter,
             onChange: function (event) { setFilter(event.target.value); },
-            placeholder: "Name, owner, status",
+            placeholder: "Name, purpose, owner, or status",
           })
         ),
-        h("div", { className: "hermes-runbooks-list" }, visibleRunbooks.map(function (item) {
-          const workflow = workflows.find(function (entry) { return entry.id === item.id || entry.slug === item.slug; });
+        h("div", { className: "hermes-runbooks-card-list" }, visibleRunbooks.map(function (item) {
+          const workflow = workflowForRunbook(item);
+          const purpose = usefulPurpose(item.purpose);
           const attached = schedulesFor(workflow);
-          const workflowRuns = runsFor(workflow);
-          const latestRun = workflowRuns[0];
+          const latestRun = runsFor(workflow)[0];
           const nextSchedule = attached.filter(function (entry) { return entry.enabled && entry.next_run_at; })
             .sort(function (a, b) { return new Date(a.next_run_at) - new Date(b.next_run_at); })[0];
-          return h(React.Fragment, { key: item.slug },
-            h("button", {
-              id: "workflow-" + item.slug,
-              className: "hermes-runbooks-list-item " + (selectedSlug === item.slug ? "is-active" : ""),
-              onClick: function () { openWorkflow(item.slug); },
-            },
-              h("span", { className: "hermes-runbooks-list-title" }, item.title),
-              h("span", { className: "hermes-runbooks-list-owner" }, item.owner_profile),
-              h("span", { className: statusClass(item.status) }, item.status),
-              h("span", { className: "hermes-runbooks-connection" },
-                attached.length + (attached.length === 1 ? " schedule" : " schedules")
+          return h(Card, { key: item.slug, className: "hermes-runbooks-workflow-card" },
+            h(CardContent, { className: "hermes-runbooks-workflow-content" },
+              h("div", { className: "hermes-runbooks-workflow-copy" },
+                h("div", { className: "hermes-runbooks-workflow-title" },
+                  h("h3", null, item.title),
+                  h(StatusBadge, { value: item.status }),
+                  h(Badge, { tone: "outline" }, item.owner_profile)
+                ),
+                purpose ? h("p", null, purpose) : null,
+                h("div", { className: "hermes-runbooks-signals" },
+                  h("span", null, attached.length ? attached.length + (attached.length === 1 ? " schedule" : " schedules") : "Manual"),
+                  h("span", null, nextSchedule ? "Next " + displayTime(nextSchedule.next_run_at) : "No upcoming run"),
+                  h("span", null, latestRun ? "Last run " + latestRun.status : "No runs yet")
+                )
               ),
-              h("span", { className: "hermes-runbooks-connection" },
-                nextSchedule ? "Next " + displayTime(nextSchedule.next_run_at) : "Manual or paused"
+              h(Button, { outlined: true, size: "sm", onClick: function () { openWorkflow(item.slug); } }, "Open")
+            )
+          );
+        })),
+        !visibleRunbooks.length ? h("p", { className: "hermes-runbooks-empty-copy" }, "No workflows match this search.") : null
+      );
+    }
+
+    function renderTimeline() {
+      return h("section", { className: "hermes-runbooks-view" },
+        h("div", { className: "hermes-runbooks-view-heading" },
+          h("p", null, enabledTimeline.length + " enabled schedules, ordered by next run"),
+          h(Button, { outlined: true, size: "sm", onClick: function () { window.location.assign("/cron"); } }, "Open Cron")
+        ),
+        h("div", { className: "hermes-runbooks-card-list" }, enabledTimeline.map(function (schedule) {
+          const workflow = workflowForSchedule(schedule);
+          return h(Card, { key: schedule.profile + ":" + schedule.job_id, className: "hermes-runbooks-compact-card" },
+            h(CardContent, { className: "hermes-runbooks-compact-content" },
+              h("time", { className: "hermes-runbooks-next-time" }, displayTime(schedule.next_run_at)),
+              h("div", { className: "hermes-runbooks-compact-copy" },
+                h("div", { className: "hermes-runbooks-workflow-title" },
+                  h("h3", null, workflow ? workflow.name : schedule.name),
+                  h(StatusBadge, { value: schedule.registration_status })
+                ),
+                h("span", null, schedule.profile + " | " + (schedule.schedule || "manual") + (schedule.last_status ? " | last " + schedule.last_status : ""))
               ),
-              h("span", { className: "hermes-runbooks-connection" },
-                latestRun ? "Last run " + latestRun.status : "No runs"
-              )
-            ),
-            renderWorkflowDetail(item, workflow)
+              workflow ? h(Button, { ghost: true, size: "sm", onClick: function () { openWorkflow(workflow.slug); } }, "Workflow") : null,
+              h(Button, { outlined: true, size: "sm", onClick: function () { openCron(schedule); } }, "Edit in Cron")
+            )
           );
         }))
       );
     }
 
-    function renderTimeline() {
-      return h("section", { className: "hermes-runbooks-table-panel" },
-        h("div", { className: "hermes-runbooks-view-head" },
-          h("div", { className: "hermes-runbooks-summary" },
-            h("strong", null, enabledTimeline.length), h("span", null, " upcoming schedules"),
-            h("strong", null, overview ? overview.counts.unregistered_schedules : 0), h("span", null, " need registration")
-          ),
-          h(Button, { variant: "outline", onClick: function () { window.location.assign("/cron"); } }, "Open Cron manager")
-        ),
-        h("div", { className: "hermes-runbooks-table-wrap" },
-          h("table", { className: "hermes-runbooks-table" },
-            h("thead", null, h("tr", null,
-              h("th", null, "Next run"),
-              h("th", null, "Workflow"),
-              h("th", null, "Timing"),
-              h("th", null, "Last result"),
-              h("th", null, "Schedule editor")
-            )),
-            h("tbody", null, enabledTimeline.map(function (schedule) {
-              const workflow = workflowForSchedule(schedule);
-              return h("tr", { key: schedule.profile + ":" + schedule.job_id },
-                h("td", null, h("strong", null, displayTime(schedule.next_run_at))),
-                h("td", null,
-                  workflow ? h("button", { className: "hermes-runbooks-link", onClick: function () { openWorkflow(workflow.slug); } }, workflow.name) : h("strong", null, schedule.name),
-                  h("span", { className: statusClass(schedule.registration_status) }, schedule.registration_status),
-                  h("code", null, schedule.profile + " / " + schedule.job_id)
-                ),
-                h("td", null, h("code", null, schedule.schedule || "manual")),
-                h("td", null,
-                  h("span", { className: statusClass(schedule.last_status || schedule.state) }, schedule.last_status || schedule.state),
-                  schedule.last_run_at ? h("code", null, displayTime(schedule.last_run_at)) : null
-                ),
-                h("td", null, h(Button, { variant: "outline", onClick: function () { openCron(schedule); } }, "Edit in Cron"))
-              );
-            }))
-          )
-        )
-      );
-    }
-
     function renderRuns() {
-      return h("section", { className: "hermes-runbooks-table-panel" },
-        h("div", { className: "hermes-runbooks-summary" },
-          h("strong", null, recentRuns.length), h("span", null, " recent runs"),
-          h("strong", null, recentRuns.filter(function (run) { return run.status === "failed"; }).length), h("span", null, " failed")
+      return h("section", { className: "hermes-runbooks-view" },
+        h("div", { className: "hermes-runbooks-view-heading" },
+          h("p", null, recentRuns.length + " recent workflow runs")
         ),
-        h("div", { className: "hermes-runbooks-table-wrap" },
-          h("table", { className: "hermes-runbooks-table" },
-            h("thead", null, h("tr", null,
-              h("th", null, "Workflow"), h("th", null, "Status"), h("th", null, "Trigger"), h("th", null, "Step"), h("th", null, "Started")
-            )),
-            h("tbody", null, recentRuns.map(function (run) {
-              const workflow = workflowForRun(run);
-              return h("tr", { key: run.id },
-                h("td", null,
-                  workflow ? h("button", { className: "hermes-runbooks-link", onClick: function () { openWorkflow(workflow.slug); } }, workflow.name) : h("strong", null, run.workflow_id),
-                  h("code", null, run.id)
-                ),
-                h("td", null, h("span", { className: statusClass(run.status) }, run.status)),
-                h("td", null, run.trigger_kind || "-"),
-                h("td", null, run.current_step_key || "Complete"),
-                h("td", null, displayTime(run.started_at))
-              );
-            }))
-          )
-        )
+        h("div", { className: "hermes-runbooks-card-list" }, recentRuns.map(function (run) {
+          const workflow = workflowForRun(run);
+          return h(Card, { key: run.id, className: "hermes-runbooks-compact-card" },
+            h(CardContent, { className: "hermes-runbooks-compact-content" },
+              h(StatusBadge, { value: run.status }),
+              h("div", { className: "hermes-runbooks-compact-copy" },
+                h("h3", null, workflow ? workflow.name : run.workflow_id),
+                h("span", null, displayTime(run.started_at) + " | " + (run.trigger_kind || "manual") + " | " + (run.current_step_key || "complete"))
+              ),
+              workflow ? h(Button, { outlined: true, size: "sm", onClick: function () { openWorkflow(workflow.slug); } }, "Open workflow") : null
+            )
+          );
+        }))
       );
     }
 
     function renderArchive() {
-      return h("section", { className: "hermes-runbooks-table-panel" },
-        h("div", { className: "hermes-runbooks-legacy-head" },
-          h("div", { className: "hermes-runbooks-summary" },
-            h("strong", null, legacySummary ? (legacySummary.source_counts.issues || 0) : 0), h("span", null, " archived tasks"),
-            h("strong", null, legacySummary ? (legacySummary.source_counts.projects || 0) : 0), h("span", null, " projects"),
-            h("strong", null, legacySummary ? (legacySummary.source_counts.routines || 0) : 0), h("span", null, " routines")
-          ),
-          h("div", { className: "hermes-runbooks-legacy-search" },
+      return h("section", { className: "hermes-runbooks-view" },
+        h("div", { className: "hermes-runbooks-archive-tools" },
+          h("p", null, legacySummary ? (legacySummary.source_counts.issues || 0) + " archived tasks, " + (legacySummary.source_counts.projects || 0) + " projects" : "Search read-only Paperclip history"),
+          h("div", { className: "hermes-runbooks-archive-search" },
             h(Input, {
               value: legacyQuery,
               onChange: function (event) { setLegacyQuery(event.target.value); },
               onKeyDown: function (event) { if (event.key === "Enter") searchLegacy(); },
               placeholder: "Search past work",
             }),
-            h(Button, { onClick: searchLegacy, disabled: busy }, "Search")
+            h(Button, { outlined: true, size: "sm", onClick: searchLegacy, disabled: busy }, "Search")
           )
         ),
-        h("div", { className: "hermes-runbooks-legacy-layout" },
-          h("div", { className: "hermes-runbooks-table-wrap" },
-            h("table", { className: "hermes-runbooks-table hermes-runbooks-legacy-table" },
-              h("thead", null, h("tr", null, h("th", null, "Legacy item"), h("th", null, "Type"), h("th", null, "Status"), h("th", null, "Updated"))),
-              h("tbody", null, legacyResults.map(function (item) {
-                return h("tr", {
-                  key: item.entity_type + ":" + item.entity_id,
-                  className: "hermes-runbooks-clickable-row",
-                  onClick: function () { openLegacy(item); },
-                },
-                  h("td", null, h("strong", null, item.title || item.legacy_identifier), h("code", null, item.legacy_identifier)),
-                  h("td", null, item.entity_type), h("td", null, item.status || "-"), h("td", null, item.updated_at || "-")
-                );
-              }))
-            )
-          ),
-          legacySelected ? h("pre", { className: "hermes-runbooks-legacy-detail" }, JSON.stringify(legacySelected.entity, null, 2))
-            : h("div", { className: "hermes-runbooks-empty" }, "Choose a past item.")
+        h("div", { className: "hermes-runbooks-archive-layout" },
+          h("div", { className: "hermes-runbooks-card-list" }, legacyResults.map(function (item) {
+            return h(Card, { key: item.entity_type + ":" + item.entity_id, className: "hermes-runbooks-compact-card" },
+              h(CardContent, { className: "hermes-runbooks-compact-content" },
+                h("div", { className: "hermes-runbooks-compact-copy" },
+                  h("h3", null, item.title || item.legacy_identifier),
+                  h("span", null, item.entity_type + " | " + (item.status || "unknown") + " | " + (item.updated_at || "unknown"))
+                ),
+                h(Button, { outlined: true, size: "sm", onClick: function () { openLegacy(item); } }, "Inspect")
+              )
+            );
+          })),
+          legacySelected ? h("pre", { className: "hermes-runbooks-legacy-detail" }, JSON.stringify(legacySelected.entity, null, 2)) : null
         )
       );
     }
 
     return h("div", { className: "hermes-runbooks" },
-      h("div", { className: "hermes-runbooks-topbar" },
-        h("div", { className: "hermes-runbooks-kpis" },
-          h("div", { className: "hermes-runbooks-kpi" }, h("strong", null, overview ? overview.counts.active_workflows : "-"), h("span", null, "Active workflows")),
-          h("div", { className: "hermes-runbooks-kpi" }, h("strong", null, overview ? overview.counts.enabled_schedules : "-"), h("span", null, "Attached schedules")),
-          h("div", { className: "hermes-runbooks-kpi" }, h("strong", null, overview ? overview.counts.unregistered_schedules : "-"), h("span", null, "Needs attention"))
+      h("div", { className: "hermes-runbooks-toolbar" },
+        h("p", { className: "hermes-runbooks-overview" },
+          h("strong", null, overview ? overview.counts.active_workflows : "-"), " active workflows",
+          h("span", null, "|"),
+          h("strong", null, overview ? overview.counts.enabled_schedules : "-"), " scheduled",
+          h("span", null, "|"),
+          h("strong", null, overview ? overview.counts.unregistered_schedules : "-"), " need attention"
         ),
         h("div", { className: "hermes-runbooks-actions" },
-          h(Button, { onClick: refresh, variant: "outline", disabled: busy }, "Refresh"),
-          view === "workflows" ? h(Button, { onClick: newRunbook }, "New workflow") : null
+          h(Button, { ghost: true, size: "sm", onClick: refresh, disabled: busy }, "Refresh"),
+          view === "workflows" ? h(Button, { size: "sm", onClick: function () { setCreateOpen(true); } }, "New workflow") : null
         )
       ),
-      error ? h("div", { className: "hermes-runbooks-error" }, error) : null,
-      h("div", { className: "hermes-runbooks-tabs" },
-        h(Button, { variant: view === "workflows" ? "default" : "outline", onClick: function () { setView("workflows"); } }, "Workflows"),
-        h(Button, { variant: view === "timeline" ? "default" : "outline", onClick: function () { setView("timeline"); } }, "Timeline"),
-        h(Button, { variant: view === "runs" ? "default" : "outline", onClick: function () { setView("runs"); } }, "Runs"),
-        h(Button, { variant: view === "legacy" ? "default" : "outline", onClick: function () { setView("legacy"); setTimeout(searchLegacy, 0); } }, "Archive")
+      h(TabsList, { className: "hermes-runbooks-tabs" },
+        h(TabsTrigger, { active: view === "workflows", value: "workflows", onClick: function () { setView("workflows"); } }, "Workflows"),
+        h(TabsTrigger, { active: view === "timeline", value: "timeline", onClick: function () { setView("timeline"); } }, "Timeline"),
+        h(TabsTrigger, { active: view === "runs", value: "runs", onClick: function () { setView("runs"); } }, "Runs"),
+        h(TabsTrigger, { active: view === "legacy", value: "legacy", onClick: function () { setView("legacy"); setTimeout(searchLegacy, 0); } }, "Archive")
       ),
-      view === "workflows" ? renderWorkflows() : view === "timeline" ? renderTimeline() : view === "runs" ? renderRuns() : renderArchive()
+      error ? h("div", { className: "hermes-runbooks-error", role: "alert" }, error) : null,
+      view === "workflows" ? renderWorkflows() : view === "timeline" ? renderTimeline() : view === "runs" ? renderRuns() : renderArchive(),
+      renderWorkflowDialog(),
+      renderCreateDialog()
     );
   }
 
