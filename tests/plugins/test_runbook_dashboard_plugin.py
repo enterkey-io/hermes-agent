@@ -222,11 +222,13 @@ def test_preview_diff_and_bundle_registration(client):
     assert 'window.__HERMES_PLUGINS__.register("runbooks", RunbooksApp);' in bundle
     assert "SDK.registerPlugin" not in bundle
     assert "Approve Save" in bundle
-    assert "Start Run" in bundle
+    assert "Start Run" not in bundle
     assert '"Approver"' not in bundle
-    assert '}, "Evernote")' in bundle
+    assert '}, "Evernote")' not in bundle
+    assert '}, "Workflows")' in bundle
     assert "Schedules" in bundle
-    assert "Legacy Work" in bundle
+    assert '}, "Runs")' in bundle
+    assert '}, "Archive")' in bundle
 
 
 def test_legacy_work_is_read_only_and_searchable(client, tmp_path):

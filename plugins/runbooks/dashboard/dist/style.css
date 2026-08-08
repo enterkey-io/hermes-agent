@@ -21,6 +21,31 @@
   justify-content: space-between;
 }
 
+.hermes-runbooks-kpis {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(3, minmax(130px, 1fr));
+}
+
+.hermes-runbooks-kpi {
+  border-left: 2px solid hsl(var(--border));
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 4px 12px;
+}
+
+.hermes-runbooks-kpi strong {
+  font-size: 20px;
+  line-height: 1.1;
+}
+
+.hermes-runbooks-kpi span {
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
+}
+
 .hermes-runbooks-tabs {
   justify-content: flex-start;
 }
@@ -82,6 +107,16 @@
   font-size: 12px;
 }
 
+.hermes-runbooks-list-purpose {
+  color: hsl(var(--muted-foreground));
+  display: -webkit-box;
+  font-size: 12px;
+  line-height: 1.35;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
 .hermes-runbooks-status {
   border-radius: 999px;
   border: 1px solid hsl(var(--border));
@@ -93,6 +128,18 @@
 .hermes-runbooks-status-active {
   border-color: #168a4a;
   color: #168a4a;
+}
+
+.hermes-runbooks-status-succeeded,
+.hermes-runbooks-status-completed {
+  border-color: #168a4a;
+  color: #168a4a;
+}
+
+.hermes-runbooks-status-failed,
+.hermes-runbooks-status-execution_error {
+  border-color: #b42318;
+  color: #b42318;
 }
 
 .hermes-runbooks-status-paused,
@@ -294,6 +341,18 @@
   .hermes-runbooks-editor-head {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .hermes-runbooks-kpis {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .hermes-runbooks-kpi {
+    padding: 4px 8px;
+  }
+
+  .hermes-runbooks-kpi strong {
+    font-size: 17px;
   }
 
   .hermes-runbooks-actions {

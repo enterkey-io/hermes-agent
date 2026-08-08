@@ -1,7 +1,7 @@
 {
   "name": "runbooks",
-  "label": "Runbooks",
-  "description": "Workflow Registry and canonical RUNBOOK.md operations.",
+  "label": "Workflows",
+  "description": "Operating workflows, schedules, run history, and archive.",
   "icon": "ClipboardList",
   "version": "0.1.0",
   "tab": {
