@@ -933,7 +933,12 @@ function SidebarSystemActions({
   const navigate = useNavigate();
   const { activeAction, isBusy, isRunning, pendingAction, runAction } =
     useSystemActions();
-  const canUpdateHermes = status?.can_update_hermes === true;
+  const isFleetOnly =
+    status !== null &&
+    !status.gateway_running &&
+    (status.gateway_count ?? 0) > 0;
+  const canUpdateHermes =
+    status?.can_update_hermes === true && !isFleetOnly;
   const [restartConfirmOpen, setRestartConfirmOpen] = useState(false);
   const [updateConfirmOpen, setUpdateConfirmOpen] = useState(false);
   const [updateConfirmInfo, setUpdateConfirmInfo] =
@@ -976,15 +981,17 @@ function SidebarSystemActions({
     );
   }, [t.status.updateHermesConfirmMessage, updateConfirmInfo]);
 
-  const items: SystemActionItem[] = [
-    {
-      action: "restart",
-      icon: RotateCw,
-      label: t.status.restartGateway,
-      runningLabel: t.status.restartingGateway,
-      spin: true,
-    },
-  ];
+  const items: SystemActionItem[] = isFleetOnly
+    ? []
+    : [
+        {
+          action: "restart",
+          icon: RotateCw,
+          label: t.status.restartGateway,
+          runningLabel: t.status.restartingGateway,
+          spin: true,
+        },
+      ];
   if (canUpdateHermes) {
     items.push({
       action: "update",
