@@ -205,3 +205,47 @@ def test_inventory_separates_retained_and_archived_external_workflows(tmp_path: 
     assert inventory["counts"]["retained_external_runtime_workflows"] == 1
     assert inventory["counts"]["archived_external_runtime_workflows"] == 1
     assert [item["slug"] for item in inventory["runbook_registry"]["archived_external_runtime_definitions"]] == ["retired-sim"]
+
+
+def test_paperclip_archive_routes_are_not_active_dependencies(tmp_path: Path) -> None:
+    inv = _load_inventory()
+    root = tmp_path / ".hermes"
+    archive_route = root / "shared-skills" / "paperclip-control" / "SKILL.md"
+    archive_route.parent.mkdir(parents=True)
+    archive_route.write_text(
+        "Paperclip is archive-only. Use legacy_work_search; never call the Paperclip API.",
+        encoding="utf-8",
+    )
+    active_route = root / "profiles" / "bad" / "scripts" / "dispatch.py"
+    active_route.parent.mkdir(parents=True)
+    active_route.write_text("url = PAPERCLIP_API_URL + '/api/issues'", encoding="utf-8")
+
+    evidence = inv.scan_references([root])
+    dispositions = {
+        Path(item["path"]).name: item["paperclip_disposition"] for item in evidence
+    }
+
+    assert dispositions["SKILL.md"] == "read-only-archive-route"
+    assert dispositions["dispatch.py"] == "active-execution-route"
+
+
+def test_inventory_uses_reconciled_paperclip_archive(tmp_path: Path) -> None:
+    inv = _load_inventory()
+    root = tmp_path / ".hermes"
+    reconciliation = (
+        root / "archives" / "paperclip" / "current" / "reconciliation.json"
+    )
+    _write_json(
+        reconciliation,
+        {
+            "source_counts": {"issues": 10},
+            "export_counts": {"issues": 10},
+            "count_mismatches": {},
+            "foreign_key_missing_counts": {"issue_comments.issue_id": 0},
+        },
+    )
+
+    result = inv.collect_paperclip_export_reconciliation(root)
+
+    assert result["status"] == "reconciled"
+    assert result["source_counts"] == {"issues": 10}

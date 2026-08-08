@@ -125,6 +125,17 @@ GENERATED_MARKERS = (
     ".log",
 )
 NOTIFICATION_KEYWORDS = ("telegram", "matrix", "photon", "imessage", "email", "webhook", "slack")
+PAPERCLIP_ACTIVE_PATTERNS = (
+    "paperclip_api_url",
+    "paperclip_api_key",
+    "paperclip_api_token",
+    "paperclip_agent_id",
+    "paperclip_company_id",
+    "paperclipai ",
+    "/api/issues",
+    "paperclip-poll-wake",
+    "paperclip-agent-tokens",
+)
 
 
 def _default_hermes_root() -> Path:
@@ -208,6 +219,45 @@ def classify_path(path: Path) -> str:
     if path.suffix in {".md", ".txt"}:
         return "active-documentation"
     return "unknown-review-required"
+
+
+def classify_paperclip_disposition(
+    path: Path,
+    classification: str,
+    text: str,
+) -> str:
+    lowered_path = path.as_posix().lower()
+    lowered = text.lower()
+    if classification in {"historical-archive", "migration-evidence", "generated-output"}:
+        return "historical-or-migration"
+    archive_implementations = (
+        "/plugins/runbooks/dashboard/",
+        "/scripts/export_paperclip_legacy.py",
+        "/scripts/workflow_inventory.py",
+        "/scripts/register_existing_runbooks.py",
+        "/agent/system_prompt.py",
+        "/shared-skills/paperclip-control/",
+        "/runbook-migrations/",
+    )
+    if any(marker in lowered_path for marker in archive_implementations):
+        return "read-only-archive-route"
+    if any(pattern in lowered for pattern in PAPERCLIP_ACTIVE_PATTERNS) or KNOWN_TOKEN_RE.search(
+        text
+    ):
+        return "active-execution-route"
+    archive_language = (
+        "archive-only",
+        "archive only",
+        "historical provenance",
+        "historical archive",
+        "not configured for this hermes profile",
+        "do not create paperclip",
+        "do not attempt paperclip",
+        "cannot dispatch",
+    )
+    if any(marker in lowered for marker in archive_language):
+        return "read-only-archive-route"
+    return "incidental-reference"
 
 
 def relative_to_any(path: Path, roots: list[Path]) -> str:
@@ -551,6 +601,7 @@ def scan_references(scan_roots: list[Path]) -> list[dict[str, Any]]:
             if not snippets:
                 continue
             classification = classify_path(path)
+            text = read_text_limited(path) or ""
             evidence.append(
                 {
                     "path": str(path),
@@ -562,6 +613,12 @@ def scan_references(scan_roots: list[Path]) -> list[dict[str, Any]]:
                         if keyword in " ".join(snippets).lower() or keyword in path.as_posix().lower()
                     ),
                     "snippets": snippets,
+                    "paperclip_disposition": classify_paperclip_disposition(
+                        path, classification, text
+                    )
+                    if "paperclip" in text.lower()
+                    or "paperclip" in path.as_posix().lower()
+                    else None,
                 }
             )
     return evidence
@@ -653,14 +710,36 @@ def build_authority_map(profiles: list[dict[str, Any]], evidence: list[dict[str,
                 "owner": "unknown-review-required",
                 "runtime": "Paperclip reference",
                 "source": item["path"],
-                "enabled": item["classification"] == "active-runtime",
+                "enabled": item.get("paperclip_disposition")
+                == "active-execution-route",
                 "disposition": "investigate"
-                if item["classification"] in {"active-runtime", "credential-reference"}
+                if item.get("paperclip_disposition") == "active-execution-route"
                 else "archive",
-                "notes": item["classification"],
+                "notes": item.get("paperclip_disposition") or item["classification"],
             }
         )
     return rows
+
+
+def collect_paperclip_export_reconciliation(hermes_root: Path) -> dict[str, Any]:
+    path = hermes_root / "archives" / "paperclip" / "current" / "reconciliation.json"
+    payload = load_json_file(path)
+    if isinstance(payload, dict):
+        missing = payload.get("foreign_key_missing_counts", {})
+        return {
+            **payload,
+            "status": "reconciled"
+            if not payload.get("count_mismatches")
+            and not any(int(value) for value in missing.values())
+            else "failed",
+            "archive_reconciliation": str(path.resolve()),
+        }
+    return {
+        "status": "metadata-only",
+        "source_counts": [],
+        "export_counts": None,
+        "note": "Full Paperclip export reconciliation is produced by the archive/export step.",
+    }
 
 
 def markdown_inventory(inventory: dict[str, Any]) -> str:
@@ -752,7 +831,7 @@ def build_inventory(options: InventoryOptions) -> dict[str, Any]:
         item
         for item in evidence
         if "paperclip" in item.get("keywords", [])
-        and item["classification"] in {"active-runtime", "credential-reference", "unknown-review-required"}
+        and item.get("paperclip_disposition") == "active-execution-route"
     ]
     counts = Counter()
     counts["profiles"] = len(profiles)
@@ -797,13 +876,9 @@ def build_inventory(options: InventoryOptions) -> dict[str, Any]:
         "notification_path_inventory": notification_inventory,
         "runbook_registry": runbook_registry,
         "active_automation_authority_map": authority_rows,
-        "paperclip_export_reconciliation": {
-            "status": "metadata-only",
-            "note": "Phase 1 scanner records discovered stores and local SQLite table counts. "
-            "Full Paperclip export reconciliation is produced by the archive/export step.",
-            "source_counts": paperclip.get("sqlite_counts", []),
-            "export_counts": None,
-        },
+        "paperclip_export_reconciliation": collect_paperclip_export_reconciliation(
+            options.hermes_root
+        ),
         "counts": dict(counts),
     }
     return redact_json(inventory)
