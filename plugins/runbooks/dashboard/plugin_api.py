@@ -10,12 +10,13 @@ from pathlib import Path
 import sqlite3
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from hermes_cli import runbook_store
 from hermes_cli import workflow_registry as registry
 from hermes_cli.runbook_schema import RunbookValidationError, split_frontmatter
+from hermes_constants import get_default_hermes_root
 from hermes_cli.workflow_models import (
     WorkflowConflictError,
     WorkflowNotFoundError,
@@ -28,12 +29,12 @@ router = APIRouter()
 
 class RunbookSaveRequest(BaseModel):
     markdown: str = Field(..., min_length=1)
-    approved_by: str = Field(..., min_length=1)
+    approved_by: str | None = None
 
 
 class RunbookProposalRequest(BaseModel):
     markdown: str = Field(..., min_length=1)
-    proposed_by: str = Field(..., min_length=1)
+    proposed_by: str | None = None
     summary: str | None = None
 
 
@@ -291,23 +292,140 @@ def _proposal_records(slug: str) -> list[dict[str, Any]]:
     return records
 
 
+def _schedule_display(job: dict[str, Any]) -> str:
+    display = job.get("schedule_display")
+    if display:
+        return str(display)
+    schedule = job.get("schedule")
+    if isinstance(schedule, dict):
+        return str(
+            schedule.get("display")
+            or schedule.get("expr")
+            or schedule.get("at")
+            or schedule.get("every")
+            or schedule.get("kind")
+            or ""
+        )
+    return str(schedule or "")
+
+
+def _load_schedule_inventory() -> list[dict[str, Any]]:
+    profiles_root = get_default_hermes_root() / "profiles"
+    schedules: list[dict[str, Any]] = []
+    if not profiles_root.exists():
+        return schedules
+    for jobs_path in sorted(profiles_root.glob("*/cron/jobs.json")):
+        try:
+            raw = json.loads(jobs_path.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        jobs = raw.get("jobs", []) if isinstance(raw, dict) else raw
+        if not isinstance(jobs, list):
+            continue
+        profile = jobs_path.parent.parent.name
+        for job in jobs:
+            if not isinstance(job, dict):
+                continue
+            workflow_id = str(job.get("workflow_id") or "").strip() or None
+            workflow_slug = str(
+                job.get("workflow_slug") or job.get("runbook_slug") or ""
+            ).strip() or None
+            enabled = bool(job.get("enabled", True))
+            schedules.append(
+                {
+                    "profile": profile,
+                    "job_id": str(job.get("id") or ""),
+                    "name": str(job.get("name") or job.get("id") or "Unnamed schedule"),
+                    "enabled": enabled,
+                    "state": str(job.get("state") or ("scheduled" if enabled else "disabled")),
+                    "schedule": _schedule_display(job),
+                    "next_run_at": job.get("next_run_at"),
+                    "last_run_at": job.get("last_run_at"),
+                    "last_status": job.get("last_status"),
+                    "last_error": job.get("last_error") or job.get("last_delivery_error"),
+                    "workflow_id": workflow_id,
+                    "workflow_slug": workflow_slug,
+                    "registration_status": "registered"
+                    if workflow_id and workflow_slug
+                    else "unregistered",
+                }
+            )
+    return sorted(
+        schedules,
+        key=lambda item: (
+            not item["enabled"],
+            item["registration_status"] != "unregistered",
+            item["profile"],
+            item["name"].lower(),
+        ),
+    )
+
+
+def _request_actor(request: Request, fallback: str | None = None) -> str:
+    session = getattr(request.state, "session", None)
+    user_id = getattr(session, "user_id", None)
+    if user_id:
+        return str(user_id)
+    return str(fallback or "local-dashboard")
+
+
+def _migration_inventory() -> dict[str, Any]:
+    root = get_default_hermes_root() / "runbook-migrations"
+    candidates: list[dict[str, Any]] = []
+    sources: list[str] = []
+    for path in sorted(root.glob("*.json")) if root.exists() else []:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        items = payload.get("candidates", []) if isinstance(payload, dict) else []
+        candidates.extend(item for item in items if isinstance(item, dict))
+        sources.append(str(path))
+    counts: dict[str, int] = {}
+    for item in candidates:
+        classification = str(item.get("classification") or "unclassified")
+        counts[classification] = counts.get(classification, 0) + 1
+    return {"counts": counts, "candidates": candidates, "sources": sources}
+
+
 @router.get("/overview")
 async def overview() -> dict[str, Any]:
     with registry.connect_closing() as conn:
         definitions = [item.to_dict() for item in registry.list_definitions(conn)]
         runs = _list_runs(conn, workflow_id=None, limit=50)
     runbooks = [record.to_dict() for record in runbook_store.list_runbooks()]
+    schedules = _load_schedule_inventory()
+    enabled_schedules = [item for item in schedules if item["enabled"]]
+    registered_schedules = [
+        item for item in enabled_schedules if item["registration_status"] == "registered"
+    ]
+    migration = _migration_inventory()
     return {
         "counts": {
             "runbooks": len(runbooks),
             "workflows": len(definitions),
             "active_workflows": len([w for w in definitions if w["status"] == "active"]),
             "recent_runs": len(runs),
+            "schedules": len(schedules),
+            "enabled_schedules": len(enabled_schedules),
+            "registered_schedules": len(registered_schedules),
+            "unregistered_schedules": len(enabled_schedules) - len(registered_schedules),
+            "migration_candidates": len(migration["candidates"]),
         },
         "runbooks": runbooks,
         "workflows": definitions,
+        "schedules": schedules,
+        "migration": migration,
         "recent_runs": runs,
     }
+
+
+@router.get("/schedules")
+async def list_schedules(include_disabled: bool = False) -> dict[str, Any]:
+    schedules = _load_schedule_inventory()
+    if not include_disabled:
+        schedules = [item for item in schedules if item["enabled"]]
+    return {"schedules": schedules}
 
 
 @router.get("/runbooks")
@@ -361,7 +479,9 @@ async def get_runbook(slug: str) -> dict[str, Any]:
 
 
 @router.put("/runbooks/{slug}")
-async def save_runbook(slug: str, request: RunbookSaveRequest) -> dict[str, Any]:
+async def save_runbook(
+    slug: str, request: RunbookSaveRequest, http_request: Request
+) -> dict[str, Any]:
     try:
         parsed = split_frontmatter(request.markdown)
         if parsed.metadata["slug"] != slug:
@@ -369,7 +489,7 @@ async def save_runbook(slug: str, request: RunbookSaveRequest) -> dict[str, Any]
         record = runbook_store.save_runbook(
             parsed.metadata,
             parsed.body,
-            approved_by=request.approved_by,
+            approved_by=_request_actor(http_request, request.approved_by),
         )
         workflow = _sync_runbook_projection(record)
     except Exception as exc:
@@ -381,6 +501,7 @@ async def save_runbook(slug: str, request: RunbookSaveRequest) -> dict[str, Any]
 async def propose_runbook_edit(
     slug: str,
     request: RunbookProposalRequest,
+    http_request: Request,
 ) -> dict[str, Any]:
     try:
         parsed = split_frontmatter(request.markdown)
@@ -389,7 +510,7 @@ async def propose_runbook_edit(
         path = runbook_store.propose_edit(
             slug,
             request.markdown,
-            proposed_by=request.proposed_by,
+            proposed_by=_request_actor(http_request, request.proposed_by),
             summary=request.summary,
         )
     except Exception as exc:

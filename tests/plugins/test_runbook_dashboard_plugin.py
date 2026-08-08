@@ -103,6 +103,38 @@ def test_save_runbook_projects_workflow_and_steps(client):
     assert overview["counts"]["active_workflows"] == 1
 
 
+def test_overview_lists_registered_and_unregistered_profile_schedules(client, tmp_path):
+    profiles = tmp_path / ".hermes" / "profiles"
+    grace_jobs = profiles / "grace" / "cron" / "jobs.json"
+    grace_jobs.parent.mkdir(parents=True)
+    grace_jobs.write_text(
+        """{"jobs": [
+          {"id": "morning", "name": "Morning", "enabled": true,
+           "schedule": {"kind": "cron", "expr": "15 6 * * *"}},
+          {"id": "heartbeat", "name": "Heartbeat", "enabled": true,
+           "schedule_display": "7 8-19 * * 1-5", "workflow_id": "wf_heartbeat",
+           "workflow_slug": "grace-heartbeat"},
+          {"id": "old", "name": "Old", "enabled": false, "schedule": "@daily"}
+        ]}""",
+        encoding="utf-8",
+    )
+
+    overview = client.get("/api/plugins/runbooks/overview").json()
+
+    assert overview["counts"]["schedules"] == 3
+    assert overview["counts"]["enabled_schedules"] == 2
+    assert overview["counts"]["registered_schedules"] == 1
+    assert overview["counts"]["unregistered_schedules"] == 1
+    assert overview["schedules"][0]["job_id"] == "morning"
+    assert overview["schedules"][0]["registration_status"] == "unregistered"
+    enabled = client.get("/api/plugins/runbooks/schedules").json()["schedules"]
+    assert len(enabled) == 2
+    all_schedules = client.get(
+        "/api/plugins/runbooks/schedules?include_disabled=true"
+    ).json()["schedules"]
+    assert len(all_schedules) == 3
+
+
 def test_proposal_does_not_replace_active_runbook(client):
     active = _runbook_markdown()
     assert client.put(
@@ -188,3 +220,6 @@ def test_preview_diff_and_bundle_registration(client):
     assert "SDK.registerPlugin" not in bundle
     assert "Approve Save" in bundle
     assert "Start Run" in bundle
+    assert '"Approver"' not in bundle
+    assert "Evernote migration" in bundle
+    assert "Schedules" in bundle

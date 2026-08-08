@@ -6,6 +6,7 @@ from hermes_cli import runbook_store
 from hermes_cli import workflow_registry as reg
 from hermes_cli.workflow_runtime import (
     build_runbook_agent_prompt,
+    link_existing_cron_job,
     sync_runbook_cron_jobs,
 )
 from hermes_constants import get_hermes_home
@@ -134,3 +135,45 @@ def test_sync_runbook_cron_jobs_updates_existing_job() -> None:
     assert second["id"] == first["id"]
     assert second["schedule_display"] == "every 120m"
     assert "Collect updated context" in second["prompt"]
+
+
+def test_link_existing_cron_job_only_adds_registry_identity() -> None:
+    _save_runbook()
+    from cron import jobs as cron_jobs
+
+    original = cron_jobs.create_job(
+        prompt="Preserve this exact prompt.",
+        schedule="every 3h",
+        name="Existing job",
+        deliver="local",
+        provider="openrouter",
+        model="test-model",
+        reasoning_effort="medium",
+        speed="standard",
+    )
+
+    linked = link_existing_cron_job(
+        "daily-brief",
+        profile="default",
+        cron_job_id=original["id"],
+        schedule_id="existing",
+        step_key="collect",
+    )
+
+    for field in (
+        "prompt",
+        "schedule",
+        "schedule_display",
+        "deliver",
+        "provider",
+        "model",
+        "reasoning_effort",
+        "speed",
+        "enabled",
+        "track_workflow_status",
+    ):
+        assert linked.get(field) == original.get(field), field
+    assert linked["workflow_id"] == "wf-daily-brief"
+    assert linked["workflow_slug"] == "daily-brief"
+    assert linked["workflow_step_key"] == "collect"
+    assert linked["workflow_schedule_id"] == "existing"

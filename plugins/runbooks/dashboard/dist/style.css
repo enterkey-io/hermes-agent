@@ -8,11 +8,17 @@
 .hermes-runbooks-topbar,
 .hermes-runbooks-editor-head,
 .hermes-runbooks-actions,
-.hermes-runbooks-savebar {
+.hermes-runbooks-savebar,
+.hermes-runbooks-tabs,
+.hermes-runbooks-summary {
   align-items: center;
   display: flex;
   gap: 10px;
   justify-content: space-between;
+}
+
+.hermes-runbooks-tabs {
+  justify-content: flex-start;
 }
 
 .hermes-runbooks-topbar h1,
@@ -136,8 +142,74 @@
 .hermes-runbooks-savebar {
   border-top: 1px solid hsl(var(--border));
   display: grid;
-  grid-template-columns: auto minmax(120px, 180px) auto minmax(160px, 1fr) auto;
+  grid-template-columns: auto minmax(160px, 1fr) auto;
   padding-top: 10px;
+}
+
+.hermes-runbooks-table-panel {
+  border-top: 1px solid hsl(var(--border));
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 12px;
+}
+
+.hermes-runbooks-summary {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+}
+
+.hermes-runbooks-summary span,
+.hermes-runbooks-summary strong {
+  font-size: 13px;
+}
+
+.hermes-runbooks-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.hermes-runbooks-table {
+  border-collapse: collapse;
+  font-size: 13px;
+  width: 100%;
+}
+
+.hermes-runbooks-table th,
+.hermes-runbooks-table td {
+  border-bottom: 1px solid hsl(var(--border));
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.hermes-runbooks-table th {
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.hermes-runbooks-table td:first-child {
+  min-width: 240px;
+}
+
+.hermes-runbooks-table td code {
+  display: block;
+  font-size: 11px;
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+}
+
+.hermes-runbooks-status-registered {
+  border-color: #168a4a;
+  color: #168a4a;
+}
+
+.hermes-runbooks-status-unregistered,
+.hermes-runbooks-status-unresolved {
+  border-color: #b45309;
+  color: #b45309;
 }
 
 .hermes-runbooks-run,
@@ -185,5 +257,33 @@
   .hermes-runbooks-actions {
     flex-wrap: wrap;
     justify-content: flex-start;
+  }
+
+  .hermes-runbooks {
+    gap: 10px;
+    min-height: auto;
+  }
+
+  .hermes-runbooks-tabs {
+    align-items: stretch;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .hermes-runbooks-tabs button {
+    min-width: 0;
+    padding-left: 6px;
+    padding-right: 6px;
+    white-space: normal;
+  }
+
+  .hermes-runbooks-list {
+    max-height: 34vh;
+  }
+
+  .hermes-runbooks-textarea,
+  .hermes-runbooks-preview,
+  .hermes-runbooks-diff {
+    min-height: 58vh;
   }
 }

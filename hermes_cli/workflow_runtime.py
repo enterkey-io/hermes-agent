@@ -73,6 +73,51 @@ def sync_runbook_cron_jobs(slug: str) -> list[dict[str, Any]]:
     return synced
 
 
+def link_existing_cron_job(
+    slug: str,
+    *,
+    profile: str,
+    cron_job_id: str,
+    schedule_id: str,
+    step_key: str,
+) -> dict[str, Any]:
+    """Attach registry identity to a cron job without changing its behavior."""
+    parsed = runbook_store.read_runbook(runbook_store.runbook_path(slug))
+    metadata = parsed.metadata
+    updates = {
+        "workflow_id": metadata["id"],
+        "workflow_slug": metadata["slug"],
+        "workflow_step_key": step_key,
+        "workflow_schedule_id": schedule_id,
+        "runbook_slug": metadata["slug"],
+    }
+    with _cron_store_for_profile(profile):
+        from cron import jobs as cron_jobs
+
+        existing = next(
+            (
+                job
+                for job in cron_jobs.list_jobs(include_disabled=True)
+                if job.get("id") == cron_job_id
+            ),
+            None,
+        )
+        if existing is None:
+            raise FileNotFoundError(f"cron job not found: {profile}/{cron_job_id}")
+        job = cron_jobs.update_job(cron_job_id, updates)
+    if job is None:
+        raise RuntimeError(f"cron job disappeared during linkage: {profile}/{cron_job_id}")
+    with registry.connect_closing() as conn:
+        registry.link_schedule(
+            conn,
+            metadata["id"],
+            profile=profile,
+            cron_job_id=cron_job_id,
+            enabled=bool(job.get("enabled", True)),
+        )
+    return job
+
+
 def _schedule_text(schedule: dict[str, Any]) -> str:
     for key in ("schedule", "cron", "value"):
         value = schedule.get(key)

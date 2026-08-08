@@ -78,7 +78,7 @@
     const [preview, setPreview] = useState("");
     const [diff, setDiff] = useState("");
     const [filter, setFilter] = useState("");
-    const [approver, setApprover] = useState("dashboard");
+    const [view, setView] = useState("runbooks");
     const [proposalSummary, setProposalSummary] = useState("");
     const [error, setError] = useState("");
     const [busy, setBusy] = useState(false);
@@ -86,6 +86,8 @@
     const runbooks = overview ? overview.runbooks || [] : [];
     const workflows = overview ? overview.workflows || [] : [];
     const recentRuns = overview ? overview.recent_runs || [] : [];
+    const schedules = overview ? overview.schedules || [] : [];
+    const migration = overview ? overview.migration || { counts: {}, candidates: [] } : { counts: {}, candidates: [] };
 
     function refresh() {
       setError("");
@@ -126,7 +128,7 @@
       setError("");
       fetchJSON("/runbooks/" + encodeURIComponent(selectedSlug), {
         method: "PUT",
-        body: JSON.stringify({ markdown: markdown, approved_by: approver }),
+        body: JSON.stringify({ markdown: markdown }),
       }).then(function () {
         return refresh();
       }).then(function () {
@@ -148,7 +150,6 @@
         method: "POST",
         body: JSON.stringify({
           markdown: markdown,
-          proposed_by: approver,
           summary: proposalSummary || null,
         }),
       }).then(function () {
@@ -223,18 +224,32 @@
           h("div", { className: "hermes-runbooks-muted" },
             overview ? [
               overview.counts.runbooks + " runbooks",
-              overview.counts.workflows + " workflows",
-              overview.counts.recent_runs + " recent runs",
+              overview.counts.enabled_schedules + " enabled schedules",
+              overview.counts.unregistered_schedules + " unregistered",
             ].join(" | ") : "Loading registry"
           )
         ),
         h("div", { className: "hermes-runbooks-actions" },
           h(Button, { onClick: refresh, variant: "outline", disabled: busy }, "Refresh"),
-          h(Button, { onClick: newRunbook }, "New")
+          view === "runbooks" ? h(Button, { onClick: newRunbook }, "New") : null
         )
       ),
       error ? h("div", { className: "hermes-runbooks-error" }, error) : null,
-      h("div", { className: "hermes-runbooks-grid" },
+      h("div", { className: "hermes-runbooks-tabs" },
+        h(Button, {
+          variant: view === "runbooks" ? "default" : "outline",
+          onClick: function () { setView("runbooks"); },
+        }, "Runbooks"),
+        h(Button, {
+          variant: view === "schedules" ? "default" : "outline",
+          onClick: function () { setView("schedules"); },
+        }, "Schedules"),
+        h(Button, {
+          variant: view === "migration" ? "default" : "outline",
+          onClick: function () { setView("migration"); },
+        }, "Evernote migration")
+      ),
+      view === "runbooks" ? h("div", { className: "hermes-runbooks-grid" },
         h("aside", { className: "hermes-runbooks-sidebar" },
           h(Label, null, "Search"),
           h(Input, {
@@ -298,11 +313,6 @@
               }) : null,
               mode === "diff" ? h("pre", { className: "hermes-runbooks-diff" }, diff || "No changes") : null,
               h("div", { className: "hermes-runbooks-savebar" },
-                h(Label, null, "Approver"),
-                h(Input, {
-                  value: approver,
-                  onChange: function (event) { setApprover(event.target.value); },
-                }),
                 h(Button, { onClick: saveActive, disabled: busy || !selectedSlug }, "Approve Save"),
                 h(Input, {
                   value: proposalSummary,
@@ -362,6 +372,65 @@
               )
             )
           ) : null
+        )
+      ) : view === "schedules" ? h("section", { className: "hermes-runbooks-table-panel" },
+        h("div", { className: "hermes-runbooks-summary" },
+          h("strong", null, overview ? overview.counts.enabled_schedules : 0),
+          h("span", null, " enabled"),
+          h("strong", null, overview ? overview.counts.registered_schedules : 0),
+          h("span", null, " registered"),
+          h("strong", null, overview ? overview.counts.unregistered_schedules : 0),
+          h("span", null, " unregistered")
+        ),
+        h("div", { className: "hermes-runbooks-table-wrap" },
+          h("table", { className: "hermes-runbooks-table" },
+            h("thead", null, h("tr", null,
+              h("th", null, "Workflow"),
+              h("th", null, "Owner"),
+              h("th", null, "Schedule"),
+              h("th", null, "State"),
+              h("th", null, "Registry")
+            )),
+            h("tbody", null, schedules.map(function (item) {
+              return h("tr", { key: item.profile + ":" + item.job_id },
+                h("td", null,
+                  h("strong", null, item.name),
+                  h("code", null, item.job_id)
+                ),
+                h("td", null, item.profile),
+                h("td", null, h("code", null, item.schedule || "manual")),
+                h("td", null, item.enabled ? (item.last_status || item.state) : "disabled"),
+                h("td", null,
+                  h("span", { className: statusClass(item.registration_status) }, item.registration_status),
+                  item.workflow_slug ? h("code", null, item.workflow_slug) : null
+                )
+              );
+            }))
+          )
+        )
+      ) : h("section", { className: "hermes-runbooks-table-panel" },
+        h("div", { className: "hermes-runbooks-summary" },
+          Object.keys(migration.counts || {}).sort().map(function (key) {
+            return h("span", { key: key }, h("strong", null, migration.counts[key]), " " + key);
+          })
+        ),
+        h("div", { className: "hermes-runbooks-table-wrap" },
+          h("table", { className: "hermes-runbooks-table" },
+            h("thead", null, h("tr", null,
+              h("th", null, "Source"),
+              h("th", null, "Owner"),
+              h("th", null, "Classification"),
+              h("th", null, "Evernote")
+            )),
+            h("tbody", null, (migration.candidates || []).map(function (item) {
+              return h("tr", { key: item.source },
+                h("td", null, h("strong", null, item.title || item.source), h("code", null, item.source)),
+                h("td", null, item.owner || "-"),
+                h("td", null, h("span", { className: statusClass(item.classification) }, item.classification)),
+                h("td", null, item.evernote_note_id ? h("code", null, item.evernote_note_id) : "Not migrated")
+              );
+            }))
+          )
         )
       )
     );
