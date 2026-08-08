@@ -44,6 +44,7 @@ REVIEWED: dict[str, dict[str, Any]] = {
         "owner": "grace",
         "source": "grace/heartbeat.md",
         "jobs": [("grace", "537d8032bdaf"), ("grace", "9e0af1442da4")],
+        "body_source": "cron",
     },
     "grace-morning-message": {
         "title": "Grace Morning Message",
@@ -51,6 +52,7 @@ REVIEWED: dict[str, dict[str, Any]] = {
         "owner": "grace",
         "source": "grace/morning-message.md",
         "jobs": [("grace", "019c9f963374"), ("grace", "e24182c7ae77")],
+        "body_source": "cron",
     },
     "grace-meeting-preparation": {
         "title": "Grace Meeting Preparation",
@@ -58,6 +60,7 @@ REVIEWED: dict[str, dict[str, Any]] = {
         "owner": "grace",
         "source": "grace/meeting-prep.md",
         "jobs": [("grace", "be5404c1511b"), ("grace", "a666c92adcc1")],
+        "body_source": "cron",
     },
     "grace-meeting-transcript-processing": {
         "title": "Grace Meeting Transcript Processing",
@@ -69,6 +72,7 @@ REVIEWED: dict[str, dict[str, Any]] = {
             ("grace", "9378c72794d9"),
             ("grace", "59ea71ff521c"),
         ],
+        "body_source": "cron",
     },
     "margot-weekly-blog-post": {
         "title": "Margot Weekly Blog Post",
@@ -76,6 +80,7 @@ REVIEWED: dict[str, dict[str, Any]] = {
         "owner": "margot",
         "source": "margot/weekly-blog-post.md",
         "jobs": [("margot", "d0c36ca9f7bf")],
+        "body_source": "cron",
     },
     "shared-vt-signal-flow": {
         "title": "VT Signal Flow",
@@ -84,6 +89,7 @@ REVIEWED: dict[str, dict[str, Any]] = {
         "source": "shared/vt-signal-flow.md",
         "jobs": [],
         "runtime_kind": "external_cli",
+        "status": "degraded",
     },
 }
 
@@ -184,6 +190,7 @@ def _metadata(
     jobs: list[tuple[str, dict[str, Any]]],
     related: dict[str, Any],
     runtime_kind: str = "hermes",
+    status: str | None = None,
 ) -> dict[str, Any]:
     steps, schedules = _steps_and_schedules(jobs)
     enabled = any(job.get("enabled", True) for _, job in jobs) if jobs else True
@@ -193,7 +200,7 @@ def _metadata(
         "title": title,
         "purpose": purpose,
         "owner_profile": owner,
-        "status": "active" if enabled else "paused",
+        "status": status or ("active" if enabled else "paused"),
         "runtime": {"kind": runtime_kind, "ref": f"profile:{owner}"},
         "schedules": schedules,
         "steps": steps,
@@ -276,6 +283,7 @@ def migrate(
             "migration": "evernote-reviewed-2026-08-07",
             "source_path": str(source),
             "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+            "evernote_source_sha256": (note.get("source_sha256") or [None])[0],
             "evernote_note_id": note.get("evernote_note_id"),
             "evernote_title": note.get("title"),
             "evernote_status": note.get("status"),
@@ -288,8 +296,14 @@ def migrate(
             jobs=jobs,
             related=related,
             runtime_kind=spec.get("runtime_kind", "hermes"),
+            status=spec.get("status"),
         )
-        specs.append((metadata, source.read_text(encoding="utf-8"), jobs))
+        body = (
+            _prompt_body(spec["title"], jobs)
+            if spec.get("body_source") == "cron"
+            else source.read_text(encoding="utf-8")
+        )
+        specs.append((metadata, body, jobs))
 
     for (profile, job_id), job in sorted(all_jobs.items()):
         if (profile, job_id) in claimed or (profile, job_id) in existing_linked:
