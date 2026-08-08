@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useState } from "react";
+import { useSearchParams } from "react-router";
 import { Clock, Pause, Pencil, Play, Trash2, X, Zap } from "lucide-react";
 import { Badge } from "@nous-research/ui/ui/components/badge";
 import { Button } from "@nous-research/ui/ui/components/button";
@@ -509,9 +510,14 @@ const STATUS_TONE: Record<string, "success" | "warning" | "destructive"> = {
 };
 
 export default function CronPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requestedProfile = searchParams.get("profile");
+  const requestedJobId = searchParams.get("job");
   const [jobs, setJobs] = useState<CronJob[]>([]);
   const [profiles, setProfiles] = useState<ProfileInfo[]>([]);
-  const [selectedProfile, setSelectedProfile] = useState("all");
+  const [selectedProfile, setSelectedProfile] = useState(
+    () => requestedProfile || "all",
+  );
   const [view, setView] = useState<"jobs" | "blueprints">("jobs");
   const [loading, setLoading] = useState(true);
   const { toast, showToast } = useToast();
@@ -606,6 +612,25 @@ export default function CronPage() {
   useEffect(() => {
     loadJobs();
   }, [loadJobs]);
+
+  useEffect(() => {
+    if (loading || !requestedJobId) return;
+    const requestedJob = jobs.find(
+      (job) =>
+        job.id === requestedJobId &&
+        (!requestedProfile || getJobProfile(job) === requestedProfile),
+    );
+    if (!requestedJob) return;
+    openEditModal(requestedJob);
+    setSearchParams({}, { replace: true });
+  }, [
+    jobs,
+    loading,
+    openEditModal,
+    requestedJobId,
+    requestedProfile,
+    setSearchParams,
+  ]);
 
   // Load resources from the profile the create/edit form actually targets.
   // Pass "default" explicitly so the global dashboard profile switch cannot

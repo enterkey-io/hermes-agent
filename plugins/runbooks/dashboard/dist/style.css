@@ -1,7 +1,7 @@
 .hermes-runbooks {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
   min-height: calc(100vh - 96px);
 }
 
@@ -14,7 +14,12 @@
 .hermes-runbooks-actions,
 .hermes-runbooks-savebar,
 .hermes-runbooks-tabs,
-.hermes-runbooks-summary {
+.hermes-runbooks-summary,
+.hermes-runbooks-view-head,
+.hermes-runbooks-detail-head,
+.hermes-runbooks-section-title,
+.hermes-runbooks-schedule,
+.hermes-runbooks-runtime {
   align-items: center;
   display: flex;
   gap: 10px;
@@ -50,88 +55,87 @@
   justify-content: flex-start;
 }
 
-.hermes-runbooks-topbar h1,
-.hermes-runbooks-panel h2,
-.hermes-runbooks-panel h3 {
-  letter-spacing: 0;
-  margin: 0;
+.hermes-runbooks-tabs button {
+  line-height: 1.1;
+  min-height: 36px;
 }
 
-.hermes-runbooks-grid {
-  display: grid;
-  gap: 16px;
-  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
-}
-
-.hermes-runbooks-sidebar,
-.hermes-runbooks-main,
+.hermes-runbooks-workflows,
 .hermes-runbooks-list,
-.hermes-runbooks-runs,
-.hermes-runbooks-panel,
+.hermes-runbooks-definition,
+.hermes-runbooks-relationship,
 .hermes-runbooks-steps,
-.hermes-runbooks-history {
+.hermes-runbooks-history-grid {
   display: flex;
   flex-direction: column;
   gap: 10px;
 }
 
+.hermes-runbooks-filter {
+  display: grid;
+  gap: 5px;
+  max-width: 440px;
+}
+
 .hermes-runbooks-list {
-  max-height: 50vh;
-  overflow: auto;
+  overflow: visible;
 }
 
 .hermes-runbooks-list-item {
-  background: hsl(var(--card));
-  border: 1px solid hsl(var(--border));
-  border-radius: 8px;
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid hsl(var(--border));
   color: hsl(var(--foreground));
   cursor: pointer;
   display: grid;
-  gap: 4px;
-  padding: 10px;
+  gap: 10px;
+  grid-template-columns: minmax(220px, 2fr) minmax(80px, 0.7fr) auto minmax(100px, 0.8fr) minmax(170px, 1.2fr) minmax(110px, 0.8fr);
+  min-height: 62px;
+  padding: 10px 8px;
   text-align: left;
+  width: 100%;
+}
+
+.hermes-runbooks-list-item:hover,
+.hermes-runbooks-list-item.is-active {
+  background: hsl(var(--muted));
 }
 
 .hermes-runbooks-list-item.is-active {
-  border-color: hsl(var(--primary));
+  box-shadow: inset 3px 0 0 hsl(var(--primary));
 }
 
 .hermes-runbooks-list-title {
-  font-weight: 600;
+  font-size: 14px;
+  font-weight: 650;
+  min-width: 0;
   overflow-wrap: anywhere;
 }
 
-.hermes-runbooks-list-meta,
+.hermes-runbooks-list-owner,
+.hermes-runbooks-connection,
 .hermes-runbooks-muted {
   color: hsl(var(--muted-foreground));
   font-size: 12px;
-}
-
-.hermes-runbooks-list-purpose {
-  color: hsl(var(--muted-foreground));
-  display: -webkit-box;
-  font-size: 12px;
-  line-height: 1.35;
-  overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .hermes-runbooks-status {
-  border-radius: 999px;
   border: 1px solid hsl(var(--border));
+  border-radius: 999px;
+  display: inline-flex;
   font-size: 11px;
   justify-self: start;
   padding: 2px 8px;
+  white-space: nowrap;
 }
 
-.hermes-runbooks-status-active {
-  border-color: #168a4a;
-  color: #168a4a;
-}
-
+.hermes-runbooks-status-active,
 .hermes-runbooks-status-succeeded,
-.hermes-runbooks-status-completed {
+.hermes-runbooks-status-completed,
+.hermes-runbooks-status-registered {
   border-color: #168a4a;
   color: #168a4a;
 }
@@ -143,13 +147,121 @@
 }
 
 .hermes-runbooks-status-paused,
-.hermes-runbooks-status-degraded {
+.hermes-runbooks-status-degraded,
+.hermes-runbooks-status-unregistered,
+.hermes-runbooks-status-unresolved {
   border-color: #a16207;
   color: #a16207;
 }
 
 .hermes-runbooks-status-retired {
   color: hsl(var(--muted-foreground));
+}
+
+.hermes-runbooks-workflow-detail {
+  background: hsl(var(--card));
+  border-bottom: 1px solid hsl(var(--border));
+  border-left: 3px solid hsl(var(--primary));
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 18px 16px 20px;
+}
+
+.hermes-runbooks-detail-head h2,
+.hermes-runbooks-editor-head h3,
+.hermes-runbooks-section-title h3 {
+  letter-spacing: 0;
+  margin: 0;
+}
+
+.hermes-runbooks-detail-head h2 {
+  font-size: 18px;
+}
+
+.hermes-runbooks-relationship-grid {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.hermes-runbooks-relationship {
+  align-content: start;
+  border-top: 1px solid hsl(var(--border));
+  min-width: 0;
+  padding-top: 10px;
+}
+
+.hermes-runbooks-section-title h3 {
+  font-size: 13px;
+}
+
+.hermes-runbooks-section-title > span {
+  color: hsl(var(--muted-foreground));
+  font-size: 12px;
+}
+
+.hermes-runbooks-schedule {
+  align-items: flex-start;
+  border-bottom: 1px solid hsl(var(--border));
+  padding: 7px 0 10px;
+}
+
+.hermes-runbooks-schedule-main,
+.hermes-runbooks-schedule-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.hermes-runbooks-schedule-main code,
+.hermes-runbooks-runtime code {
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.hermes-runbooks-schedule-actions {
+  align-items: flex-end;
+  flex: 0 0 auto;
+}
+
+.hermes-runbooks-runtime {
+  align-items: flex-start;
+  font-size: 12px;
+}
+
+.hermes-runbooks-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.hermes-runbooks-run,
+.hermes-runbooks-step {
+  align-items: center;
+  border-bottom: 1px solid hsl(var(--border));
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  min-width: 0;
+  padding: 7px 0;
+}
+
+.hermes-runbooks-step > span:nth-child(2) {
+  flex: 1;
+  min-width: 0;
+}
+
+.hermes-runbooks-empty-inline {
+  color: hsl(var(--muted-foreground));
+  font-size: 12px;
+  padding: 8px 0;
+}
+
+.hermes-runbooks-definition {
+  border-top: 1px solid hsl(var(--border));
+  padding-top: 14px;
 }
 
 .hermes-runbooks-error {
@@ -173,20 +285,18 @@
   width: 100%;
 }
 
-.hermes-runbooks-preview {
+.hermes-runbooks-preview,
+.hermes-runbooks-diff {
   border: 1px solid hsl(var(--border));
   border-radius: 8px;
-  min-height: 520px;
+  min-height: 360px;
   padding: 16px;
 }
 
 .hermes-runbooks-diff {
   background: hsl(var(--muted));
-  border-radius: 8px;
   font-size: 12px;
-  min-height: 520px;
   overflow: auto;
-  padding: 12px;
   white-space: pre-wrap;
 }
 
@@ -197,6 +307,28 @@
   padding-top: 10px;
 }
 
+.hermes-runbooks-history {
+  border-top: 1px solid hsl(var(--border));
+  padding-top: 12px;
+}
+
+.hermes-runbooks-history summary {
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.hermes-runbooks-history-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding-top: 10px;
+}
+
+.hermes-runbooks-history-grid code {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
 .hermes-runbooks-table-panel {
   border-top: 1px solid hsl(var(--border));
   display: flex;
@@ -205,8 +337,12 @@
   padding-top: 12px;
 }
 
+.hermes-runbooks-view-head,
 .hermes-runbooks-summary {
   flex-wrap: wrap;
+}
+
+.hermes-runbooks-summary {
   justify-content: flex-start;
 }
 
@@ -242,7 +378,7 @@
 }
 
 .hermes-runbooks-table td:first-child {
-  min-width: 240px;
+  min-width: 180px;
 }
 
 .hermes-runbooks-table td code {
@@ -250,6 +386,22 @@
   font-size: 11px;
   margin-top: 3px;
   overflow-wrap: anywhere;
+}
+
+.hermes-runbooks-link {
+  background: transparent;
+  border: 0;
+  color: hsl(var(--primary));
+  cursor: pointer;
+  display: block;
+  font: inherit;
+  font-weight: 650;
+  padding: 0;
+  text-align: left;
+}
+
+.hermes-runbooks-link:hover {
+  text-decoration: underline;
 }
 
 .hermes-runbooks-legacy-head,
@@ -290,38 +442,6 @@
   white-space: pre-wrap;
 }
 
-.hermes-runbooks-status-registered {
-  border-color: #168a4a;
-  color: #168a4a;
-}
-
-.hermes-runbooks-status-unregistered,
-.hermes-runbooks-status-unresolved {
-  border-color: #b45309;
-  color: #b45309;
-}
-
-.hermes-runbooks-run,
-.hermes-runbooks-step {
-  align-items: center;
-  border: 1px solid hsl(var(--border));
-  border-radius: 8px;
-  display: flex;
-  gap: 8px;
-  justify-content: space-between;
-  padding: 8px 10px;
-}
-
-.hermes-runbooks-run code,
-.hermes-runbooks-history code {
-  overflow-wrap: anywhere;
-}
-
-.hermes-runbooks-history {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
 .hermes-runbooks-empty {
   border: 1px dashed hsl(var(--border));
   border-radius: 8px;
@@ -330,15 +450,33 @@
   text-align: center;
 }
 
-@media (max-width: 900px) {
-  .hermes-runbooks-grid,
-  .hermes-runbooks-history,
-  .hermes-runbooks-savebar {
-    grid-template-columns: 1fr;
+@media (max-width: 1100px) {
+  .hermes-runbooks-list-item {
+    grid-template-columns: minmax(180px, 1.7fr) minmax(70px, 0.7fr) auto minmax(100px, 0.8fr);
+  }
+
+  .hermes-runbooks-list-item .hermes-runbooks-connection:nth-last-child(2),
+  .hermes-runbooks-list-item .hermes-runbooks-connection:last-child {
+    display: none;
+  }
+
+  .hermes-runbooks-relationship-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 700px) {
+  .hermes-runbooks {
+    gap: 10px;
+    min-height: auto;
   }
 
   .hermes-runbooks-topbar,
-  .hermes-runbooks-editor-head {
+  .hermes-runbooks-editor-head,
+  .hermes-runbooks-detail-head,
+  .hermes-runbooks-legacy-head,
+  .hermes-runbooks-legacy-search,
+  .hermes-runbooks-view-head {
     align-items: stretch;
     flex-direction: column;
   }
@@ -348,7 +486,7 @@
   }
 
   .hermes-runbooks-kpi {
-    padding: 4px 8px;
+    padding: 3px 6px;
   }
 
   .hermes-runbooks-kpi strong {
@@ -360,38 +498,39 @@
     justify-content: flex-start;
   }
 
-  .hermes-runbooks {
-    gap: 10px;
-    min-height: auto;
-  }
-
   .hermes-runbooks-tabs {
     align-items: stretch;
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 5px;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 
   .hermes-runbooks-tabs button {
+    font-size: 12px;
+    line-height: 1.1;
+    min-height: 32px;
     min-width: 0;
-    padding-left: 6px;
-    padding-right: 6px;
+    padding: 6px 2px;
     white-space: normal;
   }
 
-  .hermes-runbooks-list {
-    max-height: 34vh;
+  .hermes-runbooks-filter {
+    max-width: none;
   }
 
   .hermes-runbooks-list-item {
+    gap: 5px 8px;
     grid-template-columns: minmax(0, 1fr) auto;
+    min-height: 70px;
+    padding: 9px 7px;
   }
 
   .hermes-runbooks-list-title {
     grid-column: 1 / -1;
   }
 
-  .hermes-runbooks-list-purpose {
-    display: none;
+  .hermes-runbooks-list-owner {
+    grid-column: 1;
   }
 
   .hermes-runbooks-list-item .hermes-runbooks-status {
@@ -399,18 +538,34 @@
     grid-row: 2;
   }
 
-  .hermes-runbooks-main.is-empty {
+  .hermes-runbooks-list-item .hermes-runbooks-connection:nth-child(4) {
+    display: block;
+    grid-column: 1 / -1;
+  }
+
+  .hermes-runbooks-list-item .hermes-runbooks-connection:not(:nth-child(4)) {
     display: none;
   }
 
-  .hermes-runbooks-legacy-head,
-  .hermes-runbooks-legacy-search {
+  .hermes-runbooks-workflow-detail {
+    padding: 14px 10px 18px;
+  }
+
+  .hermes-runbooks-relationship-grid,
+  .hermes-runbooks-history-grid,
+  .hermes-runbooks-savebar,
+  .hermes-runbooks-legacy-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .hermes-runbooks-schedule {
     align-items: stretch;
     flex-direction: column;
   }
 
-  .hermes-runbooks-legacy-layout {
-    grid-template-columns: 1fr;
+  .hermes-runbooks-schedule-actions {
+    align-items: flex-start;
+    flex-direction: row;
   }
 
   .hermes-runbooks-legacy-table th:nth-child(2),

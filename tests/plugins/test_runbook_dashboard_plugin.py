@@ -221,15 +221,19 @@ def test_preview_diff_and_bundle_registration(client):
     ).read_text(encoding="utf-8")
     assert 'window.__HERMES_PLUGINS__.register("runbooks", RunbooksApp);' in bundle
     assert "SDK.registerPlugin" not in bundle
-    assert "Approve Save" in bundle
+    assert "Save definition" in bundle
+    assert "Approve Save" not in bundle
     assert "Start Run" not in bundle
     assert '"Approver"' not in bundle
     assert '}, "Evernote")' not in bundle
     assert '}, "Workflows")' in bundle
-    assert "Schedules" in bundle
+    assert '}, "Timeline")' in bundle
     assert '}, "Runs")' in bundle
     assert '}, "Archive")' in bundle
-    assert '"hermes-runbooks-main" + (selectedSlug ? "" : " is-empty")' in bundle
+    assert "Edit in Cron" in bundle
+    assert 'window.location.assign("/cron?"' in bundle
+    assert "schedulesFor" in bundle
+    assert "runsFor" in bundle
 
     styles = (
         Path(__file__).resolve().parents[2]
@@ -239,8 +243,10 @@ def test_preview_diff_and_bundle_registration(client):
         / "dist"
         / "style.css"
     ).read_text(encoding="utf-8")
-    assert ".hermes-runbooks-main.is-empty" in styles
-    assert ".hermes-runbooks-list-purpose" in styles
+    assert ".hermes-runbooks-workflow-detail" in styles
+    assert ".hermes-runbooks-relationship-grid" in styles
+    assert "max-height: 50vh" not in styles
+    assert "max-height: 34vh" not in styles
 
 
 def test_legacy_work_is_read_only_and_searchable(client, tmp_path):
