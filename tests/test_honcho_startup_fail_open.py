@@ -32,6 +32,7 @@ def _configured_hybrid_config() -> _FakeHonchoConfig:
         dialectic_depth_levels=None,
         reasoning_heuristic=True,
         reasoning_level_cap="high",
+        isolate_peer_tools=False,
         context_tokens=None,
         message_max_chars=25000,
         session_strategy="per-directory",
@@ -200,7 +201,7 @@ def test_honcho_sync_turn_waits_for_full_background_startup(monkeypatch):
     try:
         assert session_created.wait(timeout=1)
         assert migration_started.wait(timeout=1)
-        assert provider._manager is not None
+        assert provider._manager is None
         assert provider._session_initialized is False
 
         provider.sync_turn("hello", "world")

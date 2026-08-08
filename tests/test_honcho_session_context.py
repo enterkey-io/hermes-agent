@@ -36,6 +36,7 @@ def _manager_with_cached_session(*, ai_observe_others=True):
         user_observe_others=True,
         ai_observe_me=True,
         ai_observe_others=ai_observe_others,
+        isolate_peer_tools=False,
         message_max_chars=25000,
         dialectic_max_input_chars=10000,
     )
