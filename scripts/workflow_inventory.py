@@ -103,6 +103,7 @@ SKIP_DIRS = {
 }
 ARCHIVE_MARKERS = (
     "/archive/",
+    "/.archive/",
     "/archives/",
     "/conversations/",
     "/daily/",
@@ -241,8 +242,18 @@ def classify_paperclip_disposition(
     )
     if any(marker in lowered_path for marker in archive_implementations):
         return "read-only-archive-route"
-    if any(pattern in lowered for pattern in PAPERCLIP_ACTIVE_PATTERNS) or KNOWN_TOKEN_RE.search(
-        text
+    paperclip_windows: list[str] = []
+    start = 0
+    while True:
+        index = lowered.find("paperclip", start)
+        if index < 0:
+            break
+        paperclip_windows.append(text[max(0, index - 500) : index + 1000])
+        start = index + len("paperclip")
+    nearby = "\n".join(paperclip_windows)
+    nearby_lowered = nearby.lower()
+    if any(pattern in nearby_lowered for pattern in PAPERCLIP_ACTIVE_PATTERNS) or KNOWN_TOKEN_RE.search(
+        nearby
     ):
         return "active-execution-route"
     archive_language = (
