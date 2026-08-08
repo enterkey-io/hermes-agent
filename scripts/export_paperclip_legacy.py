@@ -50,12 +50,47 @@ SENSITIVE_KEY = re.compile(
     r"(^|_)(api_?key|token|password|secret|credential|authorization)(_|$)",
     re.IGNORECASE,
 )
+SENSITIVE_TEXT_PATTERNS = (
+    re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{16,}"),
+    re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"),
+    re.compile(r"\b(?:ghp|github_pat|xox[baprs])_[A-Za-z0-9_-]{12,}", re.IGNORECASE),
+    re.compile(r"\bAKIA[A-Z0-9]{12,}"),
+    re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
+    re.compile(
+        r"(?i)\b(api[_-]?key|access[_-]?token|password|secret|credential)"
+        r"(\s*[:=]\s*)([^\s,;\"']{8,})"
+    ),
+    re.compile(r"(?i)\b(https?://[^\s:/]+:)[^\s@/]+(@)"),
+)
+
+OMITTED_COLUMNS = {
+    "heartbeat_runs": {
+        "context_snapshot",
+        "result_json",
+        "stdout_excerpt",
+        "stderr_excerpt",
+    }
+}
+
+
+def _redact_text(value: str) -> str:
+    result = value
+    for pattern in SENSITIVE_TEXT_PATTERNS:
+        if pattern.groups == 2:
+            result = pattern.sub(r"\1<redacted>\2", result)
+        elif pattern.groups:
+            result = pattern.sub(r"\1\2<redacted>", result)
+        else:
+            result = pattern.sub("<redacted>", result)
+    return result
 
 
 def _json_value(value: Any, *, key: str = "") -> Any:
     if value is None or isinstance(value, (bool, int, float, str)):
         if key and SENSITIVE_KEY.search(key) and value not in (None, ""):
             return "<redacted>"
+        if isinstance(value, str):
+            return _redact_text(value)
         return value
     if isinstance(value, (datetime, date)):
         return value.isoformat()
@@ -72,9 +107,13 @@ def _json_value(value: Any, *, key: str = "") -> Any:
     return str(value)
 
 
-def _row_dict(columns: list[str], row: Iterable[Any]) -> dict[str, Any]:
+def _row_dict(table: str, columns: list[str], row: Iterable[Any]) -> dict[str, Any]:
     return {
-        column: _json_value(value, key=column)
+        column: (
+            "<omitted from sanitized archive; preserved in database backup>"
+            if column in OMITTED_COLUMNS.get(table, set()) and value is not None
+            else _json_value(value, key=column)
+        )
         for column, value in zip(columns, row, strict=True)
     }
 
@@ -94,7 +133,7 @@ def _export_table(conn: Any, table: str, destination: Path) -> tuple[int, list[d
         columns = [item.name for item in cursor.description]
         with gzip.open(destination, "wt", encoding="utf-8") as output:
             for raw in cursor:
-                row = _row_dict(columns, raw)
+                row = _row_dict(table, columns, raw)
                 output.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
                 rows.append(row)
     return len(rows), rows

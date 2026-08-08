@@ -25,6 +25,8 @@ def test_json_value_redacts_secrets_and_environment_values() -> None:
             "apiKey": "secret-value",
             "nested": {"access_token": "token-value", "region": "local"},
             "env": {"SAFE_NAME": "private", "TOKEN": "also-private"},
+            "log": "Authorization: Bearer abcdefghijklmnopqrstuvwxyz",
+            "command": "API_KEY=abcdefghijklmnopqrstuvwxyz",
         }
     )
 
@@ -32,8 +34,22 @@ def test_json_value_redacts_secrets_and_environment_values() -> None:
     assert "secret-value" not in serialized
     assert "token-value" not in serialized
     assert "also-private" not in serialized
+    assert "abcdefghijklmnopqrstuvwxyz" not in serialized
     assert value["model"] == "gpt-test"
     assert value["env"] == {"_redacted_env_keys": ["SAFE_NAME", "TOKEN"]}
+
+
+def test_heartbeat_raw_output_is_omitted() -> None:
+    exporter = _load_exporter()
+    row = exporter._row_dict(
+        "heartbeat_runs",
+        ["id", "status", "stdout_excerpt", "result_json"],
+        ["run-1", "succeeded", "private output", {"result": "private result"}],
+    )
+
+    assert row["status"] == "succeeded"
+    assert row["stdout_excerpt"].startswith("<omitted")
+    assert row["result_json"].startswith("<omitted")
 
 
 def test_legacy_index_is_searchable_and_contains_payload(tmp_path: Path) -> None:
