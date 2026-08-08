@@ -378,6 +378,78 @@ def discover_profile(profile: Path) -> dict[str, Any]:
     }
 
 
+def collect_runbook_registry(
+    hermes_root: Path,
+    profiles: list[dict[str, Any]],
+) -> dict[str, Any]:
+    runbook_files = sorted((hermes_root / "runbooks").glob("*/RUNBOOK.md"))
+    schedules = [job for profile in profiles for job in profile["cron_jobs"]]
+    enabled = [job for job in schedules if job["enabled"]]
+    registered = [job for job in enabled if job.get("workflow_id")]
+    definitions: list[dict[str, Any]] = []
+    table_counts: dict[str, int] = {}
+    db_path = hermes_root / "workflow_registry.db"
+    if db_path.exists():
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            conn.row_factory = sqlite3.Row
+            definitions = [
+                dict(row)
+                for row in conn.execute(
+                    "SELECT id, slug, name, owner_profile, status, runtime_kind, "
+                    "runtime_ref, source_path, source_hash, version, updated_at "
+                    "FROM workflow_definitions ORDER BY slug"
+                )
+            ]
+            for table in (
+                "workflow_definitions",
+                "workflow_steps",
+                "workflow_schedules",
+                "workflow_runs",
+                "workflow_step_runs",
+            ):
+                table_counts[table] = conn.execute(
+                    f"SELECT COUNT(*) FROM {table}"
+                ).fetchone()[0]
+            conn.close()
+        except sqlite3.Error:
+            definitions = []
+            table_counts = {}
+    candidates: list[dict[str, Any]] = []
+    for path in sorted((hermes_root / "runbook-migrations").glob("*.json")):
+        payload = load_json_file(path)
+        if isinstance(payload, dict) and isinstance(payload.get("candidates"), list):
+            candidates.extend(
+                item for item in payload["candidates"] if isinstance(item, dict)
+            )
+    dispositions = Counter(
+        str(item.get("classification") or "unclassified") for item in candidates
+    )
+    external = [
+        item for item in definitions if item.get("runtime_kind") in {"sim", "n8n", "external_cli"}
+    ]
+    retained_external = [item for item in external if item.get("status") != "retired"]
+    archived_external = [item for item in external if item.get("status") == "retired"]
+    return {
+        "runbook_files": [
+            {"path": str(path), "sha256": file_sha256(path)} for path in runbook_files
+        ],
+        "canonical_runbook_count": len(runbook_files),
+        "enabled_schedule_count": len(enabled),
+        "registered_enabled_schedule_count": len(registered),
+        "unregistered_enabled_schedule_count": len(enabled) - len(registered),
+        "registry_db": str(db_path),
+        "registry_table_counts": table_counts,
+        "definitions": definitions,
+        "external_runtime_definitions": external,
+        "retained_external_runtime_definitions": retained_external,
+        "archived_external_runtime_definitions": archived_external,
+        "migration_candidate_count": len(candidates),
+        "migration_dispositions": dict(dispositions),
+        "migration_candidates": candidates,
+    }
+
+
 def run_readonly_command(args: list[str], timeout: int = 8) -> dict[str, Any]:
     try:
         completed = subprocess.run(
@@ -675,6 +747,7 @@ def build_inventory(options: InventoryOptions) -> dict[str, Any]:
     schedule_collision_report = build_schedule_collision_report(profiles)
     notification_inventory = build_notification_inventory(profiles, evidence)
     authority_rows = build_authority_map(profiles, evidence)
+    runbook_registry = collect_runbook_registry(options.hermes_root, profiles)
     active_paperclip = [
         item
         for item in evidence
@@ -690,6 +763,22 @@ def build_inventory(options: InventoryOptions) -> dict[str, Any]:
     counts["evidence_items"] = len(evidence)
     counts["active_paperclip_dependencies"] = len(active_paperclip)
     counts["schedule_collisions"] = schedule_collision_report["collision_count"]
+    counts["canonical_runbooks"] = runbook_registry["canonical_runbook_count"]
+    counts["registered_enabled_cron_jobs"] = runbook_registry[
+        "registered_enabled_schedule_count"
+    ]
+    counts["unregistered_enabled_cron_jobs"] = runbook_registry[
+        "unregistered_enabled_schedule_count"
+    ]
+    counts["runbook_migration_candidates"] = runbook_registry[
+        "migration_candidate_count"
+    ]
+    counts["retained_external_runtime_workflows"] = len(
+        runbook_registry["retained_external_runtime_definitions"]
+    )
+    counts["archived_external_runtime_workflows"] = len(
+        runbook_registry["archived_external_runtime_definitions"]
+    )
 
     inventory = {
         "schema_version": 1,
@@ -706,6 +795,7 @@ def build_inventory(options: InventoryOptions) -> dict[str, Any]:
         },
         "schedule_collision_report": schedule_collision_report,
         "notification_path_inventory": notification_inventory,
+        "runbook_registry": runbook_registry,
         "active_automation_authority_map": authority_rows,
         "paperclip_export_reconciliation": {
             "status": "metadata-only",

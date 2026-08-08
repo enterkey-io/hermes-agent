@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+import sqlite3
 
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "workflow_inventory.py"
@@ -127,3 +128,80 @@ def test_detects_enabled_schedule_collisions(tmp_path: Path) -> None:
     collisions = inventory["schedule_collision_report"]["collisions"]
     assert len(collisions) == 1
     assert {source["profile"] for source in collisions[0]["sources"]} == {"grace", "aurora"}
+
+
+def test_inventory_reports_runbook_registration_and_migration_candidates(tmp_path: Path) -> None:
+    inv = _load_inventory()
+    hermes_root = tmp_path / ".hermes"
+    _write_json(
+        hermes_root / "profiles" / "grace" / "cron" / "jobs.json",
+        [
+            {"id": "linked", "name": "Linked", "enabled": True, "workflow_id": "wf-1"},
+            {"id": "missing", "name": "Missing", "enabled": True},
+        ],
+    )
+    runbook = hermes_root / "runbooks" / "linked" / "RUNBOOK.md"
+    runbook.parent.mkdir(parents=True)
+    runbook.write_text("# fixture\n", encoding="utf-8")
+    _write_json(
+        hermes_root / "runbook-migrations" / "evernote.json",
+        {"candidates": [{"source": "old.md", "classification": "historical-superseded"}]},
+    )
+
+    inventory = inv.build_inventory(
+        inv.InventoryOptions(
+            hermes_root=hermes_root,
+            scan_roots=[hermes_root],
+            paperclip_roots=[],
+            output_dir=tmp_path / "reports",
+            skip_host_commands=True,
+        )
+    )
+
+    assert inventory["counts"]["canonical_runbooks"] == 1
+    assert inventory["counts"]["registered_enabled_cron_jobs"] == 1
+    assert inventory["counts"]["unregistered_enabled_cron_jobs"] == 1
+    assert inventory["counts"]["runbook_migration_candidates"] == 1
+    assert inventory["runbook_registry"]["migration_dispositions"] == {
+        "historical-superseded": 1
+    }
+
+
+def test_inventory_separates_retained_and_archived_external_workflows(tmp_path: Path) -> None:
+    inv = _load_inventory()
+    hermes_root = tmp_path / ".hermes"
+    hermes_root.mkdir()
+    db_path = hermes_root / "workflow_registry.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """CREATE TABLE workflow_definitions (
+            id TEXT, slug TEXT, name TEXT, owner_profile TEXT, status TEXT,
+            runtime_kind TEXT, runtime_ref TEXT, source_path TEXT,
+            source_hash TEXT, version INTEGER, updated_at TEXT
+        )"""
+    )
+    conn.executemany(
+        "INSERT INTO workflow_definitions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("active", "active-external", "Active", "grace", "active", "n8n", "n8n:1", "", "", 1, ""),
+            ("retired", "retired-sim", "Retired", "grace", "retired", "sim", "sim:not-retained", "", "", 1, ""),
+        ],
+    )
+    for table in ("workflow_steps", "workflow_schedules", "workflow_runs", "workflow_step_runs"):
+        conn.execute(f"CREATE TABLE {table} (id TEXT)")
+    conn.commit()
+    conn.close()
+
+    inventory = inv.build_inventory(
+        inv.InventoryOptions(
+            hermes_root=hermes_root,
+            scan_roots=[hermes_root],
+            paperclip_roots=[],
+            output_dir=tmp_path / "reports",
+            skip_host_commands=True,
+        )
+    )
+
+    assert inventory["counts"]["retained_external_runtime_workflows"] == 1
+    assert inventory["counts"]["archived_external_runtime_workflows"] == 1
+    assert [item["slug"] for item in inventory["runbook_registry"]["archived_external_runtime_definitions"]] == ["retired-sim"]

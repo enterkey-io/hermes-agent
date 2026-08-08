@@ -28,10 +28,10 @@ def main() -> int:
         "id": "wf_external_grace_plaud_sim",
         "slug": "grace-plaud-sim-workflow",
         "title": "Grace Plaud Sim Workflow",
-        "purpose": "Transcribe Plaud recordings and persist verified Evernote notes and Elliott-owned Nirvana actions through guarded connectors.",
+        "purpose": "Preserve the audited Plaud Sim workflow definition as historical reference; this execution path is not retained.",
         "owner_profile": "grace",
-        "status": "degraded",
-        "runtime": {"kind": "sim", "ref": "sim:deployment-unconfigured"},
+        "status": "retired",
+        "runtime": {"kind": "sim", "ref": "sim:not-retained"},
         "schedules": [],
         "steps": [
             {"step_key": "discover", "name": "Discover eligible Plaud recording", "executor_profile": "grace"},
@@ -44,7 +44,7 @@ def main() -> int:
         "outputs": {"destinations": ["Evernote", "Nirvana"]},
         "permitted_writes": ["Guarded connector CAS operations only"],
         "approval_rules": {
-            "current": "No SIM import, schedule activation, or workflow execution is authorized by this registry entry."
+            "current": "Retired. Do not activate, import, schedule, or execute this Sim workflow."
         },
         "retry": {"max_attempts": 1},
         "timeout": {},
@@ -54,6 +54,9 @@ def main() -> int:
             "source_sha256": hashlib.sha256(workflow.read_bytes()).hexdigest(),
             "schedule_authorized": False,
             "deployment_manifest": "unconfigured",
+            "retirement_disposition": "not-retained",
+            "retired_at": "2026-08-07",
+            "code_and_data_preserved": True,
             "services": [
                 "plaud-sim-connector.service",
                 "plaud-sim-egress.service",
@@ -61,13 +64,14 @@ def main() -> int:
                 "plaud-sim-public-mcp.service",
                 "plaud-sim-tunnel.service",
             ],
-            "audit": "2026-08-07 connector healthy; prior 2026-07-31 audio egress failed with HTTP 403",
+            "audit": "Services disabled 2026-08-07; code and data preserved. Prior 2026-07-31 audio egress failed with HTTP 403.",
         },
     }
     body = (
         "# Grace Plaud Sim Workflow\n\n"
-        "> Registry status: degraded. Connector services are active, but the SIM "
-        "deployment manifest and schedule are not configured or authorized.\n\n"
+        "> Registry status: retired. This Sim path was not retained. Its services "
+        "were disabled on 2026-08-07; code and data are preserved for historical "
+        "reference only. Do not activate, import, schedule, or execute it.\n\n"
         + skill.read_text(encoding="utf-8").split("---\n", 2)[-1].lstrip()
     )
     record = runbook_store.save_runbook(
