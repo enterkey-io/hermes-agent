@@ -24,6 +24,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from hermes_cli import runbook_store
+from hermes_cli import workflow_registry as registry
 from hermes_cli.runbook_projection import project_runbook
 from hermes_cli.workflow_runtime import link_existing_cron_job
 from hermes_constants import get_default_hermes_root
@@ -344,6 +345,9 @@ def migrate(
                 schedule_id=str(schedule["id"]),
                 step_key=str(schedule["step_key"]),
             )
+    with registry.connect_closing() as conn:
+        stale = registry.prune_missing_schedule_links(conn, set(all_jobs))
+    summary["pruned_stale_schedule_links"] = len(stale)
     summary["backup_root"] = str(backup_root)
     summary["migration_catalog"] = str(
         _copy_migration_catalog(root, classification_path, evernote_path)

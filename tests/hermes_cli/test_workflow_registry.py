@@ -229,3 +229,19 @@ def test_profile_references_do_not_load_profile_credentials(conn) -> None:
     assert "grace" in rendered
     assert ".env" not in rendered
     assert "token" not in rendered.lower()
+
+
+def test_prune_missing_schedule_links_keeps_only_live_jobs(conn) -> None:
+    workflow = _definition(conn)
+    reg.link_schedule(conn, workflow.id, profile="grace", cron_job_id="live")
+    reg.link_schedule(conn, workflow.id, profile="grace", cron_job_id="stale")
+
+    pruned = reg.prune_missing_schedule_links(conn, {("grace", "live")})
+
+    assert pruned == [
+        {"workflow_id": workflow.id, "profile": "grace", "cron_job_id": "stale"}
+    ]
+    rows = conn.execute(
+        "SELECT profile, cron_job_id FROM workflow_schedules"
+    ).fetchall()
+    assert [tuple(row) for row in rows] == [("grace", "live")]

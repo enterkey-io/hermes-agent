@@ -522,6 +522,38 @@ def link_schedule(
         )
 
 
+def prune_missing_schedule_links(
+    conn: sqlite3.Connection,
+    live_links: set[tuple[str, str]],
+) -> list[dict[str, str]]:
+    """Remove schedule projections whose profile/job pair no longer exists."""
+    rows = conn.execute(
+        "SELECT workflow_id, profile, cron_job_id FROM workflow_schedules"
+    ).fetchall()
+    stale = [
+        dict(row)
+        for row in rows
+        if (str(row["profile"]), str(row["cron_job_id"])) not in live_links
+    ]
+    if not stale:
+        return []
+    with write_txn(conn):
+        for row in stale:
+            conn.execute(
+                "DELETE FROM workflow_schedules "
+                "WHERE workflow_id = ? AND profile = ? AND cron_job_id = ?",
+                (row["workflow_id"], row["profile"], row["cron_job_id"]),
+            )
+            _event(
+                conn,
+                "workflow_definition",
+                row["workflow_id"],
+                "stale_schedule_unlinked",
+                {"profile": row["profile"], "cron_job_id": row["cron_job_id"]},
+            )
+    return stale
+
+
 def start_run(
     conn: sqlite3.Connection,
     workflow_id: str,
