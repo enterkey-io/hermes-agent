@@ -281,7 +281,7 @@
           h(Input, {
             value: filter,
             onChange: function (event) { setFilter(event.target.value); },
-            placeholder: "Filter runbooks",
+            placeholder: "Filter workflows",
           }),
           h("div", { className: "hermes-runbooks-list" },
             visibleRunbooks.map(function (item) {
