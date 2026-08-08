@@ -40,6 +40,7 @@ def test_save_read_list_search_and_preview(tmp_path: Path) -> None:
     )
 
     assert record.slug == "morning-message"
+    assert record.revision == record.source_hash
     assert Path(record.path).exists()
     assert runbook_store.list_runbooks(root=tmp_path)[0].id == record.id
     assert runbook_store.search_runbooks("morning", root=tmp_path)[0].slug == record.slug

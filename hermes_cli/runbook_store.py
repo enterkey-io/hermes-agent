@@ -192,6 +192,7 @@ def rollback_revision(
 
 def _record_from(path: Path, parsed: ParsedRunbook) -> RunbookRecord:
     metadata = parsed.metadata
+    source_hash = _sha256_text(path.read_text(encoding="utf-8")) if path.exists() else ""
     return RunbookRecord(
         id=metadata["id"],
         slug=metadata["slug"],
@@ -200,8 +201,8 @@ def _record_from(path: Path, parsed: ParsedRunbook) -> RunbookRecord:
         owner_profile=metadata["owner_profile"],
         status=metadata["status"],
         path=str(path),
-        source_hash=_sha256_text(path.read_text(encoding="utf-8")) if path.exists() else "",
-        revision=str(metadata.get("source_revision") or ""),
+        source_hash=source_hash,
+        revision=str(metadata.get("source_revision") or source_hash),
     )
 
 
