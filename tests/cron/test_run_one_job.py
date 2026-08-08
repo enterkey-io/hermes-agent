@@ -159,6 +159,57 @@ def test_run_one_job_records_workflow_registry_run(monkeypatch):
     assert step_runs[0]["summary"] == "Collected context."
 
 
+def test_failed_workflow_run_does_not_create_kanban_task(monkeypatch):
+    from hermes_cli import workflow_registry as reg
+    from hermes_constants import get_default_hermes_root
+
+    with reg.connect_closing() as conn:
+        reg.create_definition(
+            conn,
+            id="wf-cron-failure",
+            slug="cron-workflow-failure",
+            name="Cron Workflow Failure",
+            owner_profile="default",
+            status="active",
+            runtime_kind="hermes",
+        )
+        reg.replace_steps(
+            conn,
+            "wf-cron-failure",
+            [{"step_key": "collect", "position": 0, "name": "Collect"}],
+        )
+
+    monkeypatch.setattr(
+        s,
+        "run_job",
+        lambda job, **kwargs: (False, "", "", "injected failure"),
+    )
+    monkeypatch.setattr(s, "save_job_output", lambda jid, out: "/tmp/out")
+    monkeypatch.setattr(s, "_deliver_result", lambda *args, **kwargs: None)
+    monkeypatch.setattr(s, "mark_job_run", lambda *args, **kwargs: None)
+
+    assert s.run_one_job(
+        {
+            "id": "workflow-failure-job",
+            "name": "workflow failure job",
+            "workflow_id": "wf-cron-failure",
+            "workflow_step_key": "collect",
+        }
+    )
+
+    with reg.connect_closing() as conn:
+        runs = reg.list_runs(conn, "wf-cron-failure")
+        step_runs = conn.execute("SELECT * FROM workflow_step_runs").fetchall()
+
+    assert len(runs) == 1
+    assert runs[0].status == "failed"
+    assert runs[0].error == "injected failure"
+    assert runs[0].kanban_task_id is None
+    assert len(step_runs) == 1
+    assert step_runs[0]["status"] == "failed"
+    assert not (get_default_hermes_root() / "kanban.db").exists()
+
+
 def test_tracked_workflow_without_marker_is_unknown(monkeypatch):
     marked = []
     monkeypatch.setattr(
