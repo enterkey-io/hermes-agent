@@ -2,7 +2,7 @@
   "use strict";
 
   const SDK = window.__HERMES_PLUGIN_SDK__;
-  if (!SDK) return;
+  if (!SDK || !window.__HERMES_PLUGINS__) return;
 
   const { React } = SDK;
   const h = React.createElement;
@@ -367,5 +367,5 @@
     );
   }
 
-  SDK.registerPlugin("runbooks", RunbooksApp);
+  window.__HERMES_PLUGINS__.register("runbooks", RunbooksApp);
 })();

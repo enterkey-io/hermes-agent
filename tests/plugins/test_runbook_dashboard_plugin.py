@@ -184,6 +184,7 @@ def test_preview_diff_and_bundle_registration(client):
         / "dist"
         / "index.js"
     ).read_text(encoding="utf-8")
-    assert 'SDK.registerPlugin("runbooks", RunbooksApp);' in bundle
+    assert 'window.__HERMES_PLUGINS__.register("runbooks", RunbooksApp);' in bundle
+    assert "SDK.registerPlugin" not in bundle
     assert "Approve Save" in bundle
     assert "Start Run" in bundle
