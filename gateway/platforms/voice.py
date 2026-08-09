@@ -88,6 +88,10 @@ class VoiceAdapter(BasePlatformAdapter):
 
     MAX_MESSAGE_LENGTH = 100_000
     REQUIRES_EDIT_FINALIZE = True
+    # A complete response can reach GatewayStreamConsumer before its first
+    # preview tick. Vox still needs the non-final checkpoint and stable stream
+    # id so a transient final-frame failure can retry on the same stream.
+    EXPECT_EDITS_ON_FINAL_SEND = True
 
     def __init__(self, config):
         super().__init__(config, Platform.VOICE)
