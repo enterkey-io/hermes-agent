@@ -447,9 +447,11 @@ def test_shutdown_drain_sleep_never_overshoots_the_reserve(monkeypatch):
 
     slept: list[float] = []
     real_sleep = time.sleep
+    shutdown_thread = threading.current_thread()
 
     def _recording_sleep(seconds: float) -> None:
-        slept.append(seconds)
+        if threading.current_thread() is shutdown_thread:
+            slept.append(seconds)
         real_sleep(seconds)
 
     monkeypatch.setattr(compute_host.time, "sleep", _recording_sleep)
