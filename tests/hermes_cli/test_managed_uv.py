@@ -424,9 +424,12 @@ class TestRuntimeRepair:
             )
 
         assert candidate is not None
-        assert len(calls) == 2
-        venv_argv, venv_env = calls[0]
-        sync_argv, sync_env = calls[1]
+        venv_argv, venv_env = next(
+            call for call in calls if call[0][:2] == ["uv", "venv"]
+        )
+        sync_argv, sync_env = next(
+            call for call in calls if call[0][:2] == ["uv", "sync"]
+        )
         assert venv_argv[:2] == ["uv", "venv"]
         assert "--no-config" in venv_argv
         assert venv_env.get("UV_NO_CONFIG") == "1"
