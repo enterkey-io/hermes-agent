@@ -684,7 +684,7 @@ class TestSpawnEnvSanitization:
             "PATH": "/usr/bin:/bin",
             "HOME": "/home/user",
             "USER": "tester",
-            "TELEGRAM_BOT_TOKEN": "bot-secret",
+            "OPENAI_API_KEY": "provider-secret",
             "FIRECRAWL_API_KEY": "fc-secret",
         }, clear=True), \
             patch("tools.process_registry._find_shell", return_value="/bin/bash"), \
@@ -696,16 +696,16 @@ class TestSpawnEnvSanitization:
                 cwd="/tmp",
                 env_vars={
                     "MY_CUSTOM_VAR": "keep-me",
-                    "TELEGRAM_BOT_TOKEN": "drop-me",
-                    f"{_HERMES_PROVIDER_ENV_FORCE_PREFIX}TELEGRAM_BOT_TOKEN": "forced-bot-token",
+                    "OPENAI_API_KEY": "drop-me",
+                    f"{_HERMES_PROVIDER_ENV_FORCE_PREFIX}OPENAI_API_KEY": "forced-provider-token",
                 },
             )
 
         env = captured["env"]
         assert env["MY_CUSTOM_VAR"] == "keep-me"
-        assert env["TELEGRAM_BOT_TOKEN"] == "forced-bot-token"
+        assert env["OPENAI_API_KEY"] == "forced-provider-token"
         assert "FIRECRAWL_API_KEY" not in env
-        assert f"{_HERMES_PROVIDER_ENV_FORCE_PREFIX}TELEGRAM_BOT_TOKEN" not in env
+        assert f"{_HERMES_PROVIDER_ENV_FORCE_PREFIX}OPENAI_API_KEY" not in env
         assert env["PYTHONUNBUFFERED"] == "1"
 
     def test_spawn_via_env_checks_returncode_when_wrapper_fails(self, registry):
