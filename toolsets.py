@@ -74,7 +74,7 @@ _HERMES_CORE_TOOLS = [
     "cronjob",
     # Canonical operational procedures and read-only execution history.
     "runbook_list", "runbook_search", "runbook_get",
-    "runbook_validate", "runbook_propose_edit", "runbook_runs",
+    "runbook_validate", "runbook_propose_create", "runbook_propose_edit", "runbook_runs",
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
     "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
     # Kanban multi-agent coordination — only in schema when the agent is
@@ -223,7 +223,8 @@ TOOLSETS = {
         "description": "Canonical workflow procedures, proposals, validation, and execution history",
         "tools": [
             "runbook_list", "runbook_search", "runbook_get",
-            "runbook_validate", "runbook_propose_edit", "runbook_runs",
+            "runbook_validate", "runbook_propose_create",
+            "runbook_propose_edit", "runbook_runs",
         ],
         "includes": [],
     },

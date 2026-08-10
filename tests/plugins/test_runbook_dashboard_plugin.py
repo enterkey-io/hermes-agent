@@ -166,6 +166,48 @@ def test_proposal_does_not_replace_active_runbook(client):
     assert current["proposals"][0]["summary"] == "Rename only"
 
 
+def test_new_runbook_proposal_is_visible_and_can_be_activated(client):
+    markdown = _runbook_markdown("proposed-daily-brief").replace(
+        "status: active", "status: draft"
+    )
+    response = client.post(
+        "/api/plugins/runbooks/runbooks/proposed-daily-brief/proposals",
+        json={
+            "markdown": markdown,
+            "proposed_by": "xenia",
+            "summary": "New workflow proposal",
+        },
+    )
+    assert response.status_code == 200, response.text
+
+    overview = client.get("/api/plugins/runbooks/overview").json()
+    assert overview["counts"]["runbooks"] == 1
+    assert overview["counts"]["workflows"] == 0
+    candidate = overview["runbooks"][0]
+    assert candidate["slug"] == "proposed-daily-brief"
+    assert candidate["canonical"] is False
+    assert candidate["pending_proposal_count"] == 1
+
+    fetched = client.get(
+        "/api/plugins/runbooks/runbooks/proposed-daily-brief"
+    ).json()
+    assert fetched["canonical"] is False
+    assert fetched["record"]["owner_profile"] == "alina"
+    assert fetched["proposals"][0]["summary"] == "New workflow proposal"
+    assert fetched["markdown"] == markdown
+
+    activated = client.put(
+        "/api/plugins/runbooks/runbooks/proposed-daily-brief",
+        json={"markdown": markdown},
+    )
+    assert activated.status_code == 200, activated.text
+    current = client.get(
+        "/api/plugins/runbooks/runbooks/proposed-daily-brief"
+    ).json()
+    assert current["canonical"] is True
+    assert current["record"]["pending_proposal_count"] == 1
+
+
 def test_run_and_step_state_transitions(client):
     assert client.put(
         "/api/plugins/runbooks/runbooks/daily-brief",
@@ -243,6 +285,7 @@ def test_preview_diff_and_bundle_registration(client):
     assert "CardContent" in bundle
     assert "TabsList" in bundle
     assert "usefulPurpose" in bundle
+    assert "item.canonical === false" in bundle
     assert "hermes-runbooks-workflow-detail" not in bundle
 
     styles = (

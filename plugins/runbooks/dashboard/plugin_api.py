@@ -296,10 +296,74 @@ def _proposal_records(slug: str) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for path in sorted(proposals.glob("*.json"), reverse=True):
         try:
-            records.append(json.loads(path.read_text(encoding="utf-8")))
+            item = json.loads(path.read_text(encoding="utf-8"))
+            item["name"] = path.name
+            item["markdown_name"] = path.with_suffix(".md").name
+            records.append(item)
         except (OSError, json.JSONDecodeError):
             continue
     return records
+
+
+def _proposal_candidate(
+    slug: str,
+) -> tuple[dict[str, Any], str, list[dict[str, Any]]] | None:
+    proposals = _proposal_records(slug)
+    proposals_dir = runbook_store.runbook_path(slug).parent / ".proposals"
+    for proposal in proposals:
+        markdown_path = proposals_dir / proposal["markdown_name"]
+        try:
+            markdown = markdown_path.read_text(encoding="utf-8")
+            parsed = split_frontmatter(markdown)
+        except (OSError, RunbookValidationError):
+            continue
+        if parsed.metadata["slug"] != slug:
+            continue
+        record = runbook_store.RunbookRecord(
+            id=parsed.metadata["id"],
+            slug=slug,
+            title=parsed.metadata["title"],
+            purpose=parsed.metadata["purpose"],
+            owner_profile=parsed.metadata["owner_profile"],
+            status=parsed.metadata["status"],
+            path=str(runbook_store.runbook_path(slug)),
+            source_hash=str(proposal.get("sha256") or ""),
+            revision=None,
+        ).to_dict()
+        record.update(
+            {
+                "canonical": False,
+                "pending_proposal_count": len(proposals),
+            }
+        )
+        return record, markdown, proposals
+    return None
+
+
+def _runbook_summaries() -> list[dict[str, Any]]:
+    canonical = runbook_store.list_runbooks()
+    summaries: list[dict[str, Any]] = []
+    canonical_slugs = {record.slug for record in canonical}
+    for record in canonical:
+        item = record.to_dict()
+        item.update(
+            {
+                "canonical": True,
+                "pending_proposal_count": len(_proposal_records(record.slug)),
+            }
+        )
+        summaries.append(item)
+
+    root = runbook_store.runbook_root()
+    proposal_dirs = sorted(root.glob("*/.proposals")) if root.exists() else []
+    for proposals_dir in proposal_dirs:
+        slug = proposals_dir.parent.name
+        if slug in canonical_slugs:
+            continue
+        candidate = _proposal_candidate(slug)
+        if candidate is not None:
+            summaries.append(candidate[0])
+    return sorted(summaries, key=lambda item: (item["title"].lower(), item["slug"]))
 
 
 def _schedule_display(job: dict[str, Any]) -> str:
@@ -474,7 +538,7 @@ async def overview() -> dict[str, Any]:
             for item in registry.list_definitions(conn)
         ]
         runs = _list_runs(conn, workflow_id=None, limit=50)
-    runbooks = [record.to_dict() for record in runbook_store.list_runbooks()]
+    runbooks = _runbook_summaries()
     schedules = _load_schedule_inventory()
     enabled_schedules = [item for item in schedules if item["enabled"]]
     registered_schedules = [
@@ -570,15 +634,39 @@ async def get_legacy_entity(entity_type: str, entity_id: str) -> dict[str, Any]:
 
 @router.get("/runbooks")
 async def list_runbooks(q: str = "") -> dict[str, Any]:
-    records = runbook_store.search_runbooks(q) if q else runbook_store.list_runbooks()
-    return {"runbooks": [record.to_dict() for record in records]}
+    records = _runbook_summaries()
+    needle = q.strip().lower()
+    if needle:
+        records = [
+            item
+            for item in records
+            if needle
+            in " ".join(
+                str(item.get(key) or "")
+                for key in ("slug", "title", "purpose", "owner_profile", "status")
+            ).lower()
+        ]
+    return {"runbooks": records}
 
 
 @router.get("/runbooks/{slug}")
 async def get_runbook(slug: str) -> dict[str, Any]:
     path = runbook_store.runbook_path(slug)
     if not path.exists():
-        raise HTTPException(status_code=404, detail=f"runbook not found: {slug}")
+        candidate = _proposal_candidate(slug)
+        if candidate is None:
+            raise HTTPException(status_code=404, detail=f"runbook not found: {slug}")
+        record, markdown, proposals = candidate
+        parsed = split_frontmatter(markdown)
+        return {
+            "record": record,
+            "metadata": parsed.metadata,
+            "body": parsed.body,
+            "markdown": markdown,
+            "canonical": False,
+            "revisions": [],
+            "proposals": proposals,
+        }
     try:
         markdown = path.read_text(encoding="utf-8")
         parsed = split_frontmatter(markdown)
@@ -608,11 +696,19 @@ async def get_runbook(slug: str) -> dict[str, Any]:
         {"path": str(revision), "name": revision.name}
         for revision in runbook_store.list_revisions(slug)
     ]
+    record_dict = record.to_dict()
+    record_dict.update(
+        {
+            "canonical": True,
+            "pending_proposal_count": len(_proposal_records(slug)),
+        }
+    )
     return {
-        "record": record.to_dict(),
+        "record": record_dict,
         "metadata": parsed.metadata,
         "body": parsed.body,
         "markdown": markdown,
+        "canonical": True,
         "revisions": revisions,
         "proposals": _proposal_records(slug),
     }

@@ -69,13 +69,18 @@ def _validate(args: dict[str, Any], **_kwargs: Any) -> str:
     )
 
 
-def _propose(args: dict[str, Any], **_kwargs: Any) -> str:
+def _store_proposal(
+    args: dict[str, Any],
+    *,
+    require_new: bool = False,
+) -> str:
     slug = str(args.get("slug") or "").strip()
     markdown = str(args.get("markdown") or "")
     if not slug:
         return tool_error("slug is required")
-    if not runbook_store.runbook_path(slug).exists():
-        return tool_error(f"runbook not found: {slug}")
+    target_exists = runbook_store.runbook_path(slug).exists()
+    if require_new and target_exists:
+        return tool_error(f"runbook already exists: {slug}; propose an edit instead")
     try:
         parsed = split_frontmatter(markdown)
         if parsed.metadata["slug"] != slug:
@@ -88,7 +93,21 @@ def _propose(args: dict[str, Any], **_kwargs: Any) -> str:
         )
     except Exception as exc:
         return tool_error(str(exc))
-    return tool_result(success=True, slug=slug, proposal_path=str(path))
+    return tool_result(
+        success=True,
+        slug=slug,
+        proposal_kind="edit" if target_exists else "create",
+        proposal_path=str(path),
+    )
+
+
+def _propose(args: dict[str, Any], **_kwargs: Any) -> str:
+    # Keep old callers working when the first proposal creates the runbook.
+    return _store_proposal(args)
+
+
+def _propose_create(args: dict[str, Any], **_kwargs: Any) -> str:
+    return _store_proposal(args, require_new=True)
 
 
 def _runs(args: dict[str, Any], **_kwargs: Any) -> str:
@@ -256,11 +275,28 @@ registry.register(
     max_result_size_chars=100000,
 )
 registry.register(
+    name="runbook_propose_create",
+    toolset="runbook",
+    schema=_schema(
+        "runbook_propose_create",
+        "Store a proposed new canonical runbook for human review without activating it.",
+        {
+            "slug": {"type": "string"},
+            "markdown": {"type": "string"},
+            "summary": {"type": "string"},
+        },
+        ["slug", "markdown"],
+    ),
+    handler=_propose_create,
+    check_fn=_always,
+    max_result_size_chars=100000,
+)
+registry.register(
     name="runbook_propose_edit",
     toolset="runbook",
     schema=_schema(
         "runbook_propose_edit",
-        "Store a proposed runbook edit for human review without activating it.",
+        "Store a proposed runbook edit for human review without activating it. For compatibility, this also accepts the first proposal for a missing runbook.",
         {
             "slug": {"type": "string"},
             "markdown": {"type": "string"},

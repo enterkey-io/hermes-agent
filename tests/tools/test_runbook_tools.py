@@ -5,6 +5,7 @@ import sqlite3
 
 from hermes_cli import runbook_store
 from hermes_cli.runbook_projection import project_runbook
+from hermes_cli.runbook_schema import render_frontmatter
 from hermes_cli import workflow_registry as workflow_registry
 from tools import runbook_tools
 from tools.registry import registry
@@ -78,6 +79,51 @@ def test_proposal_does_not_activate_and_runs_are_readable(monkeypatch) -> None:
     runs = json.loads(runbook_tools._runs({"slug": slug}))
     assert runs["count"] == 1
     assert runs["runs"][0]["status"] == "running"
+
+
+def test_new_runbook_proposal_is_stored_without_activation(monkeypatch) -> None:
+    metadata = _metadata()
+    metadata.update(
+        {
+            "id": "wf-proposed-runbook",
+            "slug": "proposed-runbook",
+            "title": "Proposed Runbook",
+            "status": "draft",
+        }
+    )
+    markdown = render_frontmatter(metadata, "# Proposed Runbook\n\n1. Review it.\n")
+    target = runbook_store.runbook_path(metadata["slug"])
+    monkeypatch.setenv("HERMES_HOME", str(target.parents[2] / "profiles" / "grace"))
+
+    proposed = json.loads(
+        runbook_tools._propose_create(
+            {
+                "slug": metadata["slug"],
+                "markdown": markdown,
+                "summary": "New operating procedure",
+            }
+        )
+    )
+
+    assert proposed["success"] is True
+    assert proposed["proposal_kind"] == "create"
+    assert not target.exists()
+    assert runbook_store.list_runbooks() == []
+    assert runbook_store.runbook_path(metadata["slug"]).parent.joinpath(
+        ".proposals"
+    ).is_dir()
+
+    compatible = json.loads(
+        runbook_tools._propose(
+            {
+                "slug": "compatible-new-runbook",
+                "markdown": markdown.replace(
+                    "proposed-runbook", "compatible-new-runbook"
+                ).replace("wf-proposed-runbook", "wf-compatible-new-runbook"),
+            }
+        )
+    )
+    assert compatible["proposal_kind"] == "create"
 
 
 def test_legacy_work_search_and_get_are_read_only(tmp_path, monkeypatch) -> None:

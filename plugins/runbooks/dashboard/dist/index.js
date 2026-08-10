@@ -339,10 +339,10 @@
           h(DialogHeader, null,
             h("div", { className: "hermes-runbooks-dialog-title" },
               h(DialogTitle, null, title),
-              item ? h(StatusBadge, { value: item.status }) : h(StatusBadge, { value: "draft" })
+              item ? h(StatusBadge, { value: item.canonical === false ? "proposed" : item.status }) : h(StatusBadge, { value: "draft" })
             ),
             h(DialogDescription, null,
-              item ? (purpose || "Owned by " + item.owner_profile) : "Create the workflow definition, then save it to the registry."
+              item ? (item.canonical === false ? "Pending proposal by " + item.owner_profile : (purpose || "Owned by " + item.owner_profile)) : "Create the workflow definition, then save it to the registry."
             )
           ),
           h("div", { className: "hermes-runbooks-dialog-body" },
