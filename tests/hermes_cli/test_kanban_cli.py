@@ -57,6 +57,19 @@ def test_kanban_list_json_includes_session_id(kanban_home):
     )
 
 
+def test_kanban_create_accepts_explicit_session_id(kanban_home):
+    raw = kc.run_slash(
+        "create 'wake-bound task' --assignee alice "
+        "--session-id current-session --json"
+    )
+    payload = json.loads(raw)
+
+    assert payload["session_id"] == "current-session"
+    with kb.connect() as conn:
+        task = kb.get_task(conn, payload["id"])
+    assert task.session_id == "current-session"
+
+
 def test_board_override_is_isolated_per_concurrent_call(kanban_home, monkeypatch):
     kb.create_board("alpha")
     kb.create_board("beta")
@@ -164,5 +177,4 @@ def test_run_slash_reclaim_running_task(kanban_home):
 # ---------------------------------------------------------------------------
 # /kanban help / no-args / unknown-action UX (issue #21794)
 # ---------------------------------------------------------------------------
-
 

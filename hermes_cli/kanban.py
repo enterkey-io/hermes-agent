@@ -356,6 +356,15 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                                "and re-queues the task.")
     p_create.add_argument("--created-by", default="user",
                           help="Author name recorded on the task (default: user)")
+    p_create.add_argument(
+        "--session-id",
+        default=None,
+        help=(
+            "Explicit originating agent session id for wake delivery. Agent "
+            "tool calls bind this automatically; CLI callers must pass a "
+            "verified current session id when agent wake-up is required."
+        ),
+    )
     p_create.add_argument("--skill", action="append", default=[], dest="skills",
                           help="Skill to force-load into the worker "
                                "(repeatable). The kanban lifecycle is already "
@@ -1519,6 +1528,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             goal_mode=bool(getattr(args, "goal_mode", False)),
             goal_max_turns=getattr(args, "goal_max_turns", None),
             initial_status=getattr(args, "initial_status", "running"),
+            session_id=getattr(args, "session_id", None),
         )
         task = kb.get_task(conn, task_id)
     if getattr(args, "json", False):

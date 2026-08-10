@@ -1230,18 +1230,18 @@ def _handle_create(args: dict, **kw) -> str:
     body = args.get("body")
     parents = args.get("parents") or []
     tenant = args.get("tenant") or os.environ.get("HERMES_TENANT")
-    # Stamp the originating session id when the agent loop runs under
-    # ACP (which sets HERMES_SESSION_ID before invoking tools). NULL on
-    # CLI / dashboard paths and on legacy hosts that don't set the env.
-    # Prefer the request-scoped api_server origin binding: HERMES_SESSION_ID
-    # is clobbered with a subagent's internal id whenever a child agent is
-    # constructed in-process (agent_init calls set_current_session_id), which
-    # would stamp — and later wake — the wrong session.
+    # Stamp the originating session id so terminal task events can wake the
+    # creator's agent session, not merely post a notification into its chat.
+    # Prefer request-scoped bindings over process-global os.environ: concurrent
+    # gateway turns each carry their own ContextVar, while os.environ is
+    # last-writer-wins and may also contain a delegated child's internal id.
     from tools.async_delegation import _current_origin_session_id
+    from gateway.session_context import get_session_env
 
     session_id = (
         args.get("session_id")
         or _current_origin_session_id()
+        or get_session_env("HERMES_SESSION_ID", "")
         or os.environ.get("HERMES_SESSION_ID")
     )
     priority = args.get("priority")
@@ -1333,6 +1333,24 @@ def _handle_create(args: dict, **kw) -> str:
             )
             new_task = kb.get_task(conn, new_tid)
             subscribed = _maybe_auto_subscribe(conn, new_tid)
+            attached_session_id = new_task.session_id if new_task else session_id
+            wake_attached = bool(subscribed and attached_session_id)
+            if wake_attached:
+                delivery_mode = "session_wake"
+                delivery_warning = None
+            elif subscribed:
+                delivery_mode = "chat_only"
+                delivery_warning = (
+                    "Notification subscription exists, but task.session_id is empty; "
+                    "the chat can receive status messages but the originating agent "
+                    "session cannot be woken."
+                )
+            else:
+                delivery_mode = "none"
+                delivery_warning = (
+                    "No notification subscription was attached; completion or block "
+                    "events will not return to this conversation automatically."
+                )
             return _ok(
                 task_id=new_tid,
                 status=new_task.status if new_task else None,
@@ -1340,6 +1358,10 @@ def _handle_create(args: dict, **kw) -> str:
                 workspace_path=new_task.workspace_path if new_task else None,
                 project_id=new_task.project_id if new_task else None,
                 subscribed=subscribed,
+                session_id=attached_session_id,
+                wake_attached=wake_attached,
+                delivery_mode=delivery_mode,
+                delivery_warning=delivery_warning,
             )
         finally:
             conn.close()

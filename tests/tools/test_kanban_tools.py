@@ -416,6 +416,43 @@ def test_create_happy_path(worker_env):
         conn.close()
 
 
+def test_create_binds_task_local_gateway_session_for_wake(
+    monkeypatch, worker_env,
+):
+    """A concurrent gateway turn must not stamp the process-global session."""
+    from gateway.session_context import reset_session_vars, set_session_vars
+    from tools import kanban_tools as kt
+
+    monkeypatch.setenv("HERMES_SESSION_ID", "stale-process-session")
+    set_session_vars(
+        platform="telegram",
+        chat_id="chat-42",
+        chat_type="dm",
+        user_id="user-42",
+        session_id="current-gateway-session",
+        profile="test-worker",
+    )
+    try:
+        result = json.loads(
+            kt._handle_create({"title": "wake me", "assignee": "peer"})
+        )
+    finally:
+        reset_session_vars()
+
+    assert result["ok"] is True
+    assert result["subscribed"] is True
+    assert result["session_id"] == "current-gateway-session"
+    assert result["wake_attached"] is True
+    assert result["delivery_mode"] == "session_wake"
+    assert result["delivery_warning"] is None
+
+    from hermes_cli import kanban_db as kb
+
+    with kb.connect() as conn:
+        task = kb.get_task(conn, result["task_id"])
+    assert task.session_id == "current-gateway-session"
+
+
 def test_link_happy_path(worker_env):
     from hermes_cli import kanban_db as kb
     conn = kb.connect()
