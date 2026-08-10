@@ -497,6 +497,32 @@ def test_kanban_not_reported_as_removed_in_diff():
     assert ((current - new_enabled) & universe) == set()
 
 
+def test_profile_kanban_authorization_applies_to_narrow_platform_config():
+    config = {
+        "toolsets": ["hermes-cli", "kanban"],
+        "platform_toolsets": {"api_server": ["web", "memory"]},
+    }
+
+    resolved = _get_platform_tools(
+        config, "api_server", include_default_mcp_servers=False
+    )
+
+    assert "kanban" in resolved
+
+
+def test_disabled_toolsets_can_override_profile_kanban_authorization():
+    config = {
+        "toolsets": ["hermes-cli", "kanban"],
+        "agent": {"disabled_toolsets": ["kanban"]},
+    }
+
+    resolved = _get_platform_tools(
+        config, "telegram", include_default_mcp_servers=False
+    )
+
+    assert "kanban" not in resolved
+
+
 
 
 

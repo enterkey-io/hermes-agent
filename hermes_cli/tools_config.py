@@ -2429,6 +2429,17 @@ def _get_platform_tools(
             enabled_toolsets.add(ts_key)
             claimed.update(ts_tools)
 
+    # ``toolsets: [kanban]`` is the profile-level orchestrator authorization
+    # checked by tools/kanban_tools.py. Keep that authorization effective on
+    # every surface, including narrowly configured API-server profiles whose
+    # platform composite does not contain Kanban. The global disabled list is
+    # still applied last below and remains authoritative.
+    profile_toolsets = config.get("toolsets") or []
+    if isinstance(profile_toolsets, list) and "kanban" in {
+        str(toolset) for toolset in profile_toolsets
+    }:
+        enabled_toolsets.add("kanban")
+
     # Plugin toolsets: enabled by default unless explicitly disabled, or
     # unless the toolset is in _DEFAULT_OFF_TOOLSETS (e.g. spotify —
     # shipped as a bundled plugin but user must opt in via `hermes tools`
