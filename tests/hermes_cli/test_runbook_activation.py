@@ -12,6 +12,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from hermes_cli import runbook_activation as activation
+from hermes_cli import runbook_secure_io as secure_io
 from hermes_cli import runbook_store
 from hermes_cli import workflow_registry as registry
 from hermes_cli.runbook_activation import ActivationRequest, activate_reviewed_proposal
@@ -75,7 +76,13 @@ def proposed_runbook(tmp_path: Path, monkeypatch):
     trust = tmp_path / "installed-runbook-approval"
     trust.mkdir(mode=0o700)
     (trust / "approval-policy.json").write_text(
-        json.dumps({"approver": "elliott", "operators": {"alina": {"uid": os.geteuid()}}}),
+        json.dumps(
+            {
+                "approver": "elliott",
+                "canonical_root": str(home),
+                "operators": {"alina": {"uid": os.geteuid()}},
+            }
+        ),
         encoding="utf-8",
     )
     (trust / "elliott-ed25519.pem").write_bytes(
@@ -117,8 +124,8 @@ def _request(proposed_runbook, **overrides) -> ActivationRequest:
         "proposal_sha256": proposed_runbook["proposal_sha256"],
         "expected_active_revision": active.revision,
         "operator": "alina",
-        "canonical_root": str(activation._canonical_root().resolve()),
-        "registry_path": str((activation._canonical_root() / "workflow_registry.db").resolve()),
+        "canonical_root": str(Path(active.path).parents[2].resolve()),
+        "registry_path": str(Path(active.path).parents[2] / "workflow_registry.db"),
     }
     data.update(overrides)
     evidence = {
@@ -168,9 +175,178 @@ def test_activation_ignores_caller_selected_hermes_home(proposed_runbook, monkey
 
     result = activate_reviewed_proposal(_request(proposed_runbook))
 
-    assert result.audit_path.is_relative_to(activation._canonical_root() / "runbooks")
+    assert result.audit_path.is_relative_to(Path(proposed_runbook["active"].path).parents[2] / "runbooks")
     assert not (attacker_home / "runbooks").exists()
     assert not (attacker_home / "workflow_registry.db").exists()
+
+
+def test_activation_ignores_caller_selected_home_and_hermes_home(proposed_runbook, monkeypatch, tmp_path):
+    attacker_home = tmp_path / "attacker-home"
+    attacker_home.mkdir(mode=0o700)
+    attacker_hermes = tmp_path / "attacker-hermes"
+    attacker_hermes.mkdir(mode=0o700)
+    monkeypatch.setenv("HOME", str(attacker_home))
+    monkeypatch.setenv("HERMES_HOME", str(attacker_hermes))
+    monkeypatch.setattr(Path, "home", lambda: attacker_home)
+
+    result = activate_reviewed_proposal(_request(proposed_runbook))
+
+    assert result.audit_path.is_relative_to(Path(proposed_runbook["active"].path).parents[2])
+    assert not (attacker_home / ".hermes" / "runbooks").exists()
+    assert not (attacker_hermes / "runbooks").exists()
+    assert not (attacker_hermes / "workflow_registry.db").exists()
+
+
+def test_cross_root_signed_approval_replay_is_rejected(proposed_runbook, tmp_path):
+    alternative_root = tmp_path / "alternative-root"
+    alternative_root.mkdir(mode=0o700)
+    policy_path = proposed_runbook["trust"] / "approval-policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "approver": "elliott",
+                "canonical_root": str(alternative_root),
+                "operators": {"alina": {"uid": os.geteuid()}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    policy_path.chmod(0o600)
+
+    with pytest.raises(PermissionError, match="canonical_root"):
+        activate_reviewed_proposal(_request(proposed_runbook))
+
+
+def test_activation_rejects_registry_database_symlink(proposed_runbook, tmp_path):
+    registry_target = tmp_path / "attacker-registry.db"
+    registry_target.write_bytes(b"")
+    registry_target.chmod(0o600)
+    registry_path = Path(proposed_runbook["active"].path).parents[2] / "workflow_registry.db"
+    registry_path.symlink_to(registry_target)
+
+    with pytest.raises(PermissionError, match="unsafe"):
+        activate_reviewed_proposal(_request(proposed_runbook))
+    assert registry_target.read_bytes() == b""
+
+
+def test_registry_swap_after_descriptor_open_fails_without_redirecting_persistence(
+    proposed_runbook, monkeypatch, tmp_path
+):
+    canonical_root = Path(proposed_runbook["active"].path).parents[2]
+    registry_path = canonical_root / "workflow_registry.db"
+    registry_path.touch(mode=0o600)
+    original = Path(proposed_runbook["active"].path).read_bytes()
+    redirected = tmp_path / "redirected-registry.db"
+    redirected.write_bytes(b"")
+    redirected.chmod(0o600)
+    original_connect = registry.connect_closing_fd
+
+    def swap_then_connect(fd: int, **kwargs):
+        registry_path.unlink()
+        registry_path.symlink_to(redirected)
+        return original_connect(fd, **kwargs)
+
+    monkeypatch.setattr(registry, "connect_closing_fd", swap_then_connect)
+    with pytest.raises(PermissionError, match="registry"):
+        activate_reviewed_proposal(_request(proposed_runbook))
+
+    assert redirected.read_bytes() == b""
+    assert Path(proposed_runbook["active"].path).read_bytes() == original
+    assert not (canonical_root / "runbooks" / "daily-brief" / ".activations" / "plaud-production-repair.json").exists()
+
+
+def test_registry_restore_error_still_restores_canonical_artifacts_and_identity(
+    proposed_runbook, monkeypatch
+):
+    original = Path(proposed_runbook["active"].path).read_bytes()
+
+    def fail_at_audit(name: str) -> None:
+        if name == "audit":
+            raise OSError("injected failure at audit")
+
+    def failed_restore(*args, **kwargs) -> None:
+        raise OSError("injected registry restore failure")
+
+    monkeypatch.setattr(activation, "_persistence_boundary", fail_at_audit)
+    monkeypatch.setattr(activation, "_restore_registry", failed_restore)
+    with pytest.raises(OSError, match="audit"):
+        activate_reviewed_proposal(_request(proposed_runbook))
+
+    assert Path(proposed_runbook["active"].path).read_bytes() == original
+    assert _activation_events() == []
+    with registry.connect_closing() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM runbook_activation_identities").fetchone()[0] == 0
+    runbook_dir = Path(proposed_runbook["active"].path).parent
+    assert not (runbook_dir / ".activations" / "plaud-production-repair.json").exists()
+    assert not (runbook_dir / ".revisions" / "plaud-production-repair.md").exists()
+    assert not (runbook_dir / ".revisions" / "plaud-production-repair.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("directory_name", "filename"),
+    [
+        (".revisions", "plaud-production-repair.md"),
+        (".revisions", "plaud-production-repair.json"),
+        ("daily-brief", "RUNBOOK.md"),
+        ("daily-brief", ".index.json"),
+        (".activations", "plaud-production-repair.json"),
+    ],
+)
+def test_activation_artifact_write_errors_leave_no_partial_activation(
+    proposed_runbook, monkeypatch, directory_name, filename
+):
+    runbook_path = Path(proposed_runbook["active"].path)
+    original_markdown = runbook_path.read_bytes()
+    original_index = (runbook_path.parent / ".index.json").read_bytes()
+    original_replace = secure_io.replace_file
+
+    def fail_target(directory, name, value, **kwargs):
+        if directory.path.name == directory_name and name == filename:
+            raise OSError(f"injected write failure for {directory_name}/{filename}")
+        return original_replace(directory, name, value, **kwargs)
+
+    monkeypatch.setattr(secure_io, "replace_file", fail_target)
+    with pytest.raises(OSError, match="injected write failure"):
+        activate_reviewed_proposal(_request(proposed_runbook))
+
+    assert runbook_path.read_bytes() == original_markdown
+    assert (runbook_path.parent / ".index.json").read_bytes() == original_index
+    assert not (runbook_path.parent / ".activations" / "plaud-production-repair.json").exists()
+    assert not (runbook_path.parent / ".revisions" / "plaud-production-repair.md").exists()
+    assert not (runbook_path.parent / ".revisions" / "plaud-production-repair.json").exists()
+    assert _activation_events() == []
+    with registry.connect_closing() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM runbook_activation_identities").fetchone()[0] == 0
+
+
+def test_recovery_write_error_is_retried_without_leaving_candidate_residue(proposed_runbook, monkeypatch):
+    runbook_path = Path(proposed_runbook["active"].path)
+    original_markdown = runbook_path.read_bytes()
+    original_replace = secure_io.replace_file
+    candidate = proposed_runbook["candidate"].encode("utf-8")
+    failed_recovery = False
+
+    def fail_first_recovery(directory, name, value, **kwargs):
+        nonlocal failed_recovery
+        if name == "RUNBOOK.md" and value != candidate and not failed_recovery:
+            failed_recovery = True
+            raise OSError("injected recovery write failure")
+        return original_replace(directory, name, value, **kwargs)
+
+    def fail_at_audit(boundary: str) -> None:
+        if boundary == "audit":
+            raise OSError("injected failure at audit")
+
+    monkeypatch.setattr(secure_io, "replace_file", fail_first_recovery)
+    monkeypatch.setattr(activation, "_persistence_boundary", fail_at_audit)
+    with pytest.raises(OSError, match="audit"):
+        activate_reviewed_proposal(_request(proposed_runbook))
+
+    assert failed_recovery is True
+    assert runbook_path.read_bytes() == original_markdown
+    assert _activation_events() == []
+    with registry.connect_closing() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM runbook_activation_identities").fetchone()[0] == 0
 
 
 def test_env_selected_forged_key_and_self_signed_claimed_approval_fail(proposed_runbook, monkeypatch, tmp_path):
@@ -203,7 +379,13 @@ def test_env_selected_forged_key_and_self_signed_claimed_approval_fail(proposed_
 def test_claimed_operator_string_without_installed_uid_binding_fails(proposed_runbook):
     policy_path = proposed_runbook["trust"] / "approval-policy.json"
     policy_path.write_text(
-        json.dumps({"approver": "elliott", "operators": {"alina": {"uid": os.geteuid() + 1}}}),
+        json.dumps(
+            {
+                "approver": "elliott",
+                "canonical_root": str(Path(proposed_runbook["active"].path).parents[2]),
+                "operators": {"alina": {"uid": os.geteuid() + 1}},
+            }
+        ),
         encoding="utf-8",
     )
     policy_path.chmod(0o600)

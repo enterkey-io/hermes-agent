@@ -26,6 +26,17 @@ class SecureDir:
         os.close(self.fd)
 
 
+@dataclass(frozen=True)
+class SecureFile:
+    """An ownership-checked regular file held open by descriptor."""
+
+    fd: int
+    name: str
+
+    def close(self) -> None:
+        os.close(self.fd)
+
+
 class SecurePathError(PermissionError):
     """A privileged activation path failed its descriptor-level policy."""
 
@@ -151,6 +162,49 @@ def read_optional_file(directory: SecureDir, name: str, *, owner_uid: int) -> by
         raise exc
 
 
+@contextlib.contextmanager
+def open_regular_file(
+    directory: SecureDir,
+    name: str,
+    *,
+    owner_uid: int,
+    create: bool = False,
+    mode: int = 0o600,
+) -> Iterator[SecureFile]:
+    """Open one checked regular leaf without following a pathname symlink.
+
+    The returned descriptor remains the authority for consumers that can use a
+    descriptor-derived path (notably SQLite through ``/proc/self/fd``). A
+    later name swap cannot redirect that consumer to a different inode.
+    """
+    if not name or "/" in name or name in {".", ".."}:
+        raise SecurePathError("invalid activation filename")
+    flags = os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC
+    if create:
+        flags |= os.O_CREAT
+    try:
+        fd = os.open(name, flags, mode, dir_fd=directory.fd)
+    except OSError as exc:
+        raise SecurePathError("trusted activation file is unavailable or unsafe") from exc
+    try:
+        _check_owner_mode(os.fstat(fd), directory=False, owner_uid=owner_uid)
+        yield SecureFile(fd, name)
+    finally:
+        os.close(fd)
+
+
+def assert_same_file(directory: SecureDir, file: SecureFile, *, owner_uid: int) -> None:
+    """Reject a registry leaf replaced after its trusted descriptor was opened."""
+    try:
+        named = os.stat(file.name, dir_fd=directory.fd, follow_symlinks=False)
+    except OSError as exc:
+        raise SecurePathError("trusted activation file changed during operation") from exc
+    _check_owner_mode(named, directory=False, owner_uid=owner_uid)
+    opened = os.fstat(file.fd)
+    if (named.st_dev, named.st_ino) != (opened.st_dev, opened.st_ino):
+        raise SecurePathError("trusted activation file changed during operation")
+
+
 def _safe_existing_leaf(directory: SecureDir, name: str, *, owner_uid: int) -> None:
     try:
         metadata = os.stat(name, dir_fd=directory.fd, follow_symlinks=False)
@@ -181,8 +235,13 @@ def replace_file(
         written = 0
         while written < len(view):
             progress = os.write(fd, view[written:])
-            if not isinstance(progress, int) or progress <= 0:
-                raise OSError("short write made no progress")
+            remaining = len(view) - written
+            if (
+                isinstance(progress, bool)
+                or not isinstance(progress, int)
+                or not 1 <= progress <= remaining
+            ):
+                raise OSError("short write returned invalid progress")
             written += progress
         os.fsync(fd)
         os.close(fd)

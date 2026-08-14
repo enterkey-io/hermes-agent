@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import secrets
 import shutil
 import sqlite3
@@ -231,9 +232,46 @@ def connect(db_path: Path | None = None) -> sqlite3.Connection:
     return conn
 
 
+def connect_fd(db_fd: int, *, db_identity: str) -> sqlite3.Connection:
+    """Open an already checked Registry inode without re-opening its leaf name.
+
+    Activation holds ``db_fd`` from descriptor-anchored secure I/O. SQLite
+    follows this process's FD link to that inode, so a later rename or symlink
+    swap of ``workflow_registry.db`` cannot redirect identity/event writes.
+    """
+    if os.name != "posix" or db_fd < 0:
+        raise OSError("descriptor-backed workflow registry access is unavailable")
+    try:
+        conn = sqlite3.connect(f"file:/proc/self/fd/{db_fd}?mode=rw", uri=True, timeout=30)
+    except sqlite3.Error as exc:
+        raise PermissionError("descriptor-backed workflow registry is unavailable or unsafe") from exc
+    try:
+        conn.row_factory = sqlite3.Row
+        from hermes_state import apply_wal_with_fallback
+
+        apply_wal_with_fallback(conn, db_label="workflow_registry.db")
+        conn.execute("PRAGMA foreign_keys=ON")
+        if db_identity not in _INITIALIZED_PATHS:
+            init_db(conn)
+            _INITIALIZED_PATHS.add(db_identity)
+    except Exception:
+        conn.close()
+        raise
+    return conn
+
+
 @contextlib.contextmanager
 def connect_closing(db_path: Path | None = None):
     conn = connect(db_path=db_path)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+@contextlib.contextmanager
+def connect_closing_fd(db_fd: int, *, db_identity: str):
+    conn = connect_fd(db_fd, db_identity=db_identity)
     try:
         yield conn
     finally:
