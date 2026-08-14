@@ -266,16 +266,19 @@ def test_registry_swap_after_descriptor_open_fails_without_redirecting_persisten
     assert not (canonical_root / "runbooks" / "daily-brief" / ".revisions" / "plaud-production-repair.json").exists()
 
 
-def test_registry_restore_error_still_restores_canonical_artifacts_and_identity(
+def test_audit_precommit_failure_does_not_enter_registry_recovery(
     proposed_runbook, monkeypatch
 ):
     original = Path(proposed_runbook["active"].path).read_bytes()
+    recovery_attempts = 0
 
     def fail_at_audit(name: str) -> None:
         if name == "audit":
             raise OSError("injected failure at audit")
 
     def failed_restore(*args, **kwargs) -> None:
+        nonlocal recovery_attempts
+        recovery_attempts += 1
         raise OSError("injected registry restore failure")
 
     monkeypatch.setattr(activation, "_persistence_boundary", fail_at_audit)
@@ -283,6 +286,7 @@ def test_registry_restore_error_still_restores_canonical_artifacts_and_identity(
     with pytest.raises(OSError, match="audit"):
         activate_reviewed_proposal(_request(proposed_runbook))
 
+    assert recovery_attempts == 0
     assert Path(proposed_runbook["active"].path).read_bytes() == original
     assert _activation_events() == []
     with registry.connect_closing() as conn:
@@ -293,28 +297,35 @@ def test_registry_restore_error_still_restores_canonical_artifacts_and_identity(
     assert not (runbook_dir / ".revisions" / "plaud-production-repair.json").exists()
 
 
-def test_persistent_primary_and_fallback_compensation_failures_leave_no_activation_residue(
+def test_persistent_all_recovery_hook_failures_after_audit_precommit_leave_no_activation_residue(
     proposed_runbook, monkeypatch
 ):
     runbook_path = Path(proposed_runbook["active"].path)
     original_markdown = runbook_path.read_bytes()
     original_index = (runbook_path.parent / ".index.json").read_bytes()
+    recovery_attempts = 0
 
     def fail_at_audit(name: str) -> None:
         if name == "audit":
             raise OSError("injected failure at audit")
 
     def compensation_failure(*args, **kwargs) -> None:
+        nonlocal recovery_attempts
+        recovery_attempts += 1
         raise OSError("persistent compensation failure")
 
     monkeypatch.setattr(activation, "_persistence_boundary", fail_at_audit)
     monkeypatch.setattr(activation, "_remove_audit", compensation_failure)
+    monkeypatch.setattr(activation, "_remove_audit_direct", compensation_failure)
     monkeypatch.setattr(activation, "_restore_registry", compensation_failure)
     monkeypatch.setattr(activation, "_restore_registry_state", compensation_failure)
+    monkeypatch.setattr(activation, "_restore_registry_direct", compensation_failure)
     monkeypatch.setattr(activation, "_restore_canonical", compensation_failure)
+    monkeypatch.setattr(activation, "_restore_canonical_direct", compensation_failure)
     with pytest.raises(OSError, match="injected failure at audit"):
         activate_reviewed_proposal(_request(proposed_runbook))
 
+    assert recovery_attempts == 0
     runbook_dir = runbook_path.parent
     assert runbook_path.read_bytes() == original_markdown
     assert (runbook_dir / ".index.json").read_bytes() == original_index
@@ -329,19 +340,21 @@ def test_persistent_primary_and_fallback_compensation_failures_leave_no_activati
 def test_compensation_removes_its_identity_without_reverting_newer_same_hash_projection(
     proposed_runbook, monkeypatch
 ):
-    def fail_at_audit(name: str) -> None:
-        if name != "audit":
-            return
+    original_replace = secure_io.replace_file
+
+    def fail_audit_after_concurrent_projection(directory, name, value, **kwargs):
+        if directory.path.name != ".activations" or name != "plaud-production-repair.json":
+            return original_replace(directory, name, value, **kwargs)
         with registry.connect_closing() as conn:
             with write_txn(conn):
                 conn.execute(
                     "UPDATE workflow_definitions SET description = ?, version = version + 1 WHERE id = ?",
                     ("concurrent registry update", "wf_daily_brief"),
                 )
-        raise OSError("injected failure at audit")
+        raise OSError("injected audit write failure")
 
-    monkeypatch.setattr(activation, "_persistence_boundary", fail_at_audit)
-    with pytest.raises(OSError, match="injected failure at audit"):
+    monkeypatch.setattr(secure_io, "replace_file", fail_audit_after_concurrent_projection)
+    with pytest.raises(OSError, match="injected audit write failure"):
         activate_reviewed_proposal(_request(proposed_runbook))
 
     with registry.connect_closing() as conn:
@@ -401,13 +414,13 @@ def test_recovery_write_error_is_retried_without_leaving_candidate_residue(propo
             raise OSError("injected recovery write failure")
         return original_replace(directory, name, value, **kwargs)
 
-    def fail_at_audit(boundary: str) -> None:
-        if boundary == "audit":
-            raise OSError("injected failure at audit")
+    def fail_at_index(boundary: str) -> None:
+        if boundary == "index":
+            raise OSError("injected failure at index")
 
     monkeypatch.setattr(secure_io, "replace_file", fail_first_recovery)
-    monkeypatch.setattr(activation, "_persistence_boundary", fail_at_audit)
-    with pytest.raises(OSError, match="audit"):
+    monkeypatch.setattr(activation, "_persistence_boundary", fail_at_index)
+    with pytest.raises(OSError, match="index"):
         activate_reviewed_proposal(_request(proposed_runbook))
 
     assert failed_recovery is True

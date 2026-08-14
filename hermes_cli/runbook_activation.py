@@ -514,6 +514,12 @@ def activate_reviewed_proposal(request: ActivationRequest) -> ActivationResult:
                         previous_index = secure_io.read_optional_file(
                             runbook_dir, ".index.json", owner_uid=os.geteuid()
                         )
+                        # The audit seam is an irreversible precommit gate, not a
+                        # post-write compensator trigger. Nothing belonging to
+                        # this activation is durable until it has passed, so a
+                        # persistent failure here cannot leave a half-activated
+                        # canonical tree or Registry projection behind.
+                        _persistence_boundary("audit")
                         mutating = True
                         revisions, revision_md, revision_json = _write_revision_snapshot(
                             runbook_dir, approval["approval_id"], current, normalized.operator
@@ -574,7 +580,6 @@ def activate_reviewed_proposal(request: ActivationRequest) -> ActivationResult:
                             audit_bytes,
                             owner_uid=os.geteuid(),
                         )
-                        _persistence_boundary("audit")
                         if revisions is not None:
                             revisions.close()
                         revisions = None
