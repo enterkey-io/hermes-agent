@@ -514,12 +514,22 @@ def activate_reviewed_proposal(request: ActivationRequest) -> ActivationResult:
                         previous_index = secure_io.read_optional_file(
                             runbook_dir, ".index.json", owner_uid=os.geteuid()
                         )
-                        # The audit seam is an irreversible precommit gate, not a
-                        # post-write compensator trigger. Nothing belonging to
-                        # this activation is durable until it has passed, so a
-                        # persistent failure here cannot leave a half-activated
-                        # canonical tree or Registry projection behind.
+                        # The terminal audit is a write-ahead commitment. Its
+                        # real durable write must happen before any candidate
+                        # canonical or Registry state, not merely its synthetic
+                        # fault-injection seam. If the audit write itself fails,
+                        # no compensator is needed (or trusted) to remove a
+                        # half-activation.
                         _persistence_boundary("audit")
+                        audit = _audit_payload(
+                            normalized, approval, candidate_record, candidate_record.id,
+                            current_record.revision, canonical_root,
+                        )
+                        audit_bytes = json.dumps(audit, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                        secure_io.replace_file(
+                            audit_dir, f"{approval['approval_id']}.json", audit_bytes,
+                            owner_uid=os.geteuid(),
+                        )
                         mutating = True
                         revisions, revision_md, revision_json = _write_revision_snapshot(
                             runbook_dir, approval["approval_id"], current, normalized.operator
@@ -570,16 +580,6 @@ def activate_reviewed_proposal(request: ActivationRequest) -> ActivationResult:
                                 )
                         db_committed = True
                         secure_io.assert_same_file(canonical_dir, registry_file, owner_uid=os.geteuid())
-                        audit = _audit_payload(
-                            normalized, approval, candidate_record, candidate_record.id,
-                            current_record.revision, canonical_root,
-                        )
-                        audit_bytes = json.dumps(audit, sort_keys=True, separators=(",", ":")).encode("utf-8")
-                        secure_io.replace_file(
-                            audit_dir, f"{approval['approval_id']}.json",
-                            audit_bytes,
-                            owner_uid=os.geteuid(),
-                        )
                         if revisions is not None:
                             revisions.close()
                         revisions = None

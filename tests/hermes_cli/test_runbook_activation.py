@@ -337,24 +337,70 @@ def test_persistent_all_recovery_hook_failures_after_audit_precommit_leave_no_ac
         assert conn.execute("SELECT COUNT(*) FROM runbook_activation_identities").fetchone()[0] == 0
 
 
+def test_real_audit_write_failure_precedes_all_persistent_recovery_layers(
+    proposed_runbook, monkeypatch
+):
+    runbook_path = Path(proposed_runbook["active"].path)
+    original_markdown = runbook_path.read_bytes()
+    original_index = (runbook_path.parent / ".index.json").read_bytes()
+    original_replace = secure_io.replace_file
+    recovery_attempts = 0
+
+    def fail_real_audit_write(directory, name, value, **kwargs):
+        if directory.path.name == ".activations" and name == "plaud-production-repair.json":
+            raise OSError("injected real audit write failure")
+        return original_replace(directory, name, value, **kwargs)
+
+    def persistent_recovery_failure(*args, **kwargs) -> None:
+        nonlocal recovery_attempts
+        recovery_attempts += 1
+        raise OSError("persistent compensation failure")
+
+    monkeypatch.setattr(secure_io, "replace_file", fail_real_audit_write)
+    monkeypatch.setattr(activation, "_remove_audit", persistent_recovery_failure)
+    monkeypatch.setattr(activation, "_remove_audit_direct", persistent_recovery_failure)
+    monkeypatch.setattr(activation, "_restore_registry", persistent_recovery_failure)
+    monkeypatch.setattr(activation, "_restore_registry_state", persistent_recovery_failure)
+    monkeypatch.setattr(activation, "_restore_registry_direct", persistent_recovery_failure)
+    monkeypatch.setattr(activation, "_restore_canonical", persistent_recovery_failure)
+    monkeypatch.setattr(activation, "_restore_canonical_direct", persistent_recovery_failure)
+
+    with pytest.raises(OSError, match="injected real audit write failure"):
+        activate_reviewed_proposal(_request(proposed_runbook))
+
+    runbook_dir = runbook_path.parent
+    assert recovery_attempts == 0
+    assert runbook_path.read_bytes() == original_markdown
+    assert (runbook_dir / ".index.json").read_bytes() == original_index
+    assert not (runbook_dir / ".activations" / "plaud-production-repair.json").exists()
+    assert not (runbook_dir / ".revisions" / "plaud-production-repair.md").exists()
+    assert not (runbook_dir / ".revisions" / "plaud-production-repair.json").exists()
+    assert _activation_events() == []
+    with registry.connect_closing() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM runbook_activation_identities").fetchone()[0] == 0
+
+
 def test_compensation_removes_its_identity_without_reverting_newer_same_hash_projection(
     proposed_runbook, monkeypatch
 ):
-    original_replace = secure_io.replace_file
+    original_assert_same_file = secure_io.assert_same_file
+    assertion_count = 0
 
-    def fail_audit_after_concurrent_projection(directory, name, value, **kwargs):
-        if directory.path.name != ".activations" or name != "plaud-production-repair.json":
-            return original_replace(directory, name, value, **kwargs)
+    def fail_after_commit_with_concurrent_projection(*args, **kwargs):
+        nonlocal assertion_count
+        assertion_count += 1
+        if assertion_count != 3:
+            return original_assert_same_file(*args, **kwargs)
         with registry.connect_closing() as conn:
             with write_txn(conn):
                 conn.execute(
                     "UPDATE workflow_definitions SET description = ?, version = version + 1 WHERE id = ?",
                     ("concurrent registry update", "wf_daily_brief"),
                 )
-        raise OSError("injected audit write failure")
+        raise OSError("injected post-commit failure")
 
-    monkeypatch.setattr(secure_io, "replace_file", fail_audit_after_concurrent_projection)
-    with pytest.raises(OSError, match="injected audit write failure"):
+    monkeypatch.setattr(secure_io, "assert_same_file", fail_after_commit_with_concurrent_projection)
+    with pytest.raises(OSError, match="injected post-commit failure"):
         activate_reviewed_proposal(_request(proposed_runbook))
 
     with registry.connect_closing() as conn:
