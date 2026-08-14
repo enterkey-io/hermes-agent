@@ -269,12 +269,20 @@ def _activation_identity(
     }
 
 
-def _write_index(runbook_dir: secure_io.SecureDir, metadata: dict[str, Any], source_hash: str, operator: str) -> None:
-    value = json.dumps(
+def _index_value(metadata: dict[str, Any], source_hash: str, operator: str) -> bytes:
+    return json.dumps(
         {"metadata": metadata, "source_hash": source_hash, "updated_at": _now(), "approved_by": operator},
         sort_keys=True, separators=(",", ":"),
     ).encode("utf-8")
+
+
+def _write_index(
+    runbook_dir: secure_io.SecureDir, metadata: dict[str, Any], source_hash: str, operator: str,
+    *, value: bytes | None = None,
+) -> bytes:
+    value = _index_value(metadata, source_hash, operator) if value is None else value
     secure_io.replace_file(runbook_dir, ".index.json", value, owner_uid=os.geteuid())
+    return value
 
 
 def _write_revision_snapshot(
@@ -302,32 +310,54 @@ def _write_revision_snapshot(
 
 
 def _restore_registry_state(
-    snapshot: dict[str, Any], *, record: runbook_store.RunbookRecord, approval_id: str,
-    event_id: str, db_fd: int, db_identity: str,
+    snapshot: dict[str, Any], candidate_projection: dict[str, Any], *, record: runbook_store.RunbookRecord,
+    approval_id: str, event_id: str, db_fd: int, db_identity: str,
 ) -> None:
     """Restore only our candidate state, leaving a newer projection untouched."""
     with registry.connect_closing_fd(db_fd, db_identity=db_identity) as conn:
-        row = conn.execute("SELECT source_hash FROM workflow_definitions WHERE id = ?", (record.id,)).fetchone()
-        if row is None or row["source_hash"] != record.source_hash:
-            return
         with write_txn(conn):
-            conn.execute("DELETE FROM runbook_activation_identities WHERE approval_id = ?", (approval_id,))
+            # These rows are uniquely ours. Remove them even if another writer
+            # superseded the projection; projection restoration remains CAS-guarded.
+            conn.execute(
+                "DELETE FROM runbook_activation_identities WHERE approval_id = ? AND event_id = ?",
+                (approval_id, event_id),
+            )
             conn.execute("DELETE FROM workflow_events WHERE id = ?", (event_id,))
+            if snapshot_projection(conn, workflow_id=record.id, slug=record.slug) != candidate_projection:
+                return
             restore_projection_transaction(conn, snapshot, candidate_workflow_id=record.id)
 
 
 def _restore_registry(
-    snapshot: dict[str, Any], *, record: runbook_store.RunbookRecord, approval_id: str,
-    event_id: str, db_fd: int, db_identity: str,
+    snapshot: dict[str, Any], candidate_projection: dict[str, Any], *, record: runbook_store.RunbookRecord,
+    approval_id: str, event_id: str, db_fd: int, db_identity: str,
 ) -> None:
     _restore_registry_state(
-        snapshot, record=record, approval_id=approval_id, event_id=event_id,
+        snapshot, candidate_projection, record=record, approval_id=approval_id, event_id=event_id,
         db_fd=db_fd, db_identity=db_identity,
     )
 
 
+def _restore_registry_direct(
+    snapshot: dict[str, Any], candidate_projection: dict[str, Any], *, record: runbook_store.RunbookRecord,
+    approval_id: str, event_id: str, db_fd: int, db_identity: str,
+) -> None:
+    """Independently sweep this activation from the held registry inode."""
+    with registry.connect_closing_fd(db_fd, db_identity=db_identity) as conn:
+        with write_txn(conn):
+            conn.execute(
+                "DELETE FROM runbook_activation_identities WHERE approval_id = ? AND event_id = ?",
+                (approval_id, event_id),
+            )
+            conn.execute("DELETE FROM workflow_events WHERE id = ?", (event_id,))
+            if snapshot_projection(conn, workflow_id=record.id, slug=record.slug) != candidate_projection:
+                return
+            restore_projection_transaction(conn, snapshot, candidate_workflow_id=record.id)
+
+
 def _restore_canonical(
-    runbook_dir: secure_io.SecureDir, *, candidate: bytes, previous: bytes, previous_index: bytes | None,
+    runbook_dir: secure_io.SecureDir, *, candidate: bytes, candidate_index: bytes, previous: bytes,
+    previous_index: bytes | None,
     revisions: secure_io.SecureDir | None, revision_names: tuple[str, str] | None,
 ) -> None:
     cleanup_error: Exception | None = None
@@ -335,10 +365,12 @@ def _restore_canonical(
         current = secure_io.read_file(runbook_dir, "RUNBOOK.md", owner_uid=os.geteuid())
         if current == candidate:
             secure_io.replace_file(runbook_dir, "RUNBOOK.md", previous, owner_uid=os.geteuid())
-            if previous_index is None:
-                secure_io.unlink_optional(runbook_dir, ".index.json", owner_uid=os.geteuid())
-            else:
-                secure_io.replace_file(runbook_dir, ".index.json", previous_index, owner_uid=os.geteuid())
+            current_index = secure_io.read_optional_file(runbook_dir, ".index.json", owner_uid=os.geteuid())
+            if current_index == candidate_index:
+                if previous_index is None:
+                    secure_io.unlink_optional(runbook_dir, ".index.json", owner_uid=os.geteuid())
+                else:
+                    secure_io.replace_file(runbook_dir, ".index.json", previous_index, owner_uid=os.geteuid())
     finally:
         if revisions is not None and revision_names is not None:
             for name in revision_names:
@@ -349,6 +381,46 @@ def _restore_canonical(
             revisions.close()
     if cleanup_error is not None:
         raise cleanup_error
+
+
+def _restore_canonical_direct(
+    runbook_dir: secure_io.SecureDir, *, candidate: bytes, candidate_index: bytes, previous: bytes,
+    previous_index: bytes | None, revision_names: tuple[str, str] | None,
+) -> None:
+    """Use a fresh descriptor path if the normal recovery path is unavailable."""
+    cleanup_error: Exception | None = None
+    current = secure_io.read_file(runbook_dir, "RUNBOOK.md", owner_uid=os.geteuid())
+    if current == candidate:
+        secure_io.replace_file(runbook_dir, "RUNBOOK.md", previous, owner_uid=os.geteuid())
+        current_index = secure_io.read_optional_file(runbook_dir, ".index.json", owner_uid=os.geteuid())
+        if current_index == candidate_index:
+            if previous_index is None:
+                secure_io.unlink_optional(runbook_dir, ".index.json", owner_uid=os.geteuid())
+            else:
+                secure_io.replace_file(runbook_dir, ".index.json", previous_index, owner_uid=os.geteuid())
+    if revision_names is not None:
+        revisions = secure_io.open_descendant(runbook_dir, (".revisions",), owner_uid=os.geteuid())
+        try:
+            for name in revision_names:
+                try:
+                    secure_io.unlink_optional(revisions, name, owner_uid=os.geteuid())
+                except Exception as exc:
+                    cleanup_error = cleanup_error or exc
+        finally:
+            revisions.close()
+    if cleanup_error is not None:
+        raise cleanup_error
+
+
+def _remove_audit(audit_dir: secure_io.SecureDir, name: str, expected: bytes | None) -> None:
+    if expected is not None:
+        secure_io.unlink_if_matches(audit_dir, name, expected, owner_uid=os.geteuid())
+
+
+def _remove_audit_direct(audit_dir: secure_io.SecureDir, name: str, expected: bytes | None) -> None:
+    """Repeat checked cleanup without a raw unlink TOCTOU fallback."""
+    if expected is not None:
+        secure_io.unlink_if_matches(audit_dir, name, expected, owner_uid=os.geteuid())
 
 
 def activate_reviewed_proposal(request: ActivationRequest) -> ActivationResult:
@@ -372,7 +444,6 @@ def activate_reviewed_proposal(request: ActivationRequest) -> ActivationResult:
         normalized.approval_evidence, normalized, public_key, canonical_root
     )
     target = runbook_store.runbook_path(slug, root=target_root)
-    registry_path = _registry_path(canonical_root)
     registry_identity = _registry_identity(canonical_root)
     audit_path = target.parent / ".activations" / f"{approval['approval_id']}.json"
 
@@ -385,6 +456,7 @@ def activate_reviewed_proposal(request: ActivationRequest) -> ActivationResult:
                 with secure_io.open_regular_file(
                     canonical_dir, "workflow_registry.db", owner_uid=os.geteuid(), create=True
                 ) as registry_file:
+                    secure_io.assert_same_file(canonical_dir, registry_file, owner_uid=os.geteuid())
                     candidate, candidate_metadata = _read_proposal(
                         runbook_dir, slug, normalized.proposal_id, normalized.proposal_sha256, target
                     )
@@ -396,10 +468,13 @@ def activate_reviewed_proposal(request: ActivationRequest) -> ActivationResult:
                     revision_names: tuple[str, str] | None = None
                     event_id: str | None = None
                     snapshot: dict[str, Any] | None = None
+                    candidate_projection: dict[str, Any] | None = None
                     db_committed = False
                     mutating = False
                     current = b""
                     previous_index: bytes | None = None
+                    candidate_index = b""
+                    audit_bytes: bytes | None = None
                     try:
                         audit_raw = secure_io.read_optional_file(
                             audit_dir, f"{approval['approval_id']}.json", owner_uid=os.geteuid()
@@ -420,6 +495,9 @@ def activate_reviewed_proposal(request: ActivationRequest) -> ActivationResult:
                             with registry.connect_closing_fd(
                                 registry_file.fd, db_identity=registry_identity
                             ) as conn:
+                                secure_io.assert_same_file(
+                                    canonical_dir, registry_file, owner_uid=os.geteuid()
+                                )
                                 workflow = registry.get_definition(conn, candidate_record.id).to_dict()
                                 workflow["steps"] = [
                                     step.to_dict() for step in registry.list_steps(conn, candidate_record.id)
@@ -444,8 +522,12 @@ def activate_reviewed_proposal(request: ActivationRequest) -> ActivationResult:
                         _persistence_boundary("revision")
                         secure_io.replace_file(runbook_dir, "RUNBOOK.md", candidate, owner_uid=os.geteuid())
                         _persistence_boundary("canonical")
+                        candidate_index = _index_value(
+                            candidate_metadata, candidate_record.source_hash, normalized.operator
+                        )
                         _write_index(
-                            runbook_dir, candidate_metadata, candidate_record.source_hash, normalized.operator
+                            runbook_dir, candidate_metadata, candidate_record.source_hash, normalized.operator,
+                            value=candidate_index,
                         )
                         _persistence_boundary("index")
 
@@ -455,6 +537,9 @@ def activate_reviewed_proposal(request: ActivationRequest) -> ActivationResult:
                             with write_txn(conn):
                                 snapshot = snapshot_projection(conn, workflow_id=candidate_record.id, slug=slug)
                                 workflow = project_runbook_transaction(conn, candidate_record, candidate_metadata)
+                                candidate_projection = snapshot_projection(
+                                    conn, workflow_id=candidate_record.id, slug=slug
+                                )
                                 _persistence_boundary("projection")
                                 replayed, event_id = registry.record_runbook_activation(
                                     conn, approval_id=approval["approval_id"],
@@ -472,15 +557,21 @@ def activate_reviewed_proposal(request: ActivationRequest) -> ActivationResult:
                                         "activation identity exists without terminal audit"
                                     )
                                 _persistence_boundary("event")
+                                # The namespace must still name the checked inode before
+                                # this transaction becomes externally visible.
+                                secure_io.assert_same_file(
+                                    canonical_dir, registry_file, owner_uid=os.geteuid()
+                                )
                         db_committed = True
                         secure_io.assert_same_file(canonical_dir, registry_file, owner_uid=os.geteuid())
                         audit = _audit_payload(
                             normalized, approval, candidate_record, candidate_record.id,
                             current_record.revision, canonical_root,
                         )
+                        audit_bytes = json.dumps(audit, sort_keys=True, separators=(",", ":")).encode("utf-8")
                         secure_io.replace_file(
                             audit_dir, f"{approval['approval_id']}.json",
-                            json.dumps(audit, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+                            audit_bytes,
                             owner_uid=os.geteuid(),
                         )
                         _persistence_boundary("audit")
@@ -492,48 +583,76 @@ def activate_reviewed_proposal(request: ActivationRequest) -> ActivationResult:
                         # Every compensator runs while the activation lock and DB descriptor remain held.
                         if mutating:
                             try:
-                                secure_io.unlink_optional(
-                                    audit_dir, f"{approval['approval_id']}.json", owner_uid=os.geteuid()
+                                _remove_audit(
+                                    audit_dir, f"{approval['approval_id']}.json", audit_bytes
                                 )
                             except Exception:
-                                try:
-                                    secure_io.unlink_optional(
-                                        audit_dir, f"{approval['approval_id']}.json", owner_uid=os.geteuid()
-                                    )
-                                except Exception:
-                                    pass
-                        if mutating and db_committed and snapshot is not None and event_id is not None:
+                                pass
+                            try:
+                                _remove_audit_direct(
+                                    audit_dir, f"{approval['approval_id']}.json", audit_bytes
+                                )
+                            except Exception:
+                                pass
+                        if (
+                            mutating and db_committed and snapshot is not None
+                            and candidate_projection is not None and event_id is not None
+                        ):
                             try:
                                 _restore_registry(
-                                    snapshot, record=candidate_record,
+                                    snapshot, candidate_projection, record=candidate_record,
                                     approval_id=approval["approval_id"], event_id=event_id,
                                     db_fd=registry_file.fd, db_identity=registry_identity,
                                 )
                             except Exception:
-                                try:
-                                    _restore_registry_state(
-                                        snapshot, record=candidate_record,
-                                        approval_id=approval["approval_id"], event_id=event_id,
-                                        db_fd=registry_file.fd, db_identity=registry_identity,
-                                    )
-                                except Exception:
-                                    pass
+                                pass
+                            try:
+                                _restore_registry_state(
+                                    snapshot, candidate_projection, record=candidate_record,
+                                    approval_id=approval["approval_id"], event_id=event_id,
+                                    db_fd=registry_file.fd, db_identity=registry_identity,
+                                )
+                            except Exception:
+                                pass
+                            try:
+                                _restore_registry_direct(
+                                    snapshot, candidate_projection, record=candidate_record,
+                                    approval_id=approval["approval_id"], event_id=event_id,
+                                    db_fd=registry_file.fd, db_identity=registry_identity,
+                                )
+                            except Exception:
+                                pass
                         if mutating:
                             try:
                                 _restore_canonical(
-                                    runbook_dir, candidate=candidate, previous=current,
-                                    previous_index=previous_index,
+                                    runbook_dir, candidate=candidate, candidate_index=candidate_index,
+                                    previous=current, previous_index=previous_index,
                                     revisions=revisions, revision_names=revision_names,
                                 )
                             except Exception:
+                                pass
+                            try:
+                                _restore_canonical(
+                                    runbook_dir, candidate=candidate, candidate_index=candidate_index,
+                                    previous=current, previous_index=previous_index,
+                                    revisions=None, revision_names=None,
+                                )
+                            except Exception:
+                                pass
+                            try:
+                                _restore_canonical_direct(
+                                    runbook_dir, candidate=candidate, candidate_index=candidate_index,
+                                    previous=current, previous_index=previous_index,
+                                    revision_names=revision_names,
+                                )
+                            except Exception:
+                                pass
+                            if revisions is not None:
                                 try:
-                                    _restore_canonical(
-                                        runbook_dir, candidate=candidate, previous=current,
-                                        previous_index=previous_index,
-                                        revisions=None, revision_names=None,
-                                    )
-                                except Exception:
+                                    revisions.close()
+                                except OSError:
                                     pass
+                                revisions = None
                         raise
                     finally:
                         audit_dir.close()

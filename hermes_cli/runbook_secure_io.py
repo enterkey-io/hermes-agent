@@ -244,13 +244,22 @@ def replace_file(
                 raise OSError("short write returned invalid progress")
             written += progress
         os.fsync(fd)
-        os.close(fd)
-        fd = -1
+        # A close wrapper can release the descriptor and then report an error.
+        # Relinquish ownership before calling it so error cleanup never retries
+        # a released descriptor (which can already belong to another opener).
+        closing_fd, fd = fd, -1
+        os.close(closing_fd)
         os.replace(temp_name, name, src_dir_fd=directory.fd, dst_dir_fd=directory.fd)
         os.fsync(directory.fd)
     except BaseException:
         if fd >= 0:
-            os.close(fd)
+            closing_fd, fd = fd, -1
+            try:
+                os.close(closing_fd)
+            except OSError:
+                # Preserve the operation failure while still removing the temp
+                # leaf below.  Retrying close is unsafe after a release/error.
+                pass
         try:
             os.unlink(temp_name, dir_fd=directory.fd)
         except OSError as exc:
@@ -266,6 +275,37 @@ def unlink_optional(directory: SecureDir, name: str, *, owner_uid: int) -> None:
     except FileNotFoundError:
         return
     os.fsync(directory.fd)
+
+
+def unlink_if_matches(directory: SecureDir, name: str, expected: bytes, *, owner_uid: int) -> bool:
+    """Unlink an exact checked leaf, refusing a replacement observed before removal."""
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        fd = os.open(name, flags, dir_fd=directory.fd)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise SecurePathError("trusted activation file is unavailable or unsafe") from exc
+    try:
+        opened = os.fstat(fd)
+        _check_owner_mode(opened, directory=False, owner_uid=owner_uid)
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        if b"".join(chunks) != expected:
+            return False
+        named = os.stat(name, dir_fd=directory.fd, follow_symlinks=False)
+        _check_owner_mode(named, directory=False, owner_uid=owner_uid)
+        if (named.st_dev, named.st_ino) != (opened.st_dev, opened.st_ino):
+            return False
+        os.unlink(name, dir_fd=directory.fd)
+        os.fsync(directory.fd)
+        return True
+    finally:
+        os.close(fd)
 
 
 @contextlib.contextmanager

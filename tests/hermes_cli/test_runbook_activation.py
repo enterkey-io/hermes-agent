@@ -240,19 +240,30 @@ def test_registry_swap_after_descriptor_open_fails_without_redirecting_persisten
     redirected.write_bytes(b"")
     redirected.chmod(0o600)
     original_connect = registry.connect_closing_fd
+    original_record = registry.record_runbook_activation
+    record_attempted = False
 
     def swap_then_connect(fd: int, **kwargs):
         registry_path.unlink()
         registry_path.symlink_to(redirected)
         return original_connect(fd, **kwargs)
 
+    def capture_record(*args, **kwargs):
+        nonlocal record_attempted
+        record_attempted = True
+        return original_record(*args, **kwargs)
+
     monkeypatch.setattr(registry, "connect_closing_fd", swap_then_connect)
+    monkeypatch.setattr(registry, "record_runbook_activation", capture_record)
     with pytest.raises(PermissionError, match="registry"):
         activate_reviewed_proposal(_request(proposed_runbook))
 
+    assert record_attempted is False
     assert redirected.read_bytes() == b""
     assert Path(proposed_runbook["active"].path).read_bytes() == original
     assert not (canonical_root / "runbooks" / "daily-brief" / ".activations" / "plaud-production-repair.json").exists()
+    assert not (canonical_root / "runbooks" / "daily-brief" / ".revisions" / "plaud-production-repair.md").exists()
+    assert not (canonical_root / "runbooks" / "daily-brief" / ".revisions" / "plaud-production-repair.json").exists()
 
 
 def test_registry_restore_error_still_restores_canonical_artifacts_and_identity(
@@ -280,6 +291,63 @@ def test_registry_restore_error_still_restores_canonical_artifacts_and_identity(
     assert not (runbook_dir / ".activations" / "plaud-production-repair.json").exists()
     assert not (runbook_dir / ".revisions" / "plaud-production-repair.md").exists()
     assert not (runbook_dir / ".revisions" / "plaud-production-repair.json").exists()
+
+
+def test_persistent_primary_and_fallback_compensation_failures_leave_no_activation_residue(
+    proposed_runbook, monkeypatch
+):
+    runbook_path = Path(proposed_runbook["active"].path)
+    original_markdown = runbook_path.read_bytes()
+    original_index = (runbook_path.parent / ".index.json").read_bytes()
+
+    def fail_at_audit(name: str) -> None:
+        if name == "audit":
+            raise OSError("injected failure at audit")
+
+    def compensation_failure(*args, **kwargs) -> None:
+        raise OSError("persistent compensation failure")
+
+    monkeypatch.setattr(activation, "_persistence_boundary", fail_at_audit)
+    monkeypatch.setattr(activation, "_remove_audit", compensation_failure)
+    monkeypatch.setattr(activation, "_restore_registry", compensation_failure)
+    monkeypatch.setattr(activation, "_restore_registry_state", compensation_failure)
+    monkeypatch.setattr(activation, "_restore_canonical", compensation_failure)
+    with pytest.raises(OSError, match="injected failure at audit"):
+        activate_reviewed_proposal(_request(proposed_runbook))
+
+    runbook_dir = runbook_path.parent
+    assert runbook_path.read_bytes() == original_markdown
+    assert (runbook_dir / ".index.json").read_bytes() == original_index
+    assert not (runbook_dir / ".activations" / "plaud-production-repair.json").exists()
+    assert not (runbook_dir / ".revisions" / "plaud-production-repair.md").exists()
+    assert not (runbook_dir / ".revisions" / "plaud-production-repair.json").exists()
+    assert _activation_events() == []
+    with registry.connect_closing() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM runbook_activation_identities").fetchone()[0] == 0
+
+
+def test_compensation_removes_its_identity_without_reverting_newer_same_hash_projection(
+    proposed_runbook, monkeypatch
+):
+    def fail_at_audit(name: str) -> None:
+        if name != "audit":
+            return
+        with registry.connect_closing() as conn:
+            with write_txn(conn):
+                conn.execute(
+                    "UPDATE workflow_definitions SET description = ?, version = version + 1 WHERE id = ?",
+                    ("concurrent registry update", "wf_daily_brief"),
+                )
+        raise OSError("injected failure at audit")
+
+    monkeypatch.setattr(activation, "_persistence_boundary", fail_at_audit)
+    with pytest.raises(OSError, match="injected failure at audit"):
+        activate_reviewed_proposal(_request(proposed_runbook))
+
+    with registry.connect_closing() as conn:
+        assert registry.get_definition(conn, "wf_daily_brief").description == "concurrent registry update"
+        assert conn.execute("SELECT COUNT(*) FROM runbook_activation_identities").fetchone()[0] == 0
+    assert _activation_events() == []
 
 
 @pytest.mark.parametrize(

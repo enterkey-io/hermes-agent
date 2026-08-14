@@ -50,3 +50,29 @@ def test_replace_file_write_error_preserves_existing_leaf_and_removes_temporary_
 
     assert target.read_bytes() == b"previous"
     assert not list(directory.glob(".artifact.*.tmp"))
+
+
+def test_replace_file_close_after_release_preserves_leaf_and_removes_temporary_file(
+    secure_directory, monkeypatch
+):
+    directory, anchor = secure_directory
+    target = directory / "artifact"
+    target.write_bytes(b"previous")
+    target.chmod(0o600)
+    original_close = secure_io.os.close
+    released = False
+
+    def close_after_release(fd: int) -> None:
+        nonlocal released
+        original_close(fd)
+        if not released:
+            released = True
+            raise OSError("injected close-after-release failure")
+
+    monkeypatch.setattr(secure_io.os, "close", close_after_release)
+    with pytest.raises(OSError, match="close-after-release"):
+        secure_io.replace_file(anchor, "artifact", b"new", owner_uid=os.geteuid())
+
+    assert released is True
+    assert target.read_bytes() == b"previous"
+    assert not list(directory.glob(".artifact.*.tmp"))
