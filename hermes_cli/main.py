@@ -482,6 +482,7 @@ from hermes_cli.subcommands.pairing import build_pairing_parser
 from hermes_cli.subcommands.plugins import build_plugins_parser
 from hermes_cli.subcommands.mcp import build_mcp_parser
 from hermes_cli.subcommands.claw import build_claw_parser
+from hermes_cli.subcommands.runbook import build_runbook_parser
 
 
 def _require_tty(command_name: str) -> None:
@@ -9902,7 +9903,7 @@ def _coalesce_session_name_args(argv: list) -> list:
         "version",
         "update",
         "uninstall",
-        "profile",
+        "profile", "runbook",
         "dashboard",
         "serve",
         "desktop",
@@ -11318,7 +11319,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "dump", "egress", "fallback", "gateway", "hooks", "import", "import-agent", "insights",
         "gui", "desktop", "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate", "moa",
         "journey", "memory-graph", "learning",
-        "model", "monitoring", "pairing", "pause", "pets", "plugins", "portal", "profile",
+        "model", "monitoring", "pairing", "pause", "pets", "plugins", "portal", "profile", "runbook",
         "project", "proxy",
         "prompt-size",
         "resume",
@@ -11998,6 +11999,14 @@ def _advertise_agent_env() -> None:
     """
     os.environ.setdefault("AI_AGENT", "hermes-agent")
     os.environ.setdefault("HERMES_AGENT", "true")
+
+
+def cmd_runbook(args):
+    if getattr(args, "runbook_command", None) != "activate-reviewed":
+        raise SystemExit("Usage: hermes runbook activate-reviewed --help")
+    from hermes_cli.runbook_activation import activate_from_args
+
+    return activate_from_args(args)
 
 
 def main():
@@ -13308,6 +13317,11 @@ def main():
     # claw command  (parser built in hermes_cli/subcommands/claw.py)
     # =========================================================================
     build_claw_parser(subparsers, cmd_claw=cmd_claw)
+
+    # =========================================================================
+    # runbook command  (parser built in hermes_cli/subcommands/runbook.py)
+    # =========================================================================
+    build_runbook_parser(subparsers, cmd_runbook=cmd_runbook)
 
     # =========================================================================
     # version command  (parser built in hermes_cli/subcommands/version.py)

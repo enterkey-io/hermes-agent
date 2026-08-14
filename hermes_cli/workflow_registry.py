@@ -147,6 +147,13 @@ CREATE TABLE IF NOT EXISTS workflow_events (
 CREATE INDEX IF NOT EXISTS idx_workflow_events_entity
     ON workflow_events(entity_type, entity_id, created_at);
 
+CREATE TABLE IF NOT EXISTS runbook_activation_identities (
+    approval_id   TEXT PRIMARY KEY,
+    identity_json TEXT NOT NULL,
+    workflow_id   TEXT NOT NULL,
+    event_id      TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS workflow_registry_meta (
     key               TEXT PRIMARY KEY,
     value             TEXT NOT NULL
@@ -258,14 +265,15 @@ def _event(
     entity_id: str,
     event_type: str,
     payload: Mapping[str, Any] | None = None,
-) -> None:
+) -> str:
+    event_id = _new_id("evt")
     conn.execute(
         """
         INSERT INTO workflow_events(id, entity_type, entity_id, event_type, created_at, payload)
         VALUES (?, ?, ?, ?, ?, ?)
         """,
         (
-            _new_id("evt"),
+            event_id,
             entity_type,
             entity_id,
             event_type,
@@ -273,6 +281,59 @@ def _event(
             _json_dumps(dict(payload or {})),
         ),
     )
+    return event_id
+
+
+def record_runbook_activation(
+    conn: sqlite3.Connection,
+    *,
+    approval_id: str,
+    identity: Mapping[str, Any],
+    workflow_id: str,
+    payload: Mapping[str, Any],
+) -> tuple[bool, str]:
+    """Record one activation identity inside the caller's write transaction.
+
+    The database, rather than a preflight event scan, owns idempotency.  A
+    duplicate is a replay only when every immutable approval binding matches.
+    """
+    identity_json = _json_dumps(dict(identity))
+    row = conn.execute(
+        "SELECT identity_json, workflow_id, event_id FROM runbook_activation_identities "
+        "WHERE approval_id = ?",
+        (approval_id,),
+    ).fetchone()
+    if row is not None:
+        if row["identity_json"] != identity_json or row["workflow_id"] != workflow_id:
+            raise WorkflowConflictError("approval id is already bound to a different activation")
+        return True, str(row["event_id"])
+    event_id = _event(
+        conn,
+        "workflow_definition",
+        workflow_id,
+        "runbook_proposal_activated",
+        dict(payload),
+    )
+    conn.execute(
+        "INSERT INTO runbook_activation_identities(approval_id, identity_json, workflow_id, event_id) "
+        "VALUES (?, ?, ?, ?)",
+        (approval_id, identity_json, workflow_id, event_id),
+    )
+    return False, event_id
+
+
+def record_event(
+    conn: sqlite3.Connection,
+    entity_type: str,
+    entity_id: str,
+    event_type: str,
+    payload: Mapping[str, Any] | None = None,
+) -> None:
+    """Append a durable registry event after validating its target exists."""
+    if entity_type == "workflow_definition":
+        get_definition(conn, entity_id)
+    with write_txn(conn):
+        _event(conn, entity_type, entity_id, event_type, payload)
 
 
 def create_definition(conn: sqlite3.Connection, **values: Any) -> WorkflowDefinition:

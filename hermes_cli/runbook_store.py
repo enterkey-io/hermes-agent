@@ -12,6 +12,8 @@ from pathlib import Path
 import tempfile
 from typing import Any
 
+import fcntl
+
 from markdown import markdown as render_markdown_html
 
 from hermes_cli.runbook_schema import (
@@ -86,6 +88,14 @@ def search_runbooks(query: str, *, root: Path | None = None) -> list[RunbookReco
     return result
 
 
+def get_runbook(slug: str, *, root: Path | None = None) -> RunbookRecord | None:
+    """Return the canonical record for *slug*, or ``None`` when it is absent."""
+    path = runbook_path(slug, root=root)
+    if not path.exists():
+        return None
+    return _record_from(path, read_runbook(path))
+
+
 def save_runbook(
     metadata: dict[str, Any],
     body: str,
@@ -109,6 +119,64 @@ def save_runbook(
     _atomic_text_write(path, text)
     _write_index_sidecar(path, parsed, approved_by=approved_by)
     return _record_from(path, parsed)
+
+
+def save_runbook_markdown(
+    markdown: str,
+    *,
+    root: Path | None = None,
+    approved_by: str | None = None,
+) -> RunbookRecord:
+    """Activate already-validated Markdown without changing its content hash.
+
+    Reviewed proposals bind approval to the exact candidate bytes.  Unlike
+    :func:`save_runbook`, this preserves those bytes rather than rendering the
+    parsed frontmatter again, so the canonical source hash remains the exact
+    reviewed proposal SHA-256.
+    """
+    if not approved_by:
+        raise PermissionError("active runbook saves require an approver")
+    parsed = split_frontmatter(markdown)
+    path = runbook_path(parsed.metadata["slug"], root=root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        _snapshot_revision(path, approved_by=approved_by)
+    _atomic_text_write(path, markdown)
+    _write_index_sidecar(path, parsed, approved_by=approved_by)
+    return _record_from(path, parsed)
+
+
+def activate_runbook_bytes(
+    markdown: bytes,
+    *,
+    expected_revision: str,
+    approved_by: str,
+    root: Path | None = None,
+) -> RunbookRecord:
+    """CAS-activate exact reviewed bytes under a per-runbook advisory lock."""
+    try:
+        text = markdown.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise PermissionError("reviewed proposal is not UTF-8") from exc
+    parsed = split_frontmatter(text)
+    path = runbook_path(parsed.metadata["slug"], root=root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.parent.is_symlink():
+        raise PermissionError("runbook directory must not be a symlink")
+    with (path.parent / ".activation.lock").open("a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            if not path.exists() or path.is_symlink():
+                raise PermissionError("canonical runbook is unavailable or unsafe")
+            current = _record_from(path, read_runbook(path))
+            if current.revision != expected_revision:
+                raise PermissionError("active runbook revision does not match the approved revision")
+            _snapshot_revision(path, approved_by=approved_by)
+            _atomic_bytes_write(path, markdown)
+            _write_index_sidecar(path, parsed, approved_by=approved_by)
+            return _record_from(path, parsed)
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def propose_edit(
@@ -192,7 +260,7 @@ def rollback_revision(
 
 def _record_from(path: Path, parsed: ParsedRunbook) -> RunbookRecord:
     metadata = parsed.metadata
-    source_hash = _sha256_text(path.read_text(encoding="utf-8")) if path.exists() else ""
+    source_hash = hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else ""
     return RunbookRecord(
         id=metadata["id"],
         slug=metadata["slug"],
@@ -226,12 +294,12 @@ def _snapshot_revision(path: Path, *, approved_by: str) -> Path:
 
 
 def _write_index_sidecar(path: Path, parsed: ParsedRunbook, *, approved_by: str) -> None:
-    text = path.read_text(encoding="utf-8")
+    source_hash = hashlib.sha256(path.read_bytes()).hexdigest()
     atomic_json_write(
         path.parent / ".index.json",
         {
             "metadata": parsed.metadata,
-            "source_hash": _sha256_text(text),
+            "source_hash": source_hash,
             "updated_at": _timestamp(),
             "approved_by": approved_by,
         },
@@ -239,13 +307,17 @@ def _write_index_sidecar(path: Path, parsed: ParsedRunbook, *, approved_by: str)
 
 
 def _atomic_text_write(path: Path, text: str) -> None:
+    _atomic_bytes_write(path, text.encode("utf-8"))
+
+
+def _atomic_bytes_write(path: Path, value: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(
         dir=str(path.parent), prefix=f".{path.stem}_", suffix=".tmp"
     )
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(text)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(value)
             handle.flush()
             os.fsync(handle.fileno())
         atomic_replace(tmp, path)

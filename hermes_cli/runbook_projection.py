@@ -95,3 +95,141 @@ def project_runbook(record: runbook_store.RunbookRecord) -> dict[str, Any]:
         result = registry.get_definition(conn, definition.id).to_dict()
         result["steps"] = [step.to_dict() for step in registry.list_steps(conn, definition.id)]
         return result
+
+
+def snapshot_projection(conn, *, workflow_id: str, slug: str) -> dict[str, Any]:
+    """Capture just one workflow projection for guarded compensation."""
+    row = conn.execute(
+        "SELECT * FROM workflow_definitions WHERE id = ? OR slug = ? ORDER BY id = ? DESC LIMIT 1",
+        (workflow_id, slug, workflow_id),
+    ).fetchone()
+    if row is None:
+        return {"definition": None, "steps": [], "schedules": []}
+    definition = dict(row)
+    resolved_id = str(definition["id"])
+    return {
+        "definition": definition,
+        "steps": [
+            dict(item)
+            for item in conn.execute(
+                "SELECT * FROM workflow_steps WHERE workflow_id = ? ORDER BY position", (resolved_id,)
+            )
+        ],
+        "schedules": [
+            dict(item)
+            for item in conn.execute(
+                "SELECT * FROM workflow_schedules WHERE workflow_id = ?", (resolved_id,)
+            )
+        ],
+    }
+
+
+def project_runbook_transaction(
+    conn, record: runbook_store.RunbookRecord, metadata: dict[str, Any]
+) -> dict[str, Any]:
+    """Project a canonical record using the caller's already-open transaction.
+
+    This deliberately emits no incidental registry events: the enclosing
+    activation records exactly one database-enforced terminal event.
+    """
+    runtime = metadata["runtime"]
+    timeout = metadata.get("timeout")
+    retry = metadata.get("retry")
+    dedupe = metadata.get("deduplication")
+    values = {
+        "id": metadata["id"],
+        "slug": metadata["slug"],
+        "name": metadata["title"],
+        "description": metadata["purpose"],
+        "owner_profile": metadata["owner_profile"],
+        "status": metadata["status"],
+        "runtime_kind": runtime["kind"],
+        "runtime_ref": runtime.get("ref"),
+        "source_path": record.path,
+        "source_hash": record.source_hash,
+        "source_revision": record.revision,
+        "kanban_board": None,
+        "repair_task_id": None,
+        "dedupe_strategy": dedupe.get("strategy") if isinstance(dedupe, dict) else None,
+        "timeout_seconds": timeout.get("seconds") if isinstance(timeout, dict) else None,
+        "max_attempts": retry.get("max_attempts") if isinstance(retry, dict) else None,
+    }
+    registry._validate_definition_fields(values)
+    row = conn.execute("SELECT * FROM workflow_definitions WHERE id = ?", (values["id"],)).fetchone()
+    if row is None:
+        row = conn.execute("SELECT * FROM workflow_definitions WHERE slug = ?", (values["slug"],)).fetchone()
+    now = registry._now()
+    if row is None:
+        columns = [*values, "version", "created_at", "updated_at", "retired_at"]
+        inserted = {**values, "version": 1, "created_at": now, "updated_at": now, "retired_at": None}
+        conn.execute(
+            f"INSERT INTO workflow_definitions({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+            [inserted[column] for column in columns],
+        )
+        workflow_id = str(values["id"])
+    else:
+        existing = dict(row)
+        workflow_id = str(existing["id"])
+        if workflow_id != values["id"]:
+            raise WorkflowConflictError("workflow slug is already bound to a different id")
+        changes = {key: value for key, value in values.items() if key != "id" and existing[key] != value}
+        if changes:
+            assignments = [f"{key} = ?" for key in changes]
+            conn.execute(
+                f"UPDATE workflow_definitions SET {', '.join(assignments)}, updated_at = ?, version = version + 1 WHERE id = ?",
+                [*changes.values(), now, workflow_id],
+            )
+    conn.execute("DELETE FROM workflow_steps WHERE workflow_id = ?", (workflow_id,))
+    for step in _step_records(metadata):
+        conn.execute(
+            """
+            INSERT INTO workflow_steps(
+                id, workflow_id, step_key, position, name, description,
+                executor_profile, runtime_kind, runtime_ref, input_contract,
+                output_contract, approval_policy, timeout_seconds, max_attempts
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                registry._new_id("step"), workflow_id, step["step_key"], step["position"],
+                step["name"], step["description"], step["executor_profile"], step["runtime_kind"],
+                step["runtime_ref"], registry._json_dumps(step["input_contract"]),
+                registry._json_dumps(step["output_contract"]), step["approval_policy"],
+                step["timeout_seconds"], step["max_attempts"],
+            ),
+        )
+    # This is a registry-only schedule projection.  It never calls Cron.
+    conn.execute("DELETE FROM workflow_schedules WHERE workflow_id = ?", (workflow_id,))
+    for schedule in metadata.get("schedules", []):
+        if isinstance(schedule, dict) and schedule.get("cron_job_id"):
+            conn.execute(
+                "INSERT INTO workflow_schedules(workflow_id, profile, cron_job_id, enabled, last_verified_at) VALUES (?, ?, ?, ?, NULL)",
+                (workflow_id, str(schedule.get("profile") or metadata["owner_profile"]),
+                 str(schedule["cron_job_id"]), int(bool(schedule.get("enabled", True)))),
+            )
+    definition = registry.get_definition(conn, workflow_id).to_dict()
+    definition["steps"] = [step.to_dict() for step in registry.list_steps(conn, workflow_id)]
+    return definition
+
+
+def restore_projection_transaction(
+    conn, snapshot: dict[str, Any], *, candidate_workflow_id: str
+) -> None:
+    """Restore a snapshot captured by :func:`snapshot_projection` in a transaction."""
+    definition = snapshot["definition"]
+    if definition is None:
+        conn.execute("DELETE FROM workflow_definitions WHERE id = ?", (candidate_workflow_id,))
+        return
+    workflow_id = str(definition["id"])
+    conn.execute("DELETE FROM workflow_definitions WHERE id = ?", (workflow_id,))
+    columns = list(definition)
+    conn.execute(
+        f"INSERT INTO workflow_definitions({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+        [definition[column] for column in columns],
+    )
+    for table, rows in (("workflow_steps", snapshot["steps"]), ("workflow_schedules", snapshot["schedules"])):
+        for row in rows:
+            columns = list(row)
+            conn.execute(
+                f"INSERT INTO {table}({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+                [row[column] for column in columns],
+            )
