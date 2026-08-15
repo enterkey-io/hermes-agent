@@ -672,7 +672,10 @@ class BuzzAdapter(BasePlatformAdapter):
         args = ["messages", "send", "--channel", str(chat_id), "--content", "-"]
         reply_target = None
         if str(chat_id) not in self.no_thread_channels:
-            reply_target = reply_to or (metadata or {}).get("thread_id")
+            # Keep every reply at one thread level. The gateway's direct
+            # reply target can be the latest child message, while thread_id
+            # is the canonical root parsed from the inbound NIP-10 tags.
+            reply_target = (metadata or {}).get("thread_id") or reply_to
         if reply_target:
             args += ["--reply-to", str(reply_target)]
         code, out, err = await self._run_cli(args, input_text=content)
@@ -745,7 +748,9 @@ class BuzzAdapter(BasePlatformAdapter):
                 "--file", str(local),
                 "--content", "-",
             ]
-            reply_target = None if str(chat_id) in self.no_thread_channels else reply_to
+            reply_target = None
+            if str(chat_id) not in self.no_thread_channels:
+                reply_target = (metadata or {}).get("thread_id") or reply_to
             if reply_target:
                 args += ["--reply-to", str(reply_target)]
             code, out, err = await self._run_cli(args, input_text=caption or "")

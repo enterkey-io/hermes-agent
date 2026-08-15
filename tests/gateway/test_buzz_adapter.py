@@ -483,6 +483,24 @@ class TestBuzzAdapterSend:
         args, _stdin = cli.calls[0]
         assert "--reply-to" not in args
 
+    @pytest.mark.asyncio
+    async def test_thread_reply_targets_root_instead_of_latest_child(self):
+        adapter = _make_adapter()
+        cli = _ScriptedCli()
+        cli.script("messages", "send", {"accepted": True, "event_id": "evt-thread"})
+        adapter._run_cli = cli
+
+        result = await adapter.send(
+            CHANNEL,
+            "same-level reply",
+            reply_to="latest-child",
+            metadata={"thread_id": "original-root"},
+        )
+
+        assert result.success is True
+        args, _stdin = cli.calls[0]
+        assert args[args.index("--reply-to") + 1] == "original-root"
+
 
     @pytest.mark.asyncio
     async def test_send_image_local_file_uses_file_flag(self, tmp_path):
@@ -496,6 +514,26 @@ class TestBuzzAdapterSend:
         assert result.success is True
         args, _stdin = cli.calls[0]
         assert args[args.index("--file") + 1] == str(img)
+
+    @pytest.mark.asyncio
+    async def test_send_image_targets_thread_root(self, tmp_path):
+        img = tmp_path / "shot.png"
+        img.write_bytes(b"\x89PNG fake")
+        adapter = _make_adapter()
+        cli = _ScriptedCli()
+        cli.script("messages", "send", {"accepted": True, "event_id": "evt-image"})
+        adapter._run_cli = cli
+
+        result = await adapter.send_image(
+            CHANNEL,
+            str(img),
+            reply_to="latest-child",
+            metadata={"thread_id": "original-root"},
+        )
+
+        assert result.success is True
+        args, _stdin = cli.calls[0]
+        assert args[args.index("--reply-to") + 1] == "original-root"
 
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────
