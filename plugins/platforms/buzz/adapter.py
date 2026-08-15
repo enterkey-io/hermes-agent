@@ -1019,10 +1019,12 @@ class BuzzAdapter(BasePlatformAdapter):
         ``dms list`` is only a best-effort source: on some hosted relays it
         returns ``[]`` even when DM conversations exist (#68871).  Those DMs
         DO surface in ``channels list`` as entries named "DM" with an empty
-        description, so that listing is scanned as a fallback.  Fallback
-        finds are watched as ``group`` and latch to ``dm`` via p-tag
-        detection (_is_direct_message_event) rather than trusting the name
-        alone to unlock the mention-free DM path.
+        description, so that listing is scanned as a fallback. A DM-shaped
+        entry with exactly two members, including this identity, is trusted
+        as a DM. This membership check is required because Buzz Mobile can
+        omit recipient p-tags from DM messages. Other fallback finds remain
+        ``group`` until p-tag detection (_is_direct_message_event) latches
+        them safely.
         """
         code, out, _err = await self._run_cli(["dms", "list"])
         if code == 0:
@@ -1047,10 +1049,15 @@ class BuzzAdapter(BasePlatformAdapter):
             self._channel_names.setdefault(ch_id, str(ch.get("name") or ch_id))
             if ch_id in self._channel_state or not self._may_reclassify_as_dm(ch_id):
                 continue
+            chat_type = "dm" if await self._is_two_party_dm(ch_id) else "group"
             if seed:
-                await self._seed_channel(ch_id, chat_type="group")
+                await self._seed_channel(ch_id, chat_type=chat_type)
             else:
-                self._channel_state[ch_id] = {"chat_type": "group", "last_ts": 0, "seen": OrderedDict()}
+                self._channel_state[ch_id] = {
+                    "chat_type": chat_type,
+                    "last_ts": 0,
+                    "seen": OrderedDict(),
+                }
 
     async def _poll_channel(self, channel_id: str) -> None:
         state = self._channel_state.get(channel_id)
@@ -1211,6 +1218,22 @@ class BuzzAdapter(BasePlatformAdapter):
         name = str(meta.get("name") or "").strip()
         description = str(meta.get("description") or "").strip()
         return name == "DM" and not description
+
+    async def _is_two_party_dm(self, channel_id: str) -> bool:
+        """Confirm a DM-shaped channel by its two-party membership."""
+        if not self._self_pubkey or not self._may_reclassify_as_dm(channel_id):
+            return False
+        code, out, _err = await self._run_cli(
+            ["channels", "members", "--channel", channel_id]
+        )
+        if code != 0:
+            return False
+        pubkeys = {
+            str(member.get("pubkey") or "").lower()
+            for member in _parse_json_list(out)
+            if member.get("pubkey")
+        }
+        return len(pubkeys) == 2 and self._self_pubkey in pubkeys
 
     def _is_direct_message_event(self, channel_id: str, event: dict) -> bool:
         """True when ``event`` is shaped like a direct message to us: a chat

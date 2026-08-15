@@ -400,10 +400,8 @@ class TestDmClassification:
 
 
     @pytest.mark.asyncio
-    async def test_dm_shaped_channel_discovered_when_dms_list_empty(self):
-        """Fallback discovery: with `dms list` broken (returns []), a
-        DM-shaped `channels list` entry gets watched; real channels not
-        already watched are left alone."""
+    async def test_two_party_dm_discovered_when_dms_list_empty(self):
+        """Membership confirms a DM even when dms list and p-tags are broken."""
         a = _make_adapter()
         cli = _ScriptedCli()
         cli.script("dms", "list", [])
@@ -412,13 +410,38 @@ class TestDmClassification:
             {"channel_id": CHANNEL, "name": "general",
              "description": "General conversation and community updates.", "created_at": 2},
         ])
+        cli.script("channels", "members", [
+            {"pubkey": SELF_PUBKEY, "role": "member"},
+            {"pubkey": OTHER_PUBKEY, "role": "member"},
+        ])
         a._run_cli = cli
         await a._discover_dms(seed=False)
-        # Watched as group; the p-tag latch flips it on the first real DM.
-        assert a._channel_state[DM_CHANNEL]["chat_type"] == "group"
+        assert a._channel_state[DM_CHANNEL]["chat_type"] == "dm"
         assert a._may_reclassify_as_dm(DM_CHANNEL) is True
         assert CHANNEL not in a._channel_state
         assert a._may_reclassify_as_dm(CHANNEL) is False
+
+        a._dispatched = []
+
+        async def capture(**kwargs):
+            a._dispatched.append(kwargs)
+
+        a._dispatch_message = capture
+        a._message_handler = AsyncMock()
+        cli.responses.clear()
+        cli.script("messages", "get", [
+            _tagged_event(
+                "mobile-dm",
+                DM_CHANNEL,
+                content="hello?",
+                created_at=10,
+            ),
+        ])
+
+        await a._poll_channel(DM_CHANNEL)
+
+        assert [item["message_id"] for item in a._dispatched] == ["mobile-dm"]
+        assert a._dispatched[0]["chat_type"] == "dm"
 
 
 # ── Sending ───────────────────────────────────────────────────────────────
