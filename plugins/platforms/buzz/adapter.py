@@ -45,6 +45,7 @@ import logging
 import os
 import re
 import shutil
+import tempfile
 import time
 from collections import OrderedDict
 from datetime import datetime
@@ -772,6 +773,48 @@ class BuzzAdapter(BasePlatformAdapter):
         # Markdown renders in Buzz, so a URL arrives as a clickable image link.
         text = f"{caption}\n{image_url}" if caption else image_url
         return await self.send(chat_id, text, reply_to=reply_to, metadata=metadata)
+
+    async def send_image_file(
+        self,
+        chat_id: str,
+        image_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        """Sanitize and upload a local image through Buzz's media path."""
+        sanitized_path: Optional[Path] = None
+        try:
+            from PIL import Image, ImageOps
+
+            with Image.open(image_path) as source:
+                image = ImageOps.exif_transpose(source)
+                image.load()
+                if image.mode not in ("RGB", "RGBA"):
+                    mode = "RGBA" if "transparency" in image.info else "RGB"
+                    image = image.convert(mode)
+                with tempfile.NamedTemporaryFile(
+                    prefix="hermes-buzz-",
+                    suffix=".png",
+                    delete=False,
+                ) as temp_file:
+                    sanitized_path = Path(temp_file.name)
+                image.save(sanitized_path, format="PNG", optimize=True)
+            sanitized_path.chmod(0o600)
+            return await self.send_image(
+                chat_id,
+                str(sanitized_path),
+                caption=caption,
+                reply_to=reply_to,
+                metadata=metadata,
+            )
+        except Exception as exc:
+            logger.warning("Buzz: could not sanitize local image for upload: %s", exc)
+            return SendResult(success=False, error="Could not prepare image for Buzz upload")
+        finally:
+            if sanitized_path is not None:
+                sanitized_path.unlink(missing_ok=True)
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         chat_id = str(chat_id)

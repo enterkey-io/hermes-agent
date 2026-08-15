@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock
@@ -534,6 +535,44 @@ class TestBuzzAdapterSend:
         assert result.success is True
         args, _stdin = cli.calls[0]
         assert args[args.index("--reply-to") + 1] == "original-root"
+
+    @pytest.mark.asyncio
+    async def test_send_image_file_sanitizes_mismatched_source(self, tmp_path):
+        from PIL import Image
+        from gateway.platforms.base import SendResult
+
+        source = tmp_path / "actually-jpeg.png"
+        Image.new("RGB", (4, 3), (20, 40, 60)).save(source, format="JPEG")
+        adapter = _make_adapter()
+        captured = {}
+
+        async def capture(chat_id, image_url, **kwargs):
+            path = Path(image_url)
+            captured["chat_id"] = chat_id
+            captured["path"] = path
+            captured["bytes"] = path.read_bytes()
+            captured["kwargs"] = kwargs
+            return SendResult(success=True, message_id="image-event")
+
+        adapter.send_image = AsyncMock(side_effect=capture)
+
+        result = await adapter.send_image_file(
+            CHANNEL,
+            str(source),
+            caption="clean image",
+            reply_to="latest-child",
+            metadata={"thread_id": "original-root"},
+        )
+
+        assert result.success is True
+        assert captured["chat_id"] == CHANNEL
+        assert captured["bytes"].startswith(b"\x89PNG\r\n\x1a\n")
+        assert captured["kwargs"] == {
+            "caption": "clean image",
+            "reply_to": "latest-child",
+            "metadata": {"thread_id": "original-root"},
+        }
+        assert not captured["path"].exists()
 
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────
