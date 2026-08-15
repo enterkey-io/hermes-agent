@@ -601,6 +601,8 @@ class TestBuzzPluginRegistration:
         assert callable(kwargs["standalone_sender_fn"])
         assert callable(kwargs["env_enablement_fn"])
         assert set(kwargs["required_env"]) == {"BUZZ_RELAY_URL", "BUZZ_PRIVATE_KEY"}
+        assert "*italic* and **bold**" in kwargs["platform_hint"]
+        assert "rather than underscores" in kwargs["platform_hint"]
 
 
 class TestStandaloneSend:

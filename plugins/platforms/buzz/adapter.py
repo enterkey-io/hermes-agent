@@ -1627,6 +1627,8 @@ def register(ctx):
             "You are collaborating in a Buzz workspace (Block's Nostr-based "
             "human+agent platform). Markdown IS supported. Users address you "
             "by @-mentioning your name or npub in channels; direct messages "
-            "reach you without a mention. Keep responses conversational."
+            "reach you without a mention. For emphasis, use asterisks "
+            "(*italic* and **bold**) rather than underscores so formatting "
+            "renders consistently in Buzz Mobile. Keep responses conversational."
         ),
     )
