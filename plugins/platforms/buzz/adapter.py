@@ -101,6 +101,7 @@ _DM_DISCOVERY_EVERY = 5
 _DEFAULT_POLL_INTERVAL = 4.0
 _MIN_POLL_INTERVAL = 1.0
 _CLI_TIMEOUT = 30.0
+_PRESENCE_HEARTBEAT_INTERVAL = 60.0
 
 # WebSocket transport (NIP-42 authenticated Nostr subscription).
 # kind 44100 is Buzz's channel-membership event — used for live DM discovery.
@@ -435,6 +436,8 @@ class BuzzAdapter(BasePlatformAdapter):
         # Runtime state
         self._poll_task: Optional[asyncio.Task] = None
         self._ws_task: Optional[asyncio.Task] = None
+        self._presence_task: Optional[asyncio.Task] = None
+        self._presence_announced = False
         self._ws_ready: Optional[asyncio.Event] = None
         self._ws_active = False  # True while the WS loop owns inbound delivery
         self._membership_since = 0
@@ -568,6 +571,8 @@ class BuzzAdapter(BasePlatformAdapter):
                 return False
         if transport_used == "poll":
             self._poll_task = asyncio.create_task(self._poll_loop())
+        self._presence_announced = await self._publish_presence("online")
+        self._presence_task = asyncio.create_task(self._presence_loop())
         self._mark_connected()
         logger.info(
             "Buzz: connected to %s as %s, watching %d channel(s) via %s%s",
@@ -582,6 +587,16 @@ class BuzzAdapter(BasePlatformAdapter):
     async def disconnect(self) -> None:
         """Stop the inbound transport and drop runtime state."""
         self._mark_disconnected()
+        if self._presence_task and not self._presence_task.done():
+            self._presence_task.cancel()
+            try:
+                await self._presence_task
+            except asyncio.CancelledError:
+                pass
+        self._presence_task = None
+        if self._presence_announced:
+            await self._publish_presence("offline")
+            self._presence_announced = False
         lock_key = getattr(self, "_lock_key", None)
         if lock_key:
             try:
@@ -608,6 +623,26 @@ class BuzzAdapter(BasePlatformAdapter):
         self._poll_task = None
         self._channel_state = {}
         self._poll_count = 0
+
+    async def _publish_presence(self, status: str) -> bool:
+        """Publish one best-effort Buzz presence update."""
+        code, _out, err = await self._run_cli(
+            ["users", "set-presence", "--status", status]
+        )
+        if code == 0:
+            return True
+        logger.warning(
+            "Buzz: failed to publish %s presence: %s",
+            status,
+            _cli_error_message(err, code),
+        )
+        return False
+
+    async def _presence_loop(self) -> None:
+        """Refresh online presence before the relay's three-minute TTL expires."""
+        while True:
+            await asyncio.sleep(_PRESENCE_HEARTBEAT_INTERVAL)
+            self._presence_announced = await self._publish_presence("online")
 
     # ── Sending ───────────────────────────────────────────────────────────
 

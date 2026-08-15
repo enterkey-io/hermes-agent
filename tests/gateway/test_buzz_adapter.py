@@ -475,6 +475,51 @@ class TestBuzzAdapterSend:
 
 class TestBuzzAdapterLifecycle:
 
+    @pytest.mark.asyncio
+    async def test_presence_loop_refreshes_online_status(self, monkeypatch):
+        adapter = _make_adapter()
+        published = []
+        adapter._publish_presence = AsyncMock(
+            side_effect=lambda status: published.append(status) or True
+        )
+
+        async def stop_after_first_interval(_seconds):
+            if published:
+                raise asyncio.CancelledError
+
+        monkeypatch.setattr(_buzz_mod.asyncio, "sleep", stop_after_first_interval)
+
+        with pytest.raises(asyncio.CancelledError):
+            await adapter._presence_loop()
+
+        assert published == ["online"]
+
+    @pytest.mark.asyncio
+    async def test_disconnect_cancels_presence_and_publishes_offline(self):
+        adapter = _make_adapter()
+        blocker = asyncio.Event()
+        adapter._presence_task = asyncio.create_task(blocker.wait())
+        adapter._presence_announced = True
+        adapter._publish_presence = AsyncMock(return_value=True)
+
+        await adapter.disconnect()
+
+        assert adapter._presence_task is None
+        assert adapter._presence_announced is False
+        adapter._publish_presence.assert_awaited_once_with("offline")
+
+    @pytest.mark.asyncio
+    async def test_presence_publish_uses_buzz_cli(self):
+        adapter = _make_adapter()
+        cli = _ScriptedCli()
+        cli.script("users", "set-presence", {"accepted": True})
+        adapter._run_cli = cli
+
+        assert await adapter._publish_presence("online") is True
+        assert cli.calls == [
+            (["users", "set-presence", "--status", "online"], None)
+        ]
+
 
     @pytest.mark.asyncio
     async def test_disconnect_releases_scoped_lock(self, monkeypatch):
