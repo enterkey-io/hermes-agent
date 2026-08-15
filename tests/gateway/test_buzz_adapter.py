@@ -43,6 +43,7 @@ _ENV_VARS = (
     "BUZZ_ALLOWED_USERS",
     "BUZZ_ALLOW_ALL_USERS",
     "BUZZ_POLL_INTERVAL",
+    "BUZZ_PRESENCE_INTERVAL",
     "BUZZ_CLI_PATH",
     "BUZZ_CREDENTIALS_FILE",
 )
@@ -128,6 +129,7 @@ class TestBuzzAdapterInit:
                 "relay_url": "https://cfg.relay",
                 "channels": ["ccc"],
                 "poll_interval": 2,
+                "presence_interval": 10,
                 "home_channel": "ccc",
                 "no_thread_channels": ["flat-room"],
             },
@@ -136,14 +138,17 @@ class TestBuzzAdapterInit:
         assert adapter.relay_url == "https://cfg.relay"
         assert adapter.channels == ["ccc"]
         assert adapter.poll_interval == 2.0
+        assert adapter.presence_interval == 10.0
         assert adapter.home_channel == "ccc"
         assert adapter.no_thread_channels == {"flat-room"}
 
     def test_env_overrides_config(self, monkeypatch):
         monkeypatch.setenv("BUZZ_RELAY_URL", "https://env.relay")
+        monkeypatch.setenv("BUZZ_PRESENCE_INTERVAL", "7")
         from gateway.config import PlatformConfig
         adapter = BuzzAdapter(PlatformConfig(enabled=True, extra={"relay_url": "https://cfg.relay"}))
         assert adapter.relay_url == "https://env.relay"
+        assert adapter.presence_interval == 7.0
 
 
 # ── CLI error contract ────────────────────────────────────────────────────

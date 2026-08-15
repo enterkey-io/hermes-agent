@@ -23,12 +23,14 @@ Configuration in config.yaml::
             home_channel: ccc2bc1a-7a82-5a8f-8c4e-57a070cbe7cd
             no_thread_channels: []     # channel UUIDs where replies stay top-level
             poll_interval: 4           # seconds between poll sweeps
+            presence_interval: 60      # seconds between online presence updates
             cli_path: ""               # path to the buzz binary (default: PATH, then ~/bin/buzz)
             credentials_file: ""       # JSON file holding the nsec (fallback for BUZZ_PRIVATE_KEY)
             allowed_users: []          # empty = allow all; entries are hex pubkeys or npubs
 
 Or via environment variables (overrides config.yaml):
     BUZZ_RELAY_URL, BUZZ_CHANNELS, BUZZ_HOME_CHANNEL, BUZZ_POLL_INTERVAL,
+    BUZZ_PRESENCE_INTERVAL,
     BUZZ_CLI_PATH, BUZZ_CREDENTIALS_FILE, BUZZ_ALLOWED_USERS,
     BUZZ_ALLOW_ALL_USERS
 
@@ -102,6 +104,7 @@ _DEFAULT_POLL_INTERVAL = 4.0
 _MIN_POLL_INTERVAL = 1.0
 _CLI_TIMEOUT = 30.0
 _PRESENCE_HEARTBEAT_INTERVAL = 60.0
+_MIN_PRESENCE_HEARTBEAT_INTERVAL = 5.0
 
 # WebSocket transport (NIP-42 authenticated Nostr subscription).
 # kind 44100 is Buzz's channel-membership event — used for live DM discovery.
@@ -393,6 +396,17 @@ class BuzzAdapter(BasePlatformAdapter):
             interval = _DEFAULT_POLL_INTERVAL
         self.poll_interval = max(_MIN_POLL_INTERVAL, interval)
 
+        try:
+            presence_interval = float(
+                os.getenv("BUZZ_PRESENCE_INTERVAL")
+                or extra.get("presence_interval", _PRESENCE_HEARTBEAT_INTERVAL)
+            )
+        except (TypeError, ValueError):
+            presence_interval = _PRESENCE_HEARTBEAT_INTERVAL
+        self.presence_interval = max(
+            _MIN_PRESENCE_HEARTBEAT_INTERVAL, presence_interval
+        )
+
         # Whether channel messages must @mention the agent to get a response.
         # Defaults to True (respond only when addressed). Set False to make the
         # agent respond to every message in a watched channel. DMs always
@@ -641,7 +655,7 @@ class BuzzAdapter(BasePlatformAdapter):
     async def _presence_loop(self) -> None:
         """Refresh online presence before the relay's three-minute TTL expires."""
         while True:
-            await asyncio.sleep(_PRESENCE_HEARTBEAT_INTERVAL)
+            await asyncio.sleep(self.presence_interval)
             self._presence_announced = await self._publish_presence("online")
 
     # ── Sending ───────────────────────────────────────────────────────────
