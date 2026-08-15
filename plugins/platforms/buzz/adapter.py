@@ -661,6 +661,19 @@ class BuzzAdapter(BasePlatformAdapter):
 
     # ── Sending ───────────────────────────────────────────────────────────
 
+    def _reply_target(
+        self,
+        chat_id: str,
+        reply_to: Optional[str],
+        metadata: Optional[Dict[str, Any]],
+    ) -> Optional[str]:
+        """Return the canonical room thread root; DMs always stay flat."""
+        channel_id = str(chat_id)
+        state = self._channel_state.get(channel_id) or {}
+        if channel_id in self.no_thread_channels or state.get("chat_type") == "dm":
+            return None
+        return (metadata or {}).get("thread_id") or reply_to
+
     async def send(
         self,
         chat_id: str,
@@ -671,12 +684,10 @@ class BuzzAdapter(BasePlatformAdapter):
         if not content:
             return SendResult(success=False, error="Empty message")
         args = ["messages", "send", "--channel", str(chat_id), "--content", "-"]
-        reply_target = None
-        if str(chat_id) not in self.no_thread_channels:
-            # Keep every reply at one thread level. The gateway's direct
-            # reply target can be the latest child message, while thread_id
-            # is the canonical root parsed from the inbound NIP-10 tags.
-            reply_target = (metadata or {}).get("thread_id") or reply_to
+        # Keep room replies at one thread level. The gateway's direct reply
+        # target can be the latest child message, while thread_id is the
+        # canonical root parsed from the inbound NIP-10 tags. DMs stay flat.
+        reply_target = self._reply_target(chat_id, reply_to, metadata)
         if reply_target:
             args += ["--reply-to", str(reply_target)]
         code, out, err = await self._run_cli(args, input_text=content)
@@ -749,9 +760,7 @@ class BuzzAdapter(BasePlatformAdapter):
                 "--file", str(local),
                 "--content", "-",
             ]
-            reply_target = None
-            if str(chat_id) not in self.no_thread_channels:
-                reply_target = (metadata or {}).get("thread_id") or reply_to
+            reply_target = self._reply_target(chat_id, reply_to, metadata)
             if reply_target:
                 args += ["--reply-to", str(reply_target)]
             code, out, err = await self._run_cli(args, input_text=caption or "")

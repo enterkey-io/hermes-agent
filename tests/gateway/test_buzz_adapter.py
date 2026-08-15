@@ -502,6 +502,25 @@ class TestBuzzAdapterSend:
         args, _stdin = cli.calls[0]
         assert args[args.index("--reply-to") + 1] == "original-root"
 
+    @pytest.mark.asyncio
+    async def test_dm_reply_stays_top_level(self):
+        adapter = _make_adapter()
+        adapter._channel_state[DM_CHANNEL] = {"chat_type": "dm", "last_ts": 0, "seen": {}}
+        cli = _ScriptedCli()
+        cli.script("messages", "send", {"accepted": True, "event_id": "evt-dm"})
+        adapter._run_cli = cli
+
+        result = await adapter.send(
+            DM_CHANNEL,
+            "flat DM reply",
+            reply_to="latest-child",
+            metadata={"thread_id": "original-root"},
+        )
+
+        assert result.success is True
+        args, _stdin = cli.calls[0]
+        assert "--reply-to" not in args
+
 
     @pytest.mark.asyncio
     async def test_send_image_local_file_uses_file_flag(self, tmp_path):
@@ -535,6 +554,27 @@ class TestBuzzAdapterSend:
         assert result.success is True
         args, _stdin = cli.calls[0]
         assert args[args.index("--reply-to") + 1] == "original-root"
+
+    @pytest.mark.asyncio
+    async def test_send_image_in_dm_stays_top_level(self, tmp_path):
+        img = tmp_path / "shot.png"
+        img.write_bytes(b"\x89PNG fake")
+        adapter = _make_adapter()
+        adapter._channel_state[DM_CHANNEL] = {"chat_type": "dm", "last_ts": 0, "seen": {}}
+        cli = _ScriptedCli()
+        cli.script("messages", "send", {"accepted": True, "event_id": "evt-dm-image"})
+        adapter._run_cli = cli
+
+        result = await adapter.send_image(
+            DM_CHANNEL,
+            str(img),
+            reply_to="latest-child",
+            metadata={"thread_id": "original-root"},
+        )
+
+        assert result.success is True
+        args, _stdin = cli.calls[0]
+        assert "--reply-to" not in args
 
     @pytest.mark.asyncio
     async def test_send_image_file_sanitizes_mismatched_source(self, tmp_path):
