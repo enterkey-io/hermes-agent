@@ -54,6 +54,7 @@ def _clean_env(monkeypatch, tmp_path):
     for var in _ENV_VARS:
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(_buzz_mod, "_DEFAULT_CREDENTIALS_DIR", tmp_path / "no-creds")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
     yield
 
 
@@ -128,6 +129,7 @@ class TestBuzzAdapterInit:
                 "channels": ["ccc"],
                 "poll_interval": 2,
                 "home_channel": "ccc",
+                "no_thread_channels": ["flat-room"],
             },
         )
         adapter = BuzzAdapter(cfg)
@@ -135,6 +137,7 @@ class TestBuzzAdapterInit:
         assert adapter.channels == ["ccc"]
         assert adapter.poll_interval == 2.0
         assert adapter.home_channel == "ccc"
+        assert adapter.no_thread_channels == {"flat-room"}
 
     def test_env_overrides_config(self, monkeypatch):
         monkeypatch.setenv("BUZZ_RELAY_URL", "https://env.relay")
@@ -242,6 +245,38 @@ class TestMentionGating:
     async def test_name_mention_dispatched(self, adapter):
         await self._poll_with(adapter, _event("e1", content="hey @Chip can you help?", created_at=10))
         assert len(adapter._dispatched) == 1
+
+    @pytest.mark.asyncio
+    async def test_followup_in_participated_thread_needs_no_repeat_mention(self, adapter):
+        await self._poll_with(
+            adapter,
+            _event("root", content="@Chip can you help?", created_at=10),
+        )
+        await self._poll_with(
+            adapter,
+            _tagged_event(
+                "followup",
+                CHANNEL,
+                content="one more detail",
+                created_at=11,
+                reply_to="root",
+            ),
+        )
+        assert [d["message_id"] for d in adapter._dispatched] == ["root", "followup"]
+        assert adapter._dispatched[1]["thread_id"] == "root"
+
+    @pytest.mark.asyncio
+    async def test_unmentioned_reply_in_unknown_thread_is_ignored(self, adapter):
+        await self._poll_with(
+            adapter,
+            _tagged_event(
+                "followup",
+                CHANNEL,
+                content="not addressed to this agent",
+                reply_to="someone-elses-thread",
+            ),
+        )
+        assert adapter._dispatched == []
 
 
     @pytest.mark.asyncio
@@ -407,6 +442,19 @@ class TestBuzzAdapterSend:
         # Our own event id is marked seen for echo suppression
         assert "evt123" in adapter._channel_state[CHANNEL]["seen"]
 
+    @pytest.mark.asyncio
+    async def test_no_thread_channel_suppresses_reply_tag(self):
+        adapter = _make_adapter({"no_thread_channels": [CHANNEL]})
+        cli = _ScriptedCli()
+        cli.script("messages", "send", {"accepted": True, "event_id": "evt-flat"})
+        adapter._run_cli = cli
+
+        result = await adapter.send(CHANNEL, "top-level", reply_to="incoming-event")
+
+        assert result.success is True
+        args, _stdin = cli.calls[0]
+        assert "--reply-to" not in args
+
 
     @pytest.mark.asyncio
     async def test_send_image_local_file_uses_file_flag(self, tmp_path):
@@ -536,5 +584,3 @@ class TestStandaloneSend:
         assert captured["input_text"] == "cron says hi"
         # The private key must never be part of argv
         assert all("nsec1x" not in str(a) for a in captured["args"])
-
-

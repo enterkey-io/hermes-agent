@@ -21,6 +21,7 @@ Configuration in config.yaml::
             channels:                  # channel UUIDs to watch (empty = all joined)
               - ccc2bc1a-7a82-5a8f-8c4e-57a070cbe7cd
             home_channel: ccc2bc1a-7a82-5a8f-8c4e-57a070cbe7cd
+            no_thread_channels: []     # channel UUIDs where replies stay top-level
             poll_interval: 4           # seconds between poll sweeps
             cli_path: ""               # path to the buzz binary (default: PATH, then ~/bin/buzz)
             credentials_file: ""       # JSON file holding the nsec (fallback for BUZZ_PRIVATE_KEY)
@@ -81,6 +82,7 @@ from gateway.platforms.base import (
     MessageEvent,
     MessageType,
 )
+from gateway.platforms.helpers import ThreadParticipationTracker
 from gateway.config import Platform
 
 
@@ -375,6 +377,15 @@ class BuzzAdapter(BasePlatformAdapter):
 
         self.home_channel = (os.getenv("BUZZ_HOME_CHANNEL") or str(extra.get("home_channel", "") or "")).strip()
 
+        raw_no_thread_channels = extra.get("no_thread_channels", [])
+        if isinstance(raw_no_thread_channels, str):
+            raw_no_thread_channels = raw_no_thread_channels.split(",")
+        self.no_thread_channels: set[str] = {
+            channel.strip()
+            for channel in raw_no_thread_channels
+            if isinstance(channel, str) and channel.strip()
+        }
+
         try:
             interval = float(os.getenv("BUZZ_POLL_INTERVAL") or extra.get("poll_interval", _DEFAULT_POLL_INTERVAL))
         except (TypeError, ValueError):
@@ -436,6 +447,7 @@ class BuzzAdapter(BasePlatformAdapter):
         self._channel_meta: Dict[str, dict] = {}
         self._user_names: Dict[str, str] = {}
         self._poll_count = 0
+        self._threads = ThreadParticipationTracker("buzz")
 
     @property
     def name(self) -> str:
@@ -609,7 +621,9 @@ class BuzzAdapter(BasePlatformAdapter):
         if not content:
             return SendResult(success=False, error="Empty message")
         args = ["messages", "send", "--channel", str(chat_id), "--content", "-"]
-        reply_target = reply_to or (metadata or {}).get("thread_id")
+        reply_target = None
+        if str(chat_id) not in self.no_thread_channels:
+            reply_target = reply_to or (metadata or {}).get("thread_id")
         if reply_target:
             args += ["--reply-to", str(reply_target)]
         code, out, err = await self._run_cli(args, input_text=content)
@@ -628,6 +642,7 @@ class BuzzAdapter(BasePlatformAdapter):
             # Belt-and-braces echo suppression: the poll loop already skips
             # our own pubkey, but marking the id seen makes de-dupe explicit.
             self._mark_seen(str(chat_id), str(event_id))
+            self._threads.mark(str(reply_target or event_id))
         return SendResult(
             success=bool(data.get("accepted", True)),
             message_id=str(event_id) if event_id else None,
@@ -681,8 +696,9 @@ class BuzzAdapter(BasePlatformAdapter):
                 "--file", str(local),
                 "--content", "-",
             ]
-            if reply_to:
-                args += ["--reply-to", str(reply_to)]
+            reply_target = None if str(chat_id) in self.no_thread_channels else reply_to
+            if reply_target:
+                args += ["--reply-to", str(reply_target)]
             code, out, err = await self._run_cli(args, input_text=caption or "")
             if code != 0:
                 return SendResult(success=False, error=_cli_error_message(err, code), retryable=code == 2)
@@ -693,6 +709,7 @@ class BuzzAdapter(BasePlatformAdapter):
             event_id = data.get("event_id")
             if event_id:
                 self._mark_seen(str(chat_id), str(event_id))
+                self._threads.mark(str(reply_target or event_id))
             return SendResult(
                 success=bool(data.get("accepted", True)),
                 message_id=str(event_id) if event_id else None,
@@ -1021,8 +1038,14 @@ class BuzzAdapter(BasePlatformAdapter):
         if not pubkey or not isinstance(content, str) or not content.strip():
             return
 
+        thread_root = self._thread_root(event)
+
         # Suppress self-echo: never dispatch our own messages back to the agent.
         if pubkey == self._self_pubkey:
+            # A top-level message authored by the agent can become a thread
+            # root later; remember it so a human reply does not need to repeat
+            # an @mention. Thread replies keep the existing root participated.
+            self._threads.mark(thread_root or event_id)
             return
 
         # Reclassify a leaked DM before gating so its first un-mentioned
@@ -1033,7 +1056,13 @@ class BuzzAdapter(BasePlatformAdapter):
         # In shared channels, respond only when addressed — unless
         # require_mention is disabled, in which case respond to every message.
         # DMs always dispatch.
-        if not is_dm and self.require_mention and not self._is_mentioned(content):
+        in_participated_thread = bool(thread_root and thread_root in self._threads)
+        if (
+            not is_dm
+            and self.require_mention
+            and not self._is_mentioned(content)
+            and not in_participated_thread
+        ):
             return
 
         # Adapter-level allow-list (the gateway applies BUZZ_ALLOWED_USERS /
@@ -1041,6 +1070,12 @@ class BuzzAdapter(BasePlatformAdapter):
         if self._allowed_pubkeys and pubkey not in self._allowed_pubkeys:
             logger.debug("Buzz: ignoring message from unauthorized pubkey %s…", pubkey[:8])
             return
+
+        if not is_dm:
+            # A mention in an existing thread opts the agent into that thread.
+            # A top-level mention opens a new thread rooted at this event when
+            # Hermes sends its reply with --reply-to.
+            self._threads.mark(thread_root or event_id)
 
         # Strip a leading @mention so slash commands (@Chip /whoami ->
         # /whoami) and clean prompts are recognized. DM messages often still
@@ -1056,7 +1091,36 @@ class BuzzAdapter(BasePlatformAdapter):
             user_name=await self._resolve_user_name(pubkey),
             message_id=event_id,
             created_at=created_at,
+            thread_id=thread_root if not is_dm else None,
+            prospective_thread_id=(
+                event_id
+                if not is_dm
+                and not thread_root
+                and channel_id not in self.no_thread_channels
+                else None
+            ),
         )
+
+    @staticmethod
+    def _thread_root(event: dict) -> Optional[str]:
+        """Return the NIP-10 thread root/reply target carried by an event."""
+        root = None
+        reply = None
+        tags = event.get("tags")
+        if not isinstance(tags, list):
+            return None
+        for tag in tags:
+            if not isinstance(tag, (list, tuple)) or len(tag) < 2 or tag[0] != "e":
+                continue
+            event_id = str(tag[1]).strip()
+            if not event_id:
+                continue
+            marker = str(tag[3]).lower() if len(tag) > 3 else ""
+            if marker == "root":
+                root = event_id
+            elif marker == "reply":
+                reply = event_id
+        return root or reply
 
     # ── DM classification (issue #68871) ──────────────────────────────────
     #
@@ -1219,6 +1283,8 @@ class BuzzAdapter(BasePlatformAdapter):
         user_name: str,
         message_id: str,
         created_at: int,
+        thread_id: Optional[str] = None,
+        prospective_thread_id: Optional[str] = None,
     ) -> None:
         """Build a MessageEvent and hand it to the base class handler."""
         if not self._message_handler:
@@ -1230,13 +1296,16 @@ class BuzzAdapter(BasePlatformAdapter):
             chat_type=chat_type,
             user_id=user_id,
             user_name=user_name,
+            thread_id=thread_id,
         )
+        source.prospective_thread_id = prospective_thread_id
 
         event = MessageEvent(
             text=text,
             message_type=MessageType.TEXT,
             source=source,
             message_id=message_id,
+            reply_to_message_id=thread_id,
             timestamp=datetime.fromtimestamp(created_at) if created_at else datetime.now(),
         )
 
