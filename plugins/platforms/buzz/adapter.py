@@ -1104,9 +1104,21 @@ class BuzzAdapter(BasePlatformAdapter):
                 continue
             self._channel_meta[ch_id] = ch
             self._channel_names.setdefault(ch_id, str(ch.get("name") or ch_id))
-            if ch_id in self._channel_state or not self._may_reclassify_as_dm(ch_id):
+            if not self._may_reclassify_as_dm(ch_id):
+                continue
+            existing = self._channel_state.get(ch_id)
+            if existing is not None and existing.get("chat_type") == "dm":
                 continue
             chat_type = "dm" if await self._is_two_party_dm(ch_id) else "group"
+            if existing is not None:
+                if chat_type == "dm":
+                    existing["chat_type"] = "dm"
+                    logger.info(
+                        "Buzz: configured conversation %s reclassified as DM "
+                        "(two-party membership)",
+                        ch_id,
+                    )
+                continue
             if seed:
                 await self._seed_channel(ch_id, chat_type=chat_type)
             else:

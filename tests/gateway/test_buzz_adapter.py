@@ -403,7 +403,12 @@ class TestDmClassification:
     @pytest.mark.asyncio
     async def test_two_party_dm_discovered_when_dms_list_empty(self):
         """Membership confirms a DM even when dms list and p-tags are broken."""
-        a = _make_adapter()
+        a = _make_adapter({"channels": [DM_CHANNEL]})
+        a._channel_state[DM_CHANNEL] = {
+            "chat_type": "group",
+            "last_ts": 5,
+            "seen": {"seeded-event": None},
+        }
         cli = _ScriptedCli()
         cli.script("dms", "list", [])
         cli.script("channels", "list", [
@@ -418,6 +423,8 @@ class TestDmClassification:
         a._run_cli = cli
         await a._discover_dms(seed=False)
         assert a._channel_state[DM_CHANNEL]["chat_type"] == "dm"
+        assert a._channel_state[DM_CHANNEL]["last_ts"] == 5
+        assert "seeded-event" in a._channel_state[DM_CHANNEL]["seen"]
         assert a._may_reclassify_as_dm(DM_CHANNEL) is True
         assert CHANNEL not in a._channel_state
         assert a._may_reclassify_as_dm(CHANNEL) is False
