@@ -99,14 +99,33 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          pr="$(gh pr list --state open --head "$SYNC_BRANCH" --base main --json number --jq '.[0].number // empty')"
-          if [ -z "$pr" ]; then
+          pr=""
+          for attempt in 1 2 3 4 5 6; do
+            pr="$(gh pr list --state open --head "$SYNC_BRANCH" --base main --json number --jq '.[0].number // empty')"
+            if [ -n "$pr" ]; then
+              break
+            fi
+            # A just-pushed branch can take a few seconds to become visible to
+            # GitHub's GraphQL createPullRequest mutation. Retry that bounded
+            # consistency window instead of failing the integration run.
             gh pr create \
               --base main \
               --head "$SYNC_BRANCH" \
               --title "chore: integrate current Nous main" \
-              --body "Automated upstream integration prepared by $RUN_URL. This PR promotes only after the complete Hermes CI gate passes."
+              --body "Automated upstream integration prepared by $RUN_URL. This PR promotes only after the complete Hermes CI gate passes." \
+              && true
             pr="$(gh pr list --state open --head "$SYNC_BRANCH" --base main --json number --jq '.[0].number // empty')"
+            if [ -n "$pr" ]; then
+              break
+            fi
+            sleep 5
+          done
+          if [ -z "$pr" ]; then
+            pr="$(gh pr list --state open --head "$SYNC_BRANCH" --base main --json number --jq '.[0].number // empty')"
+          fi
+          if [ -z "$pr" ]; then
+            echo "::error::Integration branch was pushed but no pull request became visible"
+            exit 1
           fi
           gh pr edit "$pr" --add-label automated-upstream-sync
           gh pr merge "$pr" --auto --merge
