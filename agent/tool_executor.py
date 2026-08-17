@@ -609,9 +609,9 @@ def _run_agent_tool_execution_middleware(
             def _resolve_pre_tool_call():
                 nonlocal final_args
                 try:
-                    from hermes_cli.plugins import resolve_pre_tool_call
+                    from hermes_cli.plugins import _dispatch_pre_tool_call_hooks
 
-                    resolution = resolve_pre_tool_call(
+                    resolution = _dispatch_pre_tool_call_hooks(
                         function_name,
                         final_args,
                         task_id=effective_task_id or "",
@@ -621,7 +621,19 @@ def _run_agent_tool_execution_middleware(
                         api_request_id=getattr(agent, "_current_api_request_id", "")
                         or "",
                         middleware_trace=list(state["middleware_trace"]),
+                        return_resolution=True,
                     )
+                    # Preserve the historical tuple contract for plugin/test
+                    # interceptors while production receives the structured
+                    # resolution carrying exact approval provenance.
+                    if isinstance(resolution, tuple):
+                        from hermes_cli.plugins import _PreToolCallResolution
+
+                        block_message, modified_args = resolution
+                        resolution = _PreToolCallResolution(
+                            block_message=block_message,
+                            modified_args=modified_args,
+                        )
                     if resolution.modified_args is not None:
                         final_args = resolution.modified_args
                         state["args"] = resolution.modified_args

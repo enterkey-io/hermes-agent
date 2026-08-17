@@ -6371,10 +6371,14 @@ def _dispatch_pre_tool_call_hooks(
     turn_id: str = "",
     api_request_id: str = "",
     middleware_trace: Optional[List[Dict[str, Any]]] = None,
-) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+    return_resolution: bool = False,
+) -> Union[
+    Tuple[Optional[str], Optional[Dict[str, Any]]],
+    _PreToolCallResolution,
+]:
     """Invoke ``pre_tool_call`` hooks once and process all response types.
 
-    Returns a ``(block_message, modified_args)`` tuple:
+    Returns a ``(block_message, modified_args)`` tuple by default:
     - ``block_message`` — the first block/approve directive's resolved message
       (or ``None`` when the call may proceed).  Shares the exact fail-closed
       approval-gate logic of :func:`resolve_pre_tool_block` via
@@ -6383,6 +6387,10 @@ def _dispatch_pre_tool_call_hooks(
     - ``modified_args`` — merged args from ``modify`` directives
       (or ``None`` when no hook requested modification).
 
+    ``return_resolution=True`` returns the structured resolution, including
+    one-time approval provenance, for the executor. This is additive so plugin
+    integrations that intercept the historical tuple helper keep working.
+
     This is the single invocation point for ``pre_tool_call`` hooks.
     Callers that only need block detection should keep using
     :func:`get_pre_tool_call_block_message` or
@@ -6390,6 +6398,18 @@ def _dispatch_pre_tool_call_hooks(
     Callers that also need input transformation should call this
     function and apply ``modified_args`` if not ``None``.
     """
+    if return_resolution:
+        return resolve_pre_tool_call(
+            tool_name,
+            args,
+            task_id=task_id,
+            session_id=session_id,
+            tool_call_id=tool_call_id,
+            turn_id=turn_id,
+            api_request_id=api_request_id,
+            middleware_trace=middleware_trace,
+        )
+
     details = _get_pre_tool_call_directive_details(
         tool_name, args, task_id=task_id, session_id=session_id,
         tool_call_id=tool_call_id, turn_id=turn_id,

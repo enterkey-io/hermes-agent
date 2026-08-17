@@ -25,7 +25,7 @@ import { Checkbox } from "@nous-research/ui/ui/components/checkbox";
 import { ConfirmDialog } from "@nous-research/ui/ui/components/confirm-dialog";
 import {
   Dialog, DialogClose, DialogContent, DialogDescription,
-  DialogFooter, DialogHeader, DialogTitle,
+  DialogFooter, DialogHeader, DialogTitle, DialogTrigger,
 } from "@nous-research/ui/ui/components/dialog";
 import { Toast } from "@nous-research/ui/ui/components/toast";
 import { useConfirmDelete } from "@nous-research/ui/hooks/use-confirm-delete";
@@ -36,16 +36,6 @@ import { Input } from "@nous-research/ui/ui/components/input";
 import { Label } from "@nous-research/ui/ui/components/label";
 import { Separator } from "@nous-research/ui/ui/components/separator";
 import { Tabs, TabsList, TabsTrigger } from "@nous-research/ui/ui/components/tabs";
-import {
-  Dialog,
-  DialogClose,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from "@nous-research/ui/ui/components/dialog";
 import { useI18n } from "@/i18n";
 import { registerSlot, PluginSlot } from "./slots";
 
@@ -189,13 +179,6 @@ export function exposePluginSDK() {
       Tabs,
       TabsList,
       TabsTrigger,
-      Dialog,
-      DialogClose,
-      DialogContent,
-      DialogDescription,
-      DialogFooter,
-      DialogHeader,
-      DialogTitle,
       DialogTrigger,
       Toast,
       PluginSlot,
