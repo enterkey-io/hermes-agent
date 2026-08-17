@@ -160,6 +160,8 @@ class TestProfileKeyIsolationWarning:
 
     def test_keyless_profile_block_warns_when_default_has_key(self, tmp_path, monkeypatch, caplog):
         import logging
+        from plugins.memory.honcho.client import HonchoProfileContext
+
         monkeypatch.delenv('HONCHO_API_KEY', raising=False)
         config_path = tmp_path / 'config.json'
         config_path.write_text(json.dumps({
@@ -170,13 +172,19 @@ class TestProfileKeyIsolationWarning:
         }))
         with caplog.at_level(logging.WARNING, logger='plugins.memory.honcho.client'):
             cfg = HonchoClientConfig.from_global_config(
-                host='hermes_coder', config_path=config_path,
+                host='hermes_coder',
+                config_path=config_path,
+                context=HonchoProfileContext.for_profile(
+                    'coder', tmp_path / 'profiles' / 'coder', default_root=tmp_path,
+                ),
             )
         assert cfg.api_key is None  # isolation preserved — no silent inheritance
         assert any('NOT inherited' in r.message for r in caplog.records)
 
     def test_no_warning_when_profile_block_has_key(self, tmp_path, monkeypatch, caplog):
         import logging
+        from plugins.memory.honcho.client import HonchoProfileContext
+
         monkeypatch.delenv('HONCHO_API_KEY', raising=False)
         config_path = tmp_path / 'config.json'
         config_path.write_text(json.dumps({
@@ -187,7 +195,11 @@ class TestProfileKeyIsolationWarning:
         }))
         with caplog.at_level(logging.WARNING, logger='plugins.memory.honcho.client'):
             cfg = HonchoClientConfig.from_global_config(
-                host='hermes_coder', config_path=config_path,
+                host='hermes_coder',
+                config_path=config_path,
+                context=HonchoProfileContext.for_profile(
+                    'coder', tmp_path / 'profiles' / 'coder', default_root=tmp_path,
+                ),
             )
         assert cfg.api_key == 'coder-key'
         assert not any('NOT inherited' in r.message for r in caplog.records)

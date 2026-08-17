@@ -1419,6 +1419,13 @@ def _refresh_cached_oauth(
         from plugins.memory.honcho import oauth
 
         if config is not None:
+            block = _host_block(config.raw or {}, config.host)
+            oauth_block = block.get("oauth")
+            if not (
+                isinstance(oauth_block, dict)
+                and oauth_block.get("refreshToken")
+            ):
+                return
             host = config.host
             path = config.bound_config_path()
         else:
