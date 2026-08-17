@@ -5,12 +5,17 @@ update action. The production checkout has these remotes:
 
 ```text
 origin    https://github.com/enterkey-io/hermes-agent.git
-upstream  https://github.com/NousResearch/hermes-agent.git
+nous-upstream  https://github.com/NousResearch/hermes-agent.git
 ```
 
 `main` tracks `origin/main`. That branch is the deployable release line and
 contains both reviewed Nous changes and the Enterkey features required by the
 running agent fleet.
+
+Keep the persistent Nous remote named `nous-upstream`. Stock Hermes reserves a
+remote named exactly `upstream` for its direct-fork update probe; using that
+name would make `hermes update --check` advertise Nous commits before the
+Enterkey integration workflow has tested and promoted them.
 
 ## Deploying an approved release
 
@@ -32,9 +37,9 @@ on an uncommitted production edit surviving an update.
 
 ## Incorporating Nous releases
 
-The stock updater intentionally does not merge `upstream/main` into a fork that
-has fork-only commits. That merge is a code-integration operation and must be
-reviewed and tested before it reaches the deployable branch.
+The stock updater does not merge `nous-upstream/main` during a routine Enterkey
+deployment. That merge is a code-integration operation and must be reviewed and
+tested before it reaches the deployable branch.
 
 Enterkey's `Enterkey upstream integration` workflow performs that integration
 every six hours. It merges current Nous `main` into
