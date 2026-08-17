@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import stat
 import tempfile
 from typing import Any
 
@@ -188,7 +189,8 @@ def propose_edit(
     path = runbook_path(slug, root=root)
     proposal_id = _timestamp()
     proposals_dir = path.parent / ".proposals"
-    proposals_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_runbook_parent(path)
+    _ensure_private_directory(proposals_dir)
     proposal_path = proposals_dir / f"{proposal_id}.md"
     _atomic_text_write(proposal_path, markdown)
     atomic_json_write(
@@ -273,7 +275,7 @@ def _record_from(path: Path, parsed: ParsedRunbook) -> RunbookRecord:
 
 def _snapshot_revision(path: Path, *, approved_by: str) -> Path:
     revisions = path.parent / ".revisions"
-    revisions.mkdir(parents=True, exist_ok=True)
+    _ensure_private_directory(revisions)
     stamp = _timestamp()
     revision = revisions / f"{stamp}.md"
     text = path.read_text(encoding="utf-8")
@@ -293,8 +295,9 @@ def _snapshot_revision(path: Path, *, approved_by: str) -> Path:
 @contextlib.contextmanager
 def _canonical_lock(path: Path):
     """Serialize every canonical writer with audited activation recovery."""
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_runbook_parent(path)
     with (path.parent / ".activation.lock").open("a+", encoding="utf-8") as lock:
+        os.fchmod(lock.fileno(), 0o600)
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         try:
             yield
@@ -320,7 +323,7 @@ def _atomic_text_write(path: Path, text: str) -> None:
 
 
 def _atomic_bytes_write(path: Path, value: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_private_directory(path.parent)
     fd, tmp = tempfile.mkstemp(
         dir=str(path.parent), prefix=f".{path.stem}_", suffix=".tmp"
     )
@@ -340,6 +343,24 @@ def _atomic_bytes_write(path: Path, value: bytes) -> None:
 
 def _timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _ensure_runbook_parent(path: Path) -> None:
+    """Keep the shared runbook root and per-runbook directory owner-only."""
+    _ensure_private_directory(path.parent.parent)
+    _ensure_private_directory(path.parent)
+
+
+def _ensure_private_directory(path: Path) -> None:
+    """Create or normalize a trusted store directory without following links."""
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    metadata = path.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise PermissionError(f"runbook store directory is unsafe: {path}")
+    if metadata.st_uid != os.geteuid():
+        raise PermissionError(f"runbook store directory has an unexpected owner: {path}")
+    if stat.S_IMODE(metadata.st_mode) != 0o700:
+        path.chmod(0o700, follow_symlinks=False)
 
 
 def _sha256_text(text: str) -> str:

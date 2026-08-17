@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import stat
 
 import pytest
 
@@ -69,6 +70,24 @@ def test_invalid_save_preserves_existing_file(tmp_path: Path) -> None:
 def test_save_requires_approver(tmp_path: Path) -> None:
     with pytest.raises(PermissionError):
         runbook_store.save_runbook(_metadata(), "# Body\n", root=tmp_path)
+
+
+def test_store_normalizes_trusted_directories_and_lock_owner_only(tmp_path: Path) -> None:
+    root = tmp_path / "runbooks"
+    root.mkdir(mode=0o775)
+    root.chmod(0o775)
+
+    record = runbook_store.save_runbook(
+        _metadata(),
+        "# Body\n",
+        root=root,
+        approved_by="aurora",
+    )
+
+    runbook_dir = Path(record.path).parent
+    assert stat.S_IMODE(root.stat().st_mode) == 0o700
+    assert stat.S_IMODE(runbook_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE((runbook_dir / ".activation.lock").stat().st_mode) == 0o600
 
 
 def test_revisions_diff_and_rollback(tmp_path: Path) -> None:
