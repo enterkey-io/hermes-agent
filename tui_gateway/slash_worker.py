@@ -75,7 +75,11 @@ def _prepare_slash_worker_runtime() -> None:
         logger=logger,
         thread_name="slash-worker-mcp-discovery",
     )
-    wait_for_mcp_discovery()
+    # This process snapshots tools once when HermesCLI is constructed and has
+    # no agent-turn late-binding refresh before its first slash command. Use
+    # the first-command bound so a cold MCP server cannot become permanently
+    # invisible merely because it missed the shorter interactive startup wait.
+    wait_for_mcp_discovery(single_query=True)
 
 
 def _start_parent_death_watchdog(original_ppid) -> None:
