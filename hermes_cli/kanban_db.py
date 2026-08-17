@@ -1765,6 +1765,19 @@ def _dispatch_tick_lock(db_path: Path):
                 handle.close()
 
 
+def _host_dispatch_capacity_lock():
+    """Serialize host-cap accounting and worker claims across all boards.
+
+    Board locks protect each SQLite file independently, but
+    ``max_in_progress`` is a machine-wide limit. Without this second lock,
+    two board ticks can read the same remaining capacity and both spend it.
+    Reuse the nonblocking cross-platform lock implementation so a losing
+    board defers to its next tick instead of stalling the gateway watcher.
+    """
+    lock_anchor = kanban_home() / "kanban" / "host-capacity"
+    return _dispatch_tick_lock(lock_anchor)
+
+
 # Periodic WAL checkpoint state for the dispatcher tick path. The kanban
 # connections run with ``wal_autocheckpoint=100``, but a passive
 # autocheckpoint can be starved on a busy multi-process board (any reader
@@ -9831,9 +9844,10 @@ def dispatch_once(
     ``DispatchResult`` with ``skipped_locked=True`` and does no DB writes;
     the holder is already making progress on the same board.
 
-    The lock is keyed off the board's resolved DB path, so unrelated
-    boards tick in parallel. See :func:`_dispatch_tick_lock` for the
-    cross-process / cross-platform mechanics.
+    The board lock is keyed off the resolved DB path. When a host-wide
+    ``max_in_progress`` cap is active, a second host lock serializes the
+    capacity check and worker claims across otherwise unrelated boards.
+    See :func:`_dispatch_tick_lock` for the cross-process mechanics.
     """
     try:
         db_path = kanban_db_path(board=board)
@@ -9857,28 +9871,35 @@ def dispatch_once(
         )
         _fire_dispatch_tick_hook(result, board=board, dry_run=dry_run)
         return result
+    def _run_locked_tick() -> DispatchResult:
+        tick_result = _dispatch_once_locked(
+            conn,
+            spawn_fn=spawn_fn,
+            ttl_seconds=ttl_seconds,
+            dry_run=dry_run,
+            max_spawn=max_spawn,
+            max_in_progress=max_in_progress,
+            failure_limit=failure_limit,
+            stale_timeout_seconds=stale_timeout_seconds,
+            board=board,
+            default_assignee=default_assignee,
+            max_in_progress_per_profile=max_in_progress_per_profile,
+            reconcile_orphans=reconcile_orphans,
+        )
+        _maybe_checkpoint_wal(conn, db_path)
+        return tick_result
+
     with _dispatch_tick_lock(db_path) as held:
         if not held:
             result = DispatchResult(skipped_locked=True)
+        elif max_in_progress is not None:
+            with _host_dispatch_capacity_lock() as host_held:
+                if not host_held:
+                    result = DispatchResult(skipped_locked=True)
+                else:
+                    result = _run_locked_tick()
         else:
-            result = _dispatch_once_locked(
-                conn,
-                spawn_fn=spawn_fn,
-                ttl_seconds=ttl_seconds,
-                dry_run=dry_run,
-                max_spawn=max_spawn,
-                max_in_progress=max_in_progress,
-                failure_limit=failure_limit,
-                stale_timeout_seconds=stale_timeout_seconds,
-                board=board,
-                default_assignee=default_assignee,
-                max_in_progress_per_profile=max_in_progress_per_profile,
-                reconcile_orphans=reconcile_orphans,
-            )
-            # Still under the dispatch lock: run the periodic PASSIVE WAL
-            # checkpoint (see _maybe_checkpoint_wal; the -wal file size is
-            # bounded by journal_size_limit on the writer's natural reset).
-            _maybe_checkpoint_wal(conn, db_path)
+            result = _run_locked_tick()
     # The dispatch lock has been released here. Fire the tick observer
     # strictly OUTSIDE the single-writer critical section (#56066 sweeper
     # finding / #64231 disposition): a slow subscriber must never extend
@@ -10038,6 +10059,22 @@ def _dispatch_once_locked(
         "WHERE status = 'ready' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
+    # Resolve per-profile capacity before reserving a review slot. The
+    # reservation must use the same eligibility gates as the review loop;
+    # otherwise a capped or respawn-guarded review can idle capacity while
+    # runnable ready work waits.
+    _per_profile_cap = max_in_progress_per_profile if (
+        isinstance(max_in_progress_per_profile, int)
+        and max_in_progress_per_profile > 0
+    ) else None
+    _per_profile_running: dict[str, int] = {}
+    if _per_profile_cap is not None:
+        for prow in conn.execute(
+            "SELECT assignee, COUNT(*) AS n FROM tasks "
+            "WHERE status = 'running' AND assignee IS NOT NULL "
+            "GROUP BY assignee"
+        ):
+            _per_profile_running[prow["assignee"]] = int(prow["n"])
     # Review rows are enumerated up front (not after the ready loop) so the
     # budget split below can see whether review work exists at all.
     review_rows = []
@@ -10058,21 +10095,31 @@ def _dispatch_once_locked(
     # full budget. "Spawnable" mirrors the review loop's own gate
     # (assigned + real profile) so a review column full of human-pulled
     # control-plane lanes doesn't permanently tax ready throughput.
-    def _any_spawnable_review() -> bool:
+    def _spawnable_review(row) -> bool:
+        assignee = row["assignee"]
+        if not assignee:
+            return False
         if not review_rows:
             return False
         try:
             from hermes_cli.profiles import profile_exists as _rpe
         except Exception:
-            # Profiles module unavailable (test stubs, exotic envs) —
-            # assume spawnable, matching the review loop's own fallback.
-            return any(row["assignee"] for row in review_rows)
-        return any(
-            row["assignee"] and _rpe(row["assignee"]) for row in review_rows
-        )
+            _rpe = None
+        if _rpe is not None and not _rpe(assignee):
+            return False
+        if (
+            _per_profile_cap is not None
+            and _per_profile_running.get(assignee, 0) >= _per_profile_cap
+        ):
+            return False
+        return check_respawn_guard(conn, row["id"], lane="review") is None
+
+    reserved_review = next(
+        (row for row in review_rows if _spawnable_review(row)), None,
+    )
 
     ready_budget = spawn_budget
-    if spawn_budget is not None and spawn_budget > 0 and _any_spawnable_review():
+    if spawn_budget is not None and spawn_budget > 0 and reserved_review:
         ready_budget = max(spawn_budget - 1, 0)
     spawned = 0
     # Per-profile concurrency cap (#21582): when set, track how many
@@ -10083,18 +10130,6 @@ def _dispatch_once_locked(
     # Tasks blocked this way go to skipped_per_profile_capped (not
     # skipped_unassigned — the operator-actionable signal is different:
     # "this profile is busy, try again later" not "this needs routing").
-    _per_profile_cap = max_in_progress_per_profile if (
-        isinstance(max_in_progress_per_profile, int)
-        and max_in_progress_per_profile > 0
-    ) else None
-    _per_profile_running: dict[str, int] = {}
-    if _per_profile_cap is not None:
-        for prow in conn.execute(
-            "SELECT assignee, COUNT(*) AS n FROM tasks "
-            "WHERE status = 'running' AND assignee IS NOT NULL "
-            "GROUP BY assignee"
-        ):
-            _per_profile_running[prow["assignee"]] = int(prow["n"])
     # Normalize default_assignee once: empty/whitespace string → None so the
     # rest of the loop can use ``if default_assignee:`` as a single check.
     # We also resolve profile_exists once here for the same reason.
@@ -10189,6 +10224,14 @@ def _dispatch_once_locked(
         # work on OTHER profiles.
         if _per_profile_cap is not None:
             current = _per_profile_running.get(row_assignee, 0)
+            if (
+                reserved_review is not None
+                and row_assignee == reserved_review["assignee"]
+                and current >= _per_profile_cap - 1
+            ):
+                # Keep the final profile-local slot available for the review
+                # that caused the global reservation.
+                continue
             if current >= _per_profile_cap:
                 result.skipped_per_profile_capped.append(
                     (row["id"], row_assignee, current)

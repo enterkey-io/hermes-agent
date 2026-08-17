@@ -175,6 +175,55 @@ def test_max_in_progress_partial_budget_across_boards(
     assert len(res.spawned) == 1
 
 
+def test_host_capacity_check_is_serialized_across_boards(
+    kanban_home, all_assignees_spawnable,
+):
+    """Concurrent board ticks cannot both spend the same host slot."""
+    kb.create_board("second")
+    with kb.connect(board="default") as conn:
+        kb.create_task(conn, title="first", assignee="alice")
+    with kb.connect(board="second") as conn:
+        kb.create_task(conn, title="second", assignee="bob")
+
+    spawn_started = threading.Event()
+    release_spawn = threading.Event()
+    first_result: dict = {}
+
+    def run_first_board():
+        def blocking_spawn(task, workspace, board=None):
+            spawn_started.set()
+            assert release_spawn.wait(5)
+            return 42
+
+        with kb.connect(board="default") as conn:
+            first_result["result"] = kb.dispatch_once(
+                conn,
+                board="default",
+                spawn_fn=blocking_spawn,
+                max_in_progress=1,
+            )
+
+    worker = threading.Thread(target=run_first_board)
+    worker.start()
+    assert spawn_started.wait(5)
+    try:
+        second_spawns: list = []
+        with kb.connect(board="second") as conn:
+            second = kb.dispatch_once(
+                conn,
+                board="second",
+                spawn_fn=_fake_spawn_factory(second_spawns),
+                max_in_progress=1,
+            )
+        assert second.skipped_locked is True
+        assert second_spawns == []
+    finally:
+        release_spawn.set()
+        worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert len(first_result["result"].spawned) == 1
+
+
 def test_count_running_tasks_other_boards_fails_open(
     kanban_home, monkeypatch,
 ):
@@ -288,6 +337,92 @@ def test_nonspawnable_review_does_not_tax_ready_budget(
 
     # Human-lane review is not spawnable → no reservation, ready gets both.
     assert len(res.spawned) == 2
+
+
+def test_respawn_guarded_review_does_not_tax_ready_budget(
+    kanban_home, all_assignees_spawnable, monkeypatch,
+):
+    import hermes_cli.config as cfgmod
+
+    monkeypatch.setattr(
+        cfgmod,
+        "load_config",
+        lambda *a, **k: {"kanban": {"review_dispatch": True}},
+    )
+
+    spawns: list = []
+    with kb.connect() as conn:
+        ready_id = kb.create_task(conn, title="ready", assignee="alice")
+        review_id = _park_in_review(conn, "guarded-review", "reviewer")
+        monkeypatch.setattr(
+            kb,
+            "check_respawn_guard",
+            lambda _conn, task_id, **_kw: (
+                "active_pr" if task_id == review_id else None
+            ),
+        )
+        res = kb.dispatch_once(
+            conn, spawn_fn=_fake_spawn_factory(spawns), max_in_progress=1,
+        )
+
+    assert [item[0] for item in res.spawned] == [ready_id]
+
+
+def test_profile_capped_review_does_not_tax_ready_budget(
+    kanban_home, all_assignees_spawnable, monkeypatch,
+):
+    import hermes_cli.config as cfgmod
+
+    monkeypatch.setattr(
+        cfgmod,
+        "load_config",
+        lambda *a, **k: {"kanban": {"review_dispatch": True}},
+    )
+
+    spawns: list = []
+    with kb.connect() as conn:
+        running_id = kb.create_task(conn, title="busy", assignee="reviewer")
+        assert kb.claim_task(conn, running_id) is not None
+        ready_id = kb.create_task(conn, title="ready", assignee="alice")
+        _park_in_review(conn, "capped-review", "reviewer")
+        res = kb.dispatch_once(
+            conn,
+            spawn_fn=_fake_spawn_factory(spawns),
+            max_in_progress=2,
+            max_in_progress_per_profile=1,
+        )
+
+    assert [item[0] for item in res.spawned] == [ready_id]
+
+
+def test_review_reservation_preserves_reviewers_profile_slot(
+    kanban_home, all_assignees_spawnable, monkeypatch,
+):
+    import hermes_cli.config as cfgmod
+
+    monkeypatch.setattr(
+        cfgmod,
+        "load_config",
+        lambda *a, **k: {"kanban": {"review_dispatch": True}},
+    )
+
+    spawns: list = []
+    with kb.connect() as conn:
+        same_profile_ready = kb.create_task(
+            conn, title="implement", assignee="reviewer",
+        )
+        other_ready = kb.create_task(conn, title="other", assignee="alice")
+        review_id = _park_in_review(conn, "review", "reviewer")
+        res = kb.dispatch_once(
+            conn,
+            spawn_fn=_fake_spawn_factory(spawns),
+            max_in_progress=2,
+            max_in_progress_per_profile=1,
+        )
+
+    spawned_ids = [item[0] for item in res.spawned]
+    assert same_profile_ready not in spawned_ids
+    assert spawned_ids == [other_ready, review_id]
 
 
 def test_review_budget_still_bounded_by_shared_cap(

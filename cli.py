@@ -1475,7 +1475,13 @@ def _path_is_within_root(path: Path, root: Path) -> bool:
         return False
 
 
-def _cleanup_failed_worktree_add(repo_root: str, wt_path: Path, branch_name: str) -> None:
+def _cleanup_failed_worktree_add(
+    repo_root: str,
+    wt_path: Path,
+    branch_name: str,
+    *,
+    delete_branch: bool = False,
+) -> None:
     """Make a failed/timed-out ``git worktree add`` atomic after the fact.
 
     ``git worktree add`` is not transactional: killed mid-checkout (the 30s
@@ -1483,8 +1489,9 @@ def _cleanup_failed_worktree_add(repo_root: str, wt_path: Path, branch_name: str
     (b) an admin entry under ``.git/worktrees/<name>`` that is LOCKED with a
     reason naming the *current, live* pid — so the startup pruner's
     dead-pid unlock will never touch it — and (c) sometimes the new branch.
-    Any retry of the same name then fails on the leftovers. Sweep all three,
-    quietly; every step is fail-soft because this runs on an error path.
+    Any retry of the same name then fails on the leftovers. Sweep the worktree
+    state and delete the branch only when the caller recorded that this add
+    created it; every step is fail-soft because this runs on an error path.
     """
     import shutil
     import subprocess
@@ -1507,7 +1514,8 @@ def _cleanup_failed_worktree_add(repo_root: str, wt_path: Path, branch_name: str
         # Drop the orphaned admin entry when the dir is already gone
         # (`remove` needs the dir; `prune` handles the dirless case).
         _git("worktree", "prune")
-        _git("branch", "-D", branch_name)
+        if delete_branch:
+            _git("branch", "-D", branch_name)
     except Exception as e:
         logger.debug("cleanup after failed worktree add: %s", e)
 
@@ -1729,6 +1737,15 @@ def _setup_worktree(repo_root: str = None, sync_base: bool = True,
         wt_name = f"hermes-{uuid.uuid4().hex[:8]}"
     branch_name = f"hermes/{wt_name}"
 
+    # A removed worktree may intentionally leave its branch behind. Record
+    # that state before attempting the add so error cleanup never deletes a
+    # branch it did not create.
+    branch_preexisting = subprocess.run(
+        ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch_name}"],
+        cwd=repo_root,
+        check=False,
+    ).returncode == 0
+
     worktrees_dir = Path(repo_root) / ".worktrees"
     worktrees_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1778,27 +1795,39 @@ def _setup_worktree(repo_root: str = None, sync_base: bool = True,
         "-c", "checkout.thresholdForParallelism=100",
     ]
     try:
+        add_args = (
+            ["git", *_wt_add_cfg, "worktree", "add", str(wt_path), branch_name]
+            if branch_preexisting
+            else ["git", *_wt_add_cfg, "worktree", "add", str(wt_path), "-b", branch_name, base_ref]
+        )
         result = subprocess.run(
-            ["git", *_wt_add_cfg, "worktree", "add", str(wt_path), "-b", branch_name, base_ref],
+            add_args,
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30, cwd=repo_root,
         )
         if result.returncode != 0:
             # If branching from the resolved remote ref failed for any reason
             # (e.g. a partial fetch left the ref unusable), retry from local
             # HEAD so worktree creation never hard-fails on a sync hiccup.
-            if base_ref != "HEAD":
+            if base_ref != "HEAD" and not branch_preexisting:
                 logger.warning(
                     "worktree add from %s failed (%s); retrying from local HEAD",
                     base_ref, result.stderr.strip(),
                 )
-                _cleanup_failed_worktree_add(repo_root, wt_path, branch_name)
+                _cleanup_failed_worktree_add(
+                    repo_root, wt_path, branch_name, delete_branch=True,
+                )
                 base_ref, base_label = "HEAD", "HEAD (fallback — remote base failed)"
                 result = subprocess.run(
                     ["git", "worktree", "add", str(wt_path), "-b", branch_name, base_ref],
                     capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30, cwd=repo_root,
                 )
             if result.returncode != 0:
-                _cleanup_failed_worktree_add(repo_root, wt_path, branch_name)
+                _cleanup_failed_worktree_add(
+                    repo_root,
+                    wt_path,
+                    branch_name,
+                    delete_branch=not branch_preexisting,
+                )
                 print(f"\033[31m✗ Failed to create worktree: {result.stderr.strip()}\033[0m")
                 return None
     except Exception as e:
@@ -1809,7 +1838,12 @@ def _setup_worktree(repo_root: str = None, sync_base: bool = True,
         # the same name fails. Clean up our own wreckage before surfacing
         # the error (Aug 2026 incident: 30s timeout during pack-sprawl left
         # exactly this poison).
-        _cleanup_failed_worktree_add(repo_root, wt_path, branch_name)
+        _cleanup_failed_worktree_add(
+            repo_root,
+            wt_path,
+            branch_name,
+            delete_branch=not branch_preexisting,
+        )
         print(f"\033[31m✗ Failed to create worktree: {e}\033[0m")
         return None
 

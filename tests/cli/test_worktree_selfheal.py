@@ -59,7 +59,9 @@ class TestCleanupFailedWorktreeAdd:
         admin = repo / ".git" / "worktrees" / "hermes-dead00"
         assert admin.exists() and (admin / "locked").exists()
 
-        _cleanup_failed_worktree_add(str(repo), wt, "hermes/hermes-dead00")
+        _cleanup_failed_worktree_add(
+            str(repo), wt, "hermes/hermes-dead00", delete_branch=True,
+        )
 
         assert not wt.exists(), "partial worktree dir must be removed"
         assert not admin.exists(), "LOCKED admin entry must be removed"
@@ -71,7 +73,9 @@ class TestCleanupFailedWorktreeAdd:
         from cli import _cleanup_failed_worktree_add
 
         wt = self._simulate_timed_out_add(repo)
-        _cleanup_failed_worktree_add(str(repo), wt, "hermes/hermes-dead00")
+        _cleanup_failed_worktree_add(
+            str(repo), wt, "hermes/hermes-dead00", delete_branch=True,
+        )
 
         result = _git(
             repo, "worktree", "add", str(wt), "-b", "hermes/hermes-dead00", check=False
@@ -85,6 +89,40 @@ class TestCleanupFailedWorktreeAdd:
         _cleanup_failed_worktree_add(
             str(repo), repo / ".worktrees" / "never-existed", "hermes/never-existed"
         )  # must not raise
+
+    def test_preserves_preexisting_branch(self, repo):
+        """Cleanup must not erase a retained branch from a removed worktree."""
+        from cli import _cleanup_failed_worktree_add
+
+        branch = "hermes/retained"
+        _git(repo, "branch", branch)
+        retained_oid = _git(repo, "rev-parse", branch).stdout.strip()
+
+        _cleanup_failed_worktree_add(
+            str(repo), repo / ".worktrees" / "retained", branch,
+        )
+
+        assert _git(repo, "rev-parse", branch).stdout.strip() == retained_oid
+
+    def test_setup_reuses_retained_named_branch(self, repo):
+        """A named retry attaches the retained branch at its existing tip."""
+        import cli
+
+        branch = "hermes/retained-existing"
+        _git(repo, "checkout", "-qb", branch)
+        (repo / "retained.txt").write_text("unique\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "retained work")
+        retained_oid = _git(repo, "rev-parse", "HEAD").stdout.strip()
+        _git(repo, "checkout", "-q", "main")
+
+        info = cli._setup_worktree(
+            str(repo), sync_base=False, name="retained-existing",
+        )
+
+        assert info is not None
+        assert info["branch"] == branch
+        assert _git(info["path"], "rev-parse", "HEAD").stdout.strip() == retained_oid
 
 
 class TestMaintainPackHealth:
@@ -136,7 +174,7 @@ class TestMaintainPackHealth:
 
         cli._maintain_pack_health(str(repo))
 
-        assert self._pack_count(repo) == made, "below threshold must be a no-op"  # noqa: same-count contract
+        assert self._pack_count(repo) == made, "below threshold must be a no-op"
 
     def test_fail_soft_on_missing_pack_dir(self, tmp_path):
         from cli import _maintain_pack_health
