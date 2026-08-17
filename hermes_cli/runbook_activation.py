@@ -33,6 +33,11 @@ from hermes_cli.workflow_models import WorkflowConflictError
 _APPROVAL_SCOPE = "runbook_proposal_activation"
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_CANONICAL_UTC_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+# This literal is signed along with the rest of the activation evidence. It
+# distinguishes an audited create from an update without accepting a blank or
+# caller-defined "missing" revision.
+_ABSENT_REVISION = "absent"
 
 # Installation-owned configuration.  Unlike the removed environment override,
 # a caller cannot select a different trust root for one invocation.
@@ -40,6 +45,31 @@ _TRUST_ROOT = Path("/etc/hermes/runbook-activation")
 _TRUST_OWNER_UID = 0
 _POLICY_FILE = "approval-policy.json"
 _PUBLIC_KEY_FILE = "elliott-ed25519.pem"
+_INTERNAL_REVIEW_EVIDENCE_FIELDS = frozenset(
+    {
+        "scope", "review_id", "reviewed_by", "reviewed_at", "review_reference", "change_class",
+        "slug", "proposal_id", "proposal_sha256", "expected_active_revision", "operator",
+        "canonical_root", "registry_path", "review_signature",
+    }
+)
+_INTERNAL_REVIEW_SIGNED_FIELDS = (
+    "scope", "review_id", "reviewed_by", "reviewed_at", "review_reference", "change_class",
+    "slug", "proposal_id", "proposal_sha256", "expected_active_revision", "operator",
+    "canonical_root", "registry_path",
+)
+_INTERNAL_REVIEW_POLICY_FIELDS = frozenset(
+    {"enabled", "reviewers", "permitted_change_classes", "protected_action_categories"}
+)
+_PROTECTED_ACTION_CATEGORIES = frozenset(
+    {
+        "money_movement",
+        "purchases",
+        "public_publication",
+        "external_commitments",
+        "credential_disclosure_or_change",
+        "destructive_user_data_loss",
+    }
+)
 
 
 def _canonical_root(policy: Mapping[str, Any]) -> Path:
@@ -115,17 +145,22 @@ def _persistence_boundary(_name: str) -> None:
     """Fault-injection seam for the activation failure matrix."""
 
 
-def _trusted_policy() -> tuple[dict[str, Any], Ed25519PublicKey]:
+def _trusted_policy() -> tuple[dict[str, Any], Ed25519PublicKey | None]:
     try:
         with secure_io.open_anchor(_TRUST_ROOT, owner_uid=_TRUST_OWNER_UID) as trust:
             policy_raw = secure_io.read_file(trust, _POLICY_FILE, owner_uid=_TRUST_OWNER_UID)
-            key_raw = secure_io.read_file(trust, _PUBLIC_KEY_FILE, owner_uid=_TRUST_OWNER_UID)
+            key_raw = secure_io.read_optional_file(trust, _PUBLIC_KEY_FILE, owner_uid=_TRUST_OWNER_UID)
         policy = json.loads(policy_raw.decode("utf-8"))
-        key = serialization.load_pem_public_key(key_raw)
     except (secure_io.SecurePathError, OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
         raise PermissionError("trusted runbook approval policy is unavailable or unsafe") from exc
-    if not isinstance(policy, dict) or policy.get("approver") != "elliott":
+    if not isinstance(policy, dict):
         raise PermissionError("trusted runbook approval policy is invalid")
+    if key_raw is None:
+        return policy, None
+    try:
+        key = serialization.load_pem_public_key(key_raw)
+    except (ValueError, TypeError) as exc:
+        raise PermissionError("trusted runbook approval policy is unavailable or unsafe") from exc
     if not isinstance(key, Ed25519PublicKey):
         raise PermissionError("trusted approval public key must be Ed25519")
     return policy, key
@@ -155,12 +190,140 @@ def _signed_fields(evidence: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _internal_review_signed_fields(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the immutable reviewer-attestation payload, excluding its signature."""
+    return {key: evidence.get(key) for key in _INTERNAL_REVIEW_SIGNED_FIELDS}
+
+
+def _parse_utc_timestamp(value: Any, field: str) -> str:
+    if not isinstance(value, str) or _CANONICAL_UTC_TIMESTAMP.fullmatch(value) is None:
+        raise PermissionError(f"invalid {field} timestamp")
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError as exc:
+        raise PermissionError(f"invalid {field} timestamp") from exc
+    if parsed.strftime("%Y-%m-%dT%H:%M:%SZ") != value:
+        raise PermissionError(f"invalid {field} timestamp")
+    return value
+
+
+def _internal_review_policy(policy: Mapping[str, Any]) -> Mapping[str, Any]:
+    internal = policy.get("internal_review")
+    if not isinstance(internal, Mapping) or set(internal) != _INTERNAL_REVIEW_POLICY_FIELDS:
+        raise PermissionError("internal reviewer policy is unavailable or invalid")
+    if internal.get("enabled") is not True:
+        raise PermissionError("internal reviewer policy is not enabled")
+    reviewers = internal.get("reviewers")
+    change_classes = internal.get("permitted_change_classes")
+    protected = internal.get("protected_action_categories")
+    if (
+        not isinstance(reviewers, Mapping)
+        or not isinstance(change_classes, list)
+        or not isinstance(protected, list)
+        or not all(isinstance(item, str) and item for item in change_classes + protected)
+        or not _PROTECTED_ACTION_CATEGORIES.issubset(protected)
+        or _PROTECTED_ACTION_CATEGORIES.intersection(change_classes)
+    ):
+        raise PermissionError("internal reviewer policy is unavailable or invalid")
+    return internal
+
+
+def _reviewer_public_key(policy: Mapping[str, Any], reviewer: str) -> Ed25519PublicKey:
+    internal = _internal_review_policy(policy)
+    reviewers = internal["reviewers"]
+    binding = reviewers.get(reviewer) if isinstance(reviewers, Mapping) else None
+    if not isinstance(binding, Mapping) or set(binding) != {"public_key_file"}:
+        raise PermissionError("reviewer is not authorized by the installed approval policy")
+    key_name = binding.get("public_key_file")
+    if (
+        not isinstance(key_name, str)
+        or not _SAFE_ID.fullmatch(key_name)
+        or "/" in key_name
+        or key_name in {_POLICY_FILE, _PUBLIC_KEY_FILE}
+    ):
+        raise PermissionError("reviewer approval-policy binding is invalid")
+    try:
+        with secure_io.open_anchor(_TRUST_ROOT, owner_uid=_TRUST_OWNER_UID) as trust:
+            key_raw = secure_io.read_file(trust, key_name, owner_uid=_TRUST_OWNER_UID)
+        key = serialization.load_pem_public_key(key_raw)
+    except (secure_io.SecurePathError, OSError, ValueError, TypeError) as exc:
+        raise PermissionError("reviewer approval key is unavailable or unsafe") from exc
+    if not isinstance(key, Ed25519PublicKey):
+        raise PermissionError("reviewer approval key must be Ed25519")
+    return key
+
+
+def _validate_internal_review_evidence(
+    policy: Mapping[str, Any], evidence: Mapping[str, Any], request: ActivationRequest,
+    canonical_root: Path,
+) -> dict[str, str] | None:
+    if "review_id" not in evidence:
+        return None
+    if set(evidence) != _INTERNAL_REVIEW_EVIDENCE_FIELDS:
+        raise PermissionError("internal reviewer attestation is invalid")
+    review_id = _normalize_identifier(evidence.get("review_id"), "review_id")
+    reviewer = _normalize_identifier(evidence.get("reviewed_by"), "reviewed_by")
+    if reviewer == request.operator:
+        raise PermissionError("internal reviewer must be independent from the operator")
+    reviewed_at = _parse_utc_timestamp(evidence.get("reviewed_at"), "reviewed_at")
+    review_reference = str(evidence.get("review_reference") or "").strip()
+    change_class = str(evidence.get("change_class") or "").strip()
+    internal = _internal_review_policy(policy)
+    permitted = internal["permitted_change_classes"]
+    if change_class not in permitted or change_class in _PROTECTED_ACTION_CATEGORIES:
+        raise PermissionError("internal reviewer attestation change class is not permitted")
+    if not review_reference:
+        raise PermissionError("internal reviewer attestation requires a review reference")
+    expected = {
+        "scope": _APPROVAL_SCOPE,
+        "slug": request.slug,
+        "proposal_id": request.proposal_id,
+        "proposal_sha256": request.proposal_sha256,
+        "expected_active_revision": request.expected_active_revision,
+        "operator": request.operator,
+        "canonical_root": str(canonical_root.resolve()),
+        "registry_path": _registry_identity(canonical_root),
+    }
+    for field, value in expected.items():
+        if evidence.get(field) != value:
+            raise PermissionError(f"internal reviewer attestation is not bound to this {field}")
+    public_key = _reviewer_public_key(policy, reviewer)
+    try:
+        signature = base64.b64decode(str(evidence.get("review_signature") or ""), validate=True)
+        message = json.dumps(
+            _internal_review_signed_fields(evidence), sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        public_key.verify(signature, message)
+    except (InvalidSignature, ValueError, TypeError, binascii.Error) as exc:
+        raise PermissionError("internal reviewer attestation signature is invalid") from exc
+    return {
+        "approval_id": review_id,
+        "approval_kind": "internal_reviewer_attestation",
+        "approved_by": "internal-policy",
+        "approved_at": reviewed_at,
+        "approval_reference": review_reference,
+        "authorized_by": "internal-policy",
+        "authorization_reference": review_reference,
+        "attested_at": reviewed_at,
+        "reviewed_by": reviewer,
+        "reviewed_at": reviewed_at,
+        "review_reference": review_reference,
+        "change_class": change_class,
+    }
+
+
 def _validate_approval_evidence(
-    evidence: Mapping[str, Any], request: ActivationRequest, public_key: Ed25519PublicKey,
+    policy: Mapping[str, Any], evidence: Mapping[str, Any], request: ActivationRequest,
+    public_key: Ed25519PublicKey | None,
     canonical_root: Path,
 ) -> dict[str, str]:
     if not isinstance(evidence, Mapping):
         raise PermissionError("recorded approval evidence is required")
+    internal = _validate_internal_review_evidence(policy, evidence, request, canonical_root)
+    if internal is not None:
+        return internal
+    if policy.get("approver") != "elliott" or public_key is None:
+        raise PermissionError("trusted owner approval public key is unavailable")
     approved_by = str(evidence.get("approved_by") or "").strip().lower()
     if approved_by != "elliott":
         raise PermissionError("activation requires Elliott's recorded approval")
@@ -190,9 +353,13 @@ def _validate_approval_evidence(
         raise PermissionError("approval signature is not valid for this activation") from exc
     return {
         "approval_id": approval_id,
+        "approval_kind": "owner_signature",
         "approved_by": approved_by,
         "approval_reference": approval_reference,
         "approved_at": approved_at,
+        "authorized_by": approved_by,
+        "authorization_reference": approval_reference,
+        "attested_at": approved_at,
     }
 
 
@@ -258,15 +425,27 @@ def _audit_payload(
 def _activation_identity(
     request: ActivationRequest, approval: Mapping[str, str], canonical_root: Path
 ) -> dict[str, str]:
-    return {
+    identity = {
         "scope": _APPROVAL_SCOPE, "slug": request.slug, "proposal_id": request.proposal_id,
         "proposal_sha256": request.proposal_sha256,
         "expected_active_revision": request.expected_active_revision, "operator": request.operator,
         "approval_id": approval["approval_id"], "approved_by": approval["approved_by"],
         "approved_at": approval["approved_at"], "approval_reference": approval["approval_reference"],
+        "approval_kind": approval["approval_kind"], "authorized_by": approval["authorized_by"],
+        "authorization_reference": approval["authorization_reference"], "attested_at": approval["attested_at"],
         "canonical_root": str(canonical_root.resolve()),
         "registry_path": _registry_identity(canonical_root),
     }
+    if approval["approval_kind"] == "internal_reviewer_attestation":
+        identity.update(
+            {
+                "reviewed_by": approval["reviewed_by"],
+                "reviewed_at": approval["reviewed_at"],
+                "review_reference": approval["review_reference"],
+                "change_class": approval["change_class"],
+            }
+        )
+    return identity
 
 
 def _index_value(metadata: dict[str, Any], source_hash: str, operator: str) -> bytes:
@@ -356,7 +535,7 @@ def _restore_registry_direct(
 
 
 def _restore_canonical(
-    runbook_dir: secure_io.SecureDir, *, candidate: bytes, candidate_index: bytes, previous: bytes,
+    runbook_dir: secure_io.SecureDir, *, candidate: bytes, candidate_index: bytes, previous: bytes | None,
     previous_index: bytes | None,
     revisions: secure_io.SecureDir | None, revision_names: tuple[str, str] | None,
 ) -> None:
@@ -364,7 +543,10 @@ def _restore_canonical(
     try:
         current = secure_io.read_file(runbook_dir, "RUNBOOK.md", owner_uid=os.geteuid())
         if current == candidate:
-            secure_io.replace_file(runbook_dir, "RUNBOOK.md", previous, owner_uid=os.geteuid())
+            if previous is None:
+                secure_io.unlink_if_matches(runbook_dir, "RUNBOOK.md", candidate, owner_uid=os.geteuid())
+            else:
+                secure_io.replace_file(runbook_dir, "RUNBOOK.md", previous, owner_uid=os.geteuid())
             current_index = secure_io.read_optional_file(runbook_dir, ".index.json", owner_uid=os.geteuid())
             if current_index == candidate_index:
                 if previous_index is None:
@@ -384,14 +566,17 @@ def _restore_canonical(
 
 
 def _restore_canonical_direct(
-    runbook_dir: secure_io.SecureDir, *, candidate: bytes, candidate_index: bytes, previous: bytes,
+    runbook_dir: secure_io.SecureDir, *, candidate: bytes, candidate_index: bytes, previous: bytes | None,
     previous_index: bytes | None, revision_names: tuple[str, str] | None,
 ) -> None:
     """Use a fresh descriptor path if the normal recovery path is unavailable."""
     cleanup_error: Exception | None = None
     current = secure_io.read_file(runbook_dir, "RUNBOOK.md", owner_uid=os.geteuid())
     if current == candidate:
-        secure_io.replace_file(runbook_dir, "RUNBOOK.md", previous, owner_uid=os.geteuid())
+        if previous is None:
+            secure_io.unlink_if_matches(runbook_dir, "RUNBOOK.md", candidate, owner_uid=os.geteuid())
+        else:
+            secure_io.replace_file(runbook_dir, "RUNBOOK.md", previous, owner_uid=os.geteuid())
         current_index = secure_io.read_optional_file(runbook_dir, ".index.json", owner_uid=os.geteuid())
         if current_index == candidate_index:
             if previous_index is None:
@@ -441,7 +626,7 @@ def activate_reviewed_proposal(request: ActivationRequest) -> ActivationResult:
         raise PermissionError("expected active revision is required")
     _authorize_operator(policy, normalized.operator)
     approval = _validate_approval_evidence(
-        normalized.approval_evidence, normalized, public_key, canonical_root
+        policy, normalized.approval_evidence, normalized, public_key, canonical_root
     )
     target = runbook_store.runbook_path(slug, root=target_root)
     registry_identity = _registry_identity(canonical_root)
@@ -461,6 +646,8 @@ def activate_reviewed_proposal(request: ActivationRequest) -> ActivationResult:
                         runbook_dir, slug, normalized.proposal_id, normalized.proposal_sha256, target
                     )
                     candidate_record, _ = _record_from_bytes(target, candidate)
+                    if candidate_record.status != "active":
+                        raise PermissionError("reviewed candidate must declare status active")
                     audit_dir = secure_io.open_descendant(
                         runbook_dir, (".activations",), owner_uid=os.geteuid(), create=True
                     )
@@ -471,7 +658,7 @@ def activate_reviewed_proposal(request: ActivationRequest) -> ActivationResult:
                     candidate_projection: dict[str, Any] | None = None
                     db_committed = False
                     mutating = False
-                    current = b""
+                    current: bytes | None = None
                     previous_index: bytes | None = None
                     candidate_index = b""
                     audit_bytes: bytes | None = None
@@ -488,8 +675,10 @@ def activate_reviewed_proposal(request: ActivationRequest) -> ActivationResult:
                                 ).items()
                             ):
                                 raise PermissionError("approval id is already bound to a different activation")
-                            current = secure_io.read_file(runbook_dir, "RUNBOOK.md", owner_uid=os.geteuid())
-                            current_record, _ = _record_from_bytes(target, current)
+                            replayed_current = secure_io.read_file(
+                                runbook_dir, "RUNBOOK.md", owner_uid=os.geteuid()
+                            )
+                            current_record, _ = _record_from_bytes(target, replayed_current)
                             if current_record.source_hash != candidate_record.source_hash:
                                 raise PermissionError("prior activation audit conflicts with the canonical runbook")
                             with registry.connect_closing_fd(
@@ -507,10 +696,24 @@ def activate_reviewed_proposal(request: ActivationRequest) -> ActivationResult:
                             )
                             return ActivationResult(current_record, workflow, audit_path, replayed=True)
 
-                        current = secure_io.read_file(runbook_dir, "RUNBOOK.md", owner_uid=os.geteuid())
-                        current_record, _ = _record_from_bytes(target, current)
-                        if current_record.revision != normalized.expected_active_revision:
-                            raise PermissionError("active runbook revision does not match the approved revision")
+                        current = secure_io.read_optional_file(
+                            runbook_dir, "RUNBOOK.md", owner_uid=os.geteuid()
+                        )
+                        if current is None:
+                            if normalized.expected_active_revision != _ABSENT_REVISION:
+                                raise PermissionError(
+                                    "missing canonical runbook requires expected active revision 'absent'"
+                                )
+                            current_record = None
+                        else:
+                            current_record, _ = _record_from_bytes(target, current)
+                            if normalized.expected_active_revision == _ABSENT_REVISION:
+                                raise PermissionError("expected active revision 'absent' requires no canonical runbook")
+                            if current_record.revision != normalized.expected_active_revision:
+                                raise PermissionError("active runbook revision does not match the approved revision")
+                        previous_revision = (
+                            _ABSENT_REVISION if current_record is None else current_record.revision
+                        )
                         previous_index = secure_io.read_optional_file(
                             runbook_dir, ".index.json", owner_uid=os.geteuid()
                         )
@@ -523,7 +726,8 @@ def activate_reviewed_proposal(request: ActivationRequest) -> ActivationResult:
                         _persistence_boundary("audit")
                         audit = _audit_payload(
                             normalized, approval, candidate_record, candidate_record.id,
-                            current_record.revision, canonical_root,
+                            previous_revision,
+                            canonical_root,
                         )
                         audit_bytes = json.dumps(audit, sort_keys=True, separators=(",", ":")).encode("utf-8")
                         secure_io.replace_file(
@@ -531,10 +735,11 @@ def activate_reviewed_proposal(request: ActivationRequest) -> ActivationResult:
                             owner_uid=os.geteuid(),
                         )
                         mutating = True
-                        revisions, revision_md, revision_json = _write_revision_snapshot(
-                            runbook_dir, approval["approval_id"], current, normalized.operator
-                        )
-                        revision_names = (revision_md, revision_json)
+                        if current is not None:
+                            revisions, revision_md, revision_json = _write_revision_snapshot(
+                                runbook_dir, approval["approval_id"], current, normalized.operator
+                            )
+                            revision_names = (revision_md, revision_json)
                         _persistence_boundary("revision")
                         secure_io.replace_file(runbook_dir, "RUNBOOK.md", candidate, owner_uid=os.geteuid())
                         _persistence_boundary("canonical")
@@ -564,7 +769,7 @@ def activate_reviewed_proposal(request: ActivationRequest) -> ActivationResult:
                                     payload={
                                         **_activation_identity(normalized, approval, canonical_root),
                                         "audit_path": str(audit_path),
-                                        "previous_revision": current_record.revision,
+                                        "previous_revision": previous_revision,
                                         "active_revision": candidate_record.revision,
                                     },
                                 )

@@ -66,6 +66,12 @@ def _sign(evidence: dict, private_key: Ed25519PrivateKey) -> None:
     evidence["signature"] = base64.b64encode(private_key.sign(message)).decode("ascii")
 
 
+def _sign_internal_review(evidence: dict, private_key: Ed25519PrivateKey) -> None:
+    fields = activation._internal_review_signed_fields(evidence)
+    message = json.dumps(fields, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    evidence["review_signature"] = base64.b64encode(private_key.sign(message)).decode("ascii")
+
+
 @pytest.fixture
 def proposed_runbook(tmp_path: Path, monkeypatch):
     home = tmp_path / ".hermes"
@@ -73,6 +79,7 @@ def proposed_runbook(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     private_key = Ed25519PrivateKey.generate()
+    reviewer_private_key = Ed25519PrivateKey.generate()
     trust = tmp_path / "installed-runbook-approval"
     trust.mkdir(mode=0o700)
     (trust / "approval-policy.json").write_text(
@@ -81,12 +88,30 @@ def proposed_runbook(tmp_path: Path, monkeypatch):
                 "approver": "elliott",
                 "canonical_root": str(home),
                 "operators": {"alina": {"uid": os.geteuid()}},
+                "internal_review": {
+                    "enabled": True,
+                    "reviewers": {"reese": {"public_key_file": "reese-ed25519.pem"}},
+                    "permitted_change_classes": ["routine_internal_repair"],
+                    "protected_action_categories": [
+                        "money_movement",
+                        "purchases",
+                        "public_publication",
+                        "external_commitments",
+                        "credential_disclosure_or_change",
+                        "destructive_user_data_loss",
+                    ],
+                },
             }
         ),
         encoding="utf-8",
     )
     (trust / "elliott-ed25519.pem").write_bytes(
         private_key.public_key().public_bytes(
+            serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+    )
+    (trust / "reese-ed25519.pem").write_bytes(
+        reviewer_private_key.public_key().public_bytes(
             serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
         )
     )
@@ -111,6 +136,7 @@ def proposed_runbook(tmp_path: Path, monkeypatch):
         "proposal_id": proposal.stem,
         "proposal_sha256": _sha256(candidate),
         "private_key": private_key,
+        "reviewer_private_key": reviewer_private_key,
         "trust": trust,
     }
 
@@ -145,6 +171,71 @@ def _request(proposed_runbook, **overrides) -> ActivationRequest:
     return ActivationRequest(**request_data, approval_evidence=evidence)
 
 
+def _internal_review_request(proposed_runbook, **overrides) -> ActivationRequest:
+    active = proposed_runbook["active"]
+    evidence_overrides = overrides.pop("evidence", {})
+    data = {
+        "slug": "daily-brief",
+        "proposal_id": proposed_runbook["proposal_id"],
+        "proposal_sha256": proposed_runbook["proposal_sha256"],
+        "expected_active_revision": active.revision,
+        "operator": "alina",
+        "canonical_root": str(Path(active.path).parents[2].resolve()),
+        "registry_path": str(Path(active.path).parents[2] / "workflow_registry.db"),
+    }
+    data.update(overrides)
+    evidence = {
+        "scope": "runbook_proposal_activation",
+        "review_id": "daily-brief-internal-review",
+        "reviewed_by": "reese",
+        "reviewed_at": "2026-08-16T22:30:00Z",
+        "review_reference": "kanban:t_6566d611",
+        "change_class": "routine_internal_repair",
+        **data,
+    }
+    evidence.update(evidence_overrides)
+    _sign_internal_review(evidence, proposed_runbook["reviewer_private_key"])
+    request_data = {
+        key: data[key]
+        for key in ("slug", "proposal_id", "proposal_sha256", "expected_active_revision", "operator")
+    }
+    return ActivationRequest(**request_data, approval_evidence=evidence)
+
+
+def _create_request(proposed_runbook, *, status: str = "active", **overrides) -> tuple[ActivationRequest, str]:
+    candidate = _markdown(slug="recording-pipeline", title="Recording Pipeline Health")
+    candidate = candidate.replace("id: wf_daily_brief", "id: wf_recording_pipeline")
+    candidate = candidate.replace("status: active", f"status: {status}")
+    proposal = runbook_store.propose_edit(
+        "recording-pipeline", candidate, proposed_by="sloane", summary="Reviewed successor"
+    )
+    canonical_root = Path(proposed_runbook["active"].path).parents[2]
+    data = {
+        "slug": "recording-pipeline",
+        "proposal_id": proposal.stem,
+        "proposal_sha256": _sha256(candidate),
+        "expected_active_revision": "absent",
+        "operator": "alina",
+        "canonical_root": str(canonical_root.resolve()),
+        "registry_path": str(canonical_root / "workflow_registry.db"),
+    }
+    data.update(overrides)
+    evidence = {
+        "scope": "runbook_proposal_activation",
+        "approval_id": "recording-pipeline-create",
+        "approved_by": "elliott",
+        "approved_at": "2026-08-14T03:30:00Z",
+        "approval_reference": "kanban:t_181cdb98",
+        **data,
+    }
+    _sign(evidence, proposed_runbook["private_key"])
+    request_data = {
+        key: data[key]
+        for key in ("slug", "proposal_id", "proposal_sha256", "expected_active_revision", "operator")
+    }
+    return ActivationRequest(**request_data, approval_evidence=evidence), candidate
+
+
 def _activation_events() -> list[dict]:
     with registry.connect_closing() as conn:
         return [
@@ -166,6 +257,188 @@ def test_activate_reviewed_proposal_binds_evidence_and_writes_terminal_audit(pro
     assert audit["proposal_sha256"] == proposed_runbook["proposal_sha256"]
     assert audit["previous_revision"] == proposed_runbook["active"].revision
     assert len(_activation_events()) == 1
+
+
+def test_internal_reviewer_attestation_activates_exact_bound_proposal(proposed_runbook):
+    (proposed_runbook["trust"] / "elliott-ed25519.pem").unlink()
+    result = activate_reviewed_proposal(_internal_review_request(proposed_runbook))
+
+    audit = json.loads(result.audit_path.read_text(encoding="utf-8"))
+    assert result.replayed is False
+    assert result.runbook.source_hash == proposed_runbook["proposal_sha256"]
+    assert audit["approval_id"] == "daily-brief-internal-review"
+    assert audit["approval_kind"] == "internal_reviewer_attestation"
+    assert audit["reviewed_by"] == "reese"
+    assert audit["operator"] == "alina"
+
+
+def test_internal_reviewer_attestation_rejects_self_review(proposed_runbook):
+    policy_path = proposed_runbook["trust"] / "approval-policy.json"
+    policy = json.loads(policy_path.read_text(encoding="utf-8"))
+    policy["operators"]["reese"] = {"uid": os.geteuid()}
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+    policy_path.chmod(0o600)
+
+    with pytest.raises(PermissionError, match="independent"):
+        activate_reviewed_proposal(_internal_review_request(proposed_runbook, operator="reese"))
+
+
+def test_internal_reviewer_attestation_rejects_unauthorized_identity_and_tampering(proposed_runbook):
+    with pytest.raises(PermissionError, match="operator is not authorized"):
+        activate_reviewed_proposal(_internal_review_request(proposed_runbook, operator="untrusted"))
+
+    with pytest.raises(PermissionError, match="reviewer"):
+        activate_reviewed_proposal(
+            _internal_review_request(proposed_runbook, evidence={"reviewed_by": "untrusted"})
+        )
+
+    request = _internal_review_request(proposed_runbook)
+    tampered = dict(request.approval_evidence)
+    tampered["review_reference"] = "kanban:tampered"
+    with pytest.raises(PermissionError, match="signature"):
+        activate_reviewed_proposal(
+            ActivationRequest(**{**request.__dict__, "approval_evidence": tampered})
+        )
+
+
+def test_internal_reviewer_attestation_replay_conflict_and_stale_revision_are_rejected(proposed_runbook):
+    request = _internal_review_request(proposed_runbook)
+    assert activate_reviewed_proposal(request).replayed is False
+    assert activate_reviewed_proposal(request).replayed is True
+
+    conflicting = dict(request.approval_evidence)
+    conflicting["review_reference"] = "kanban:conflicting-review"
+    _sign_internal_review(conflicting, proposed_runbook["reviewer_private_key"])
+    with pytest.raises(PermissionError, match="different activation"):
+        activate_reviewed_proposal(
+            ActivationRequest(**{**request.__dict__, "approval_evidence": conflicting})
+        )
+
+    stale_request = _internal_review_request(
+        proposed_runbook,
+        evidence={"review_id": "daily-brief-stale-review"},
+    )
+    with pytest.raises(PermissionError, match="active runbook revision"):
+        activate_reviewed_proposal(stale_request)
+
+
+def test_internal_reviewer_attestation_rejects_cross_root_binding_and_protected_actions(proposed_runbook, tmp_path):
+    with pytest.raises(PermissionError, match="canonical_root"):
+        activate_reviewed_proposal(
+            _internal_review_request(proposed_runbook, canonical_root=str(tmp_path / "other-root"))
+        )
+
+    with pytest.raises(PermissionError, match="change class"):
+        activate_reviewed_proposal(
+            _internal_review_request(proposed_runbook, evidence={"change_class": "money_movement"})
+        )
+
+
+def test_legacy_owner_signed_evidence_remains_compatible_with_internal_review_policy(proposed_runbook):
+    result = activate_reviewed_proposal(_request(proposed_runbook))
+
+    audit = json.loads(result.audit_path.read_text(encoding="utf-8"))
+    assert result.replayed is False
+    assert audit["approval_kind"] == "owner_signature"
+    assert audit["approved_by"] == "elliott"
+
+
+def test_activate_reviewed_proposal_creates_missing_active_successor(proposed_runbook):
+    request, candidate = _create_request(proposed_runbook)
+
+    result = activate_reviewed_proposal(request)
+
+    canonical_root = Path(proposed_runbook["active"].path).parents[2]
+    runbook_path = canonical_root / "runbooks" / "recording-pipeline" / "RUNBOOK.md"
+    assert result.replayed is False
+    assert result.runbook.status == "active"
+    assert runbook_path.read_text(encoding="utf-8") == candidate
+    assert not (runbook_path.parent / ".revisions" / "recording-pipeline-create.md").exists()
+    audit = json.loads(result.audit_path.read_text(encoding="utf-8"))
+    assert audit["previous_revision"] == "absent"
+    with registry.connect_closing() as conn:
+        assert registry.get_definition(conn, "wf_recording_pipeline").status == "active"
+
+
+def test_create_activation_rejects_draft_candidate_and_non_absent_precondition(proposed_runbook):
+    draft_request, _ = _create_request(proposed_runbook, status="draft")
+    with pytest.raises(PermissionError, match="status active"):
+        activate_reviewed_proposal(draft_request)
+
+    stale_request, _ = _create_request(
+        proposed_runbook,
+        expected_active_revision="sha256:deadbeefdeadbeef",
+    )
+    with pytest.raises(PermissionError, match="requires expected active revision 'absent'"):
+        activate_reviewed_proposal(stale_request)
+
+
+@pytest.mark.parametrize("boundary", ["canonical", "index", "projection", "event"])
+def test_create_activation_failure_leaves_no_canonical_successor(proposed_runbook, monkeypatch, boundary):
+    request, _ = _create_request(proposed_runbook)
+
+    def fail(name: str) -> None:
+        if name == boundary:
+            raise OSError(f"injected failure at {name}")
+
+    monkeypatch.setattr(activation, "_persistence_boundary", fail)
+    with pytest.raises(OSError, match=boundary):
+        activate_reviewed_proposal(request)
+
+    canonical_root = Path(proposed_runbook["active"].path).parents[2]
+    runbook_dir = canonical_root / "runbooks" / "recording-pipeline"
+    assert not (runbook_dir / "RUNBOOK.md").exists()
+    assert not (runbook_dir / ".index.json").exists()
+    assert not (runbook_dir / ".activations" / "recording-pipeline-create.json").exists()
+    with registry.connect_closing() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM runbook_activation_identities").fetchone()[0] == 0
+
+
+def test_create_rollback_does_not_race_a_canonical_store_writer(proposed_runbook, monkeypatch):
+    request, candidate = _create_request(proposed_runbook)
+    canonical_written = threading.Event()
+    allow_rollback = threading.Event()
+    writer_started = threading.Event()
+    writer_finished = threading.Event()
+    activation_error: list[Exception] = []
+    replacement = candidate.replace("# Recording Pipeline Health", "# Writer Replacement")
+
+    def fail_after_canonical(name: str) -> None:
+        if name == "canonical":
+            canonical_written.set()
+            assert allow_rollback.wait(timeout=5)
+        elif name == "index":
+            raise OSError("injected failure at index")
+
+    def activate_in_thread() -> None:
+        try:
+            activate_reviewed_proposal(request)
+        except Exception as exc:  # asserted below to preserve the thread traceback context
+            activation_error.append(exc)
+
+    def write_in_thread() -> None:
+        writer_started.set()
+        runbook_store.save_runbook_markdown(replacement, approved_by="elliott")
+        writer_finished.set()
+
+    monkeypatch.setattr(activation, "_persistence_boundary", fail_after_canonical)
+    activation_thread = threading.Thread(target=activate_in_thread)
+    activation_thread.start()
+    assert canonical_written.wait(timeout=5)
+    writer_thread = threading.Thread(target=write_in_thread)
+    writer_thread.start()
+    assert writer_started.wait(timeout=5)
+    assert not writer_finished.wait(timeout=0.1)
+    allow_rollback.set()
+    activation_thread.join(timeout=5)
+    writer_thread.join(timeout=5)
+
+    assert isinstance(activation_error[0], OSError)
+    assert writer_finished.is_set()
+    canonical_root = Path(proposed_runbook["active"].path).parents[2]
+    assert (canonical_root / "runbooks" / "recording-pipeline" / "RUNBOOK.md").read_text(
+        encoding="utf-8"
+    ) == replacement
 
 
 def test_activation_ignores_caller_selected_hermes_home(proposed_runbook, monkeypatch, tmp_path):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import difflib
@@ -113,11 +114,11 @@ def save_runbook(
     text = render_frontmatter(metadata, body)
     parsed = split_frontmatter(text)
     path = runbook_path(parsed.metadata["slug"], root=root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        _snapshot_revision(path, approved_by=approved_by)
-    _atomic_text_write(path, text)
-    _write_index_sidecar(path, parsed, approved_by=approved_by)
+    with _canonical_lock(path):
+        if path.exists():
+            _snapshot_revision(path, approved_by=approved_by)
+        _atomic_text_write(path, text)
+        _write_index_sidecar(path, parsed, approved_by=approved_by)
     return _record_from(path, parsed)
 
 
@@ -138,11 +139,11 @@ def save_runbook_markdown(
         raise PermissionError("active runbook saves require an approver")
     parsed = split_frontmatter(markdown)
     path = runbook_path(parsed.metadata["slug"], root=root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        _snapshot_revision(path, approved_by=approved_by)
-    _atomic_text_write(path, markdown)
-    _write_index_sidecar(path, parsed, approved_by=approved_by)
+    with _canonical_lock(path):
+        if path.exists():
+            _snapshot_revision(path, approved_by=approved_by)
+        _atomic_text_write(path, markdown)
+        _write_index_sidecar(path, parsed, approved_by=approved_by)
     return _record_from(path, parsed)
 
 
@@ -160,23 +161,18 @@ def activate_runbook_bytes(
         raise PermissionError("reviewed proposal is not UTF-8") from exc
     parsed = split_frontmatter(text)
     path = runbook_path(parsed.metadata["slug"], root=root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.parent.is_symlink():
-        raise PermissionError("runbook directory must not be a symlink")
-    with (path.parent / ".activation.lock").open("a+", encoding="utf-8") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        try:
-            if not path.exists() or path.is_symlink():
-                raise PermissionError("canonical runbook is unavailable or unsafe")
-            current = _record_from(path, read_runbook(path))
-            if current.revision != expected_revision:
-                raise PermissionError("active runbook revision does not match the approved revision")
-            _snapshot_revision(path, approved_by=approved_by)
-            _atomic_bytes_write(path, markdown)
-            _write_index_sidecar(path, parsed, approved_by=approved_by)
-            return _record_from(path, parsed)
-        finally:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    with _canonical_lock(path):
+        if path.parent.is_symlink():
+            raise PermissionError("runbook directory must not be a symlink")
+        if not path.exists() or path.is_symlink():
+            raise PermissionError("canonical runbook is unavailable or unsafe")
+        current = _record_from(path, read_runbook(path))
+        if current.revision != expected_revision:
+            raise PermissionError("active runbook revision does not match the approved revision")
+        _snapshot_revision(path, approved_by=approved_by)
+        _atomic_bytes_write(path, markdown)
+        _write_index_sidecar(path, parsed, approved_by=approved_by)
+        return _record_from(path, parsed)
 
 
 def propose_edit(
@@ -251,10 +247,11 @@ def rollback_revision(
     parsed = split_frontmatter(markdown)
     if parsed.metadata["slug"] != slug:
         raise RunbookValidationError("revision slug does not match target")
-    if target.exists():
-        _snapshot_revision(target, approved_by=approved_by)
-    _atomic_text_write(target, markdown)
-    _write_index_sidecar(target, parsed, approved_by=approved_by)
+    with _canonical_lock(target):
+        if target.exists():
+            _snapshot_revision(target, approved_by=approved_by)
+        _atomic_text_write(target, markdown)
+        _write_index_sidecar(target, parsed, approved_by=approved_by)
     return _record_from(target, parsed)
 
 
@@ -291,6 +288,18 @@ def _snapshot_revision(path: Path, *, approved_by: str) -> Path:
         },
     )
     return revision
+
+
+@contextlib.contextmanager
+def _canonical_lock(path: Path):
+    """Serialize every canonical writer with audited activation recovery."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with (path.parent / ".activation.lock").open("a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def _write_index_sidecar(path: Path, parsed: ParsedRunbook, *, approved_by: str) -> None:

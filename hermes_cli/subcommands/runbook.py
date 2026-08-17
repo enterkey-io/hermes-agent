@@ -23,7 +23,8 @@ def build_runbook_parser(subparsers, *, cmd_runbook: Callable) -> None:
         description=(
             "Activates exactly one reviewed proposal after checking its slug, "
             "proposal ID and SHA-256, current active revision, and Elliott's "
-            "recorded approval evidence. This updates the Workflow Registry "
+            "recorded legacy approval or an independent internal reviewer "
+            "attestation. This updates the Workflow Registry "
             "projection but never creates or mutates cron jobs."
         ),
     )
@@ -41,7 +42,7 @@ def build_runbook_parser(subparsers, *, cmd_runbook: Callable) -> None:
     activate.add_argument(
         "--expected-active-revision",
         required=True,
-        help="Exact current canonical revision (for example sha256:deadbeef...)",
+        help="Exact current canonical revision, or literal 'absent' for an audited create",
     )
     activate.add_argument(
         "--operator",
@@ -51,7 +52,7 @@ def build_runbook_parser(subparsers, *, cmd_runbook: Callable) -> None:
     activate.add_argument(
         "--approval-evidence",
         required=True,
-        help="Owner-only JSON approval-evidence file; retained in the audit event",
+        help="Owner-signed or reviewer-attested JSON evidence file retained in the audit event",
     )
     activate.set_defaults(func=cmd_runbook)
     parser.set_defaults(func=cmd_runbook)
