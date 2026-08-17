@@ -646,8 +646,8 @@ def activate_reviewed_proposal(request: ActivationRequest) -> ActivationResult:
                         runbook_dir, slug, normalized.proposal_id, normalized.proposal_sha256, target
                     )
                     candidate_record, _ = _record_from_bytes(target, candidate)
-                    if candidate_record.status != "active":
-                        raise PermissionError("reviewed candidate must declare status active")
+                    if candidate_record.status not in {"active", "retired"}:
+                        raise PermissionError("reviewed candidate must declare status active or retired")
                     audit_dir = secure_io.open_descendant(
                         runbook_dir, (".activations",), owner_uid=os.geteuid(), create=True
                     )
@@ -703,6 +703,10 @@ def activate_reviewed_proposal(request: ActivationRequest) -> ActivationResult:
                             if normalized.expected_active_revision != _ABSENT_REVISION:
                                 raise PermissionError(
                                     "missing canonical runbook requires expected active revision 'absent'"
+                                )
+                            if candidate_record.status == "retired":
+                                raise PermissionError(
+                                    "reviewed retirement requires an existing canonical runbook"
                                 )
                             current_record = None
                         else:

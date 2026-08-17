@@ -236,6 +236,40 @@ def _create_request(proposed_runbook, *, status: str = "active", **overrides) ->
     return ActivationRequest(**request_data, approval_evidence=evidence), candidate
 
 
+def _retirement_request(proposed_runbook) -> tuple[ActivationRequest, str]:
+    candidate = proposed_runbook["candidate"].replace("status: active", "status: retired")
+    proposal = runbook_store.propose_edit(
+        "daily-brief", candidate, proposed_by="sloane", summary="Reviewed retirement"
+    )
+    canonical_root = Path(proposed_runbook["active"].path).parents[2]
+    data = {
+        "slug": "daily-brief",
+        "proposal_id": proposal.stem,
+        "proposal_sha256": _sha256(candidate),
+        "expected_active_revision": proposed_runbook["active"].revision,
+        "operator": "alina",
+        "canonical_root": str(canonical_root.resolve()),
+        "registry_path": str(canonical_root / "workflow_registry.db"),
+    }
+    evidence = {
+        "scope": "runbook_proposal_activation",
+        "review_id": "daily-brief-retirement-review",
+        "reviewed_by": "reese",
+        "reviewed_at": "2026-08-16T22:30:00Z",
+        "review_reference": "kanban:t_3c6ac575",
+        "change_class": "routine_internal_repair",
+        **data,
+    }
+    _sign_internal_review(evidence, proposed_runbook["reviewer_private_key"])
+    return (
+        ActivationRequest(
+            **{key: data[key] for key in ("slug", "proposal_id", "proposal_sha256", "expected_active_revision", "operator")},
+            approval_evidence=evidence,
+        ),
+        candidate,
+    )
+
+
 def _activation_events() -> list[dict]:
     with registry.connect_closing() as conn:
         return [
@@ -358,6 +392,25 @@ def test_activate_reviewed_proposal_creates_missing_active_successor(proposed_ru
     assert audit["previous_revision"] == "absent"
     with registry.connect_closing() as conn:
         assert registry.get_definition(conn, "wf_recording_pipeline").status == "active"
+
+
+def test_internal_reviewer_attestation_retires_existing_canonical_runbook(proposed_runbook):
+    request, candidate = _retirement_request(proposed_runbook)
+
+    result = activate_reviewed_proposal(request)
+
+    assert result.replayed is False
+    assert result.runbook.status == "retired"
+    assert result.runbook.source_hash == _sha256(candidate)
+    with registry.connect_closing() as conn:
+        assert registry.get_definition(conn, "wf_daily_brief").status == "retired"
+
+
+def test_create_activation_rejects_reviewed_retirement_candidate(proposed_runbook):
+    request, _ = _create_request(proposed_runbook, status="retired")
+
+    with pytest.raises(PermissionError, match="requires an existing canonical runbook"):
+        activate_reviewed_proposal(request)
 
 
 def test_create_activation_rejects_draft_candidate_and_non_absent_precondition(proposed_runbook):
