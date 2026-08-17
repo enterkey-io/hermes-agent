@@ -95,6 +95,7 @@ export const en: Translations = {
     webUi: "Web UI",
     managingProfile: "Managing profile",
     currentProfileOption: "this dashboard ({name})",
+    systemDefaultProfileOption: "system defaults (no agent)",
     managingProfileBanner:
       "Managing profile \u201c{name}\u201d \u2014 config, keys, skills, MCPs, model, and new chats apply to that profile.",
     memoryOomRestartBanner:

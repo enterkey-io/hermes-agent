@@ -1099,8 +1099,16 @@ export default function SystemPage() {
                 </span>
               </span>
               {activeMemoryProvider && (
-                <Badge tone={MEMORY_STATUS_TONE[activeMemoryProvider.status]}>
-                  {MEMORY_STATUS_LABEL[activeMemoryProvider.status]}
+                <Badge
+                  tone={
+                    activeMemoryProvider.status === "ready"
+                      ? "success"
+                      : MEMORY_STATUS_TONE[activeMemoryProvider.status]
+                  }
+                >
+                  {activeMemoryProvider.status === "ready"
+                    ? "active"
+                    : MEMORY_STATUS_LABEL[activeMemoryProvider.status]}
                 </Badge>
               )}
               <Link to="/plugins" className="underline">

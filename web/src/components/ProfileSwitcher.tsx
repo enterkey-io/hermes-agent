@@ -20,13 +20,22 @@ export function ProfileSwitcher({ collapsed }: ProfileSwitcherProps) {
   const { t } = useI18n();
 
   const currentDashboardLabel = useMemo(
-    () =>
-      (t.app.currentProfileOption ?? "this dashboard ({name})").replace(
+    () => {
+      if (!currentProfile || currentProfile === "default") {
+        return t.app.systemDefaultProfileOption ?? "system defaults (no agent)";
+      }
+      return (t.app.currentProfileOption ?? "this dashboard ({name})").replace(
         "{name}",
-        currentProfile || "default",
-      ),
-    [currentProfile, t.app.currentProfileOption],
+        currentProfile,
+      );
+    },
+    [currentProfile, t.app.currentProfileOption, t.app.systemDefaultProfileOption],
   );
+
+  const profileLabel = (name: string) =>
+    name === "default"
+      ? (t.app.systemDefaultProfileOption ?? "system defaults (no agent)")
+      : name;
 
   if (profiles.length < 2) return null;
 
@@ -70,7 +79,7 @@ export function ProfileSwitcher({ collapsed }: ProfileSwitcherProps) {
           .filter((name) => name !== currentProfile)
           .map((name) => (
             <SelectOption key={name} value={name}>
-              {name}
+              {profileLabel(name)}
             </SelectOption>
           ))}
       </Select>

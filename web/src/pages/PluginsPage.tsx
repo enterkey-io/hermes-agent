@@ -537,13 +537,23 @@ export default function PluginsPage() {
                   <div className="flex flex-col gap-2">
                     <div className="flex flex-wrap items-center gap-2">
                       <Label htmlFor="mem-provider">{t.pluginsPage.memoryProviderLabel}</Label>
-                      {selectedMemoryName && selectedMemoryInfo && (
+                      {selectedMemoryName &&
+                        selectedMemoryInfo &&
+                        selectedMemoryName !== providers.memory_provider && (
                         <Badge tone={MEMORY_STATUS_TONE[selectedMemoryInfo.status]}>
                           {MEMORY_STATUS_LABEL[selectedMemoryInfo.status]}
                         </Badge>
                       )}
                       {selectedMemoryName && selectedMemoryName === providers.memory_provider && (
-                        <Badge tone="outline">active</Badge>
+                        <Badge tone="success">active</Badge>
+                      )}
+                      {selectedMemoryName &&
+                        selectedMemoryInfo &&
+                        selectedMemoryName === providers.memory_provider &&
+                        selectedMemoryInfo.status !== "ready" && (
+                        <Badge tone={MEMORY_STATUS_TONE[selectedMemoryInfo.status]}>
+                          {MEMORY_STATUS_LABEL[selectedMemoryInfo.status]}
+                        </Badge>
                       )}
                       {!selectedMemoryName && !providers.memory_provider && (
                         <Badge tone="success">active</Badge>
