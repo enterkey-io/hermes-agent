@@ -121,6 +121,9 @@ jobs:
             sleep 5
           done
           if [ -z "$pr" ]; then
+            pr="$(gh pr list --state open --head "$SYNC_BRANCH" --base main --json number --jq '.[0].number // empty')"
+          fi
+          if [ -z "$pr" ]; then
             echo "::error::Integration branch was pushed but no pull request became visible"
             exit 1
           fi
