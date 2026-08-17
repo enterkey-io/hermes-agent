@@ -349,7 +349,10 @@ class TestTargetProfileContext:
         )
         client = MagicMock()
 
-        with patch("honcho.Honcho", return_value=client):
+        with patch(
+            "plugins.memory.honcho.client.get_honcho_client",
+            return_value=client,
+        ):
             assert honcho_cli._ensure_peer_exists("hermes_alpha") is True
 
         assert [call.args[0] for call in client.peer.call_args_list] == [
@@ -393,7 +396,10 @@ class TestTargetProfileContext:
         )
         client = MagicMock()
 
-        with patch("honcho.Honcho", return_value=client):
+        with patch(
+            "plugins.memory.honcho.client.get_honcho_client",
+            return_value=client,
+        ):
             assert honcho_cli.clone_honcho_for_profile("alpha") is True
 
         written = json.loads((alpha_root / "honcho.json").read_text())
@@ -1298,4 +1304,3 @@ class TestCmdSetupDeviceFlow:
         )
         assert len(calls) == 1
         assert "apiKey" not in cfg.get("hosts", {}).get("hermes", {})
-

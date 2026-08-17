@@ -5,14 +5,26 @@ import os
 import shlex
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).parents[2]
 DEPLOY = REPO_ROOT / "scripts/deploy-shared-agent-photo.sh"
 SOURCE = REPO_ROOT / "skills/media/agent-photo"
-FIXED_PYTHON = "/home/elliott/.hermes/hermes-agent/venv/bin/python"
-FIXED_RUNBOOK = "/home/elliott/hermes-runbooks/scripts/run-hermes-agent-photo.py"
+FIXED_PYTHON = sys.executable
+
+
+def _deployment_runtime(tmp_path: Path) -> dict[str, str]:
+    runbook = tmp_path / "run-hermes-agent-photo.py"
+    runbook.write_text(
+        "def verify_photo_runtime_contract(*args, **kwargs):\n    return None\n",
+        encoding="utf-8",
+    )
+    return {
+        "HERMES_AGENT_PHOTO_PYTHON": FIXED_PYTHON,
+        "HERMES_AGENT_PHOTO_RUNBOOK": str(runbook),
+    }
 
 
 def _tree_hashes(root: Path) -> dict[str, str]:
@@ -49,6 +61,7 @@ def _run_sourced_deploy(
         text=True,
         env={
             **os.environ,
+            **_deployment_runtime(tmp_path),
             "HERMES_SHARED_SKILLS_DIR": str(shared),
             "HERMES_PROFILES_DIR": str(profiles),
             "HERMES_AGENT_PHOTO_BIN_DIR": str(bin_dir),
@@ -75,6 +88,7 @@ def test_deploy_publishes_complete_snapshot_and_fixed_launcher(tmp_path):
     profiles.mkdir()
     environment = {
         **os.environ,
+        **_deployment_runtime(tmp_path),
         "HERMES_SHARED_SKILLS_DIR": str(shared),
         "HERMES_PROFILES_DIR": str(profiles),
         "HERMES_AGENT_PHOTO_BIN_DIR": str(bin_dir),
@@ -102,7 +116,7 @@ def test_deploy_publishes_complete_snapshot_and_fixed_launcher(tmp_path):
         "#!/bin/sh\n"
         "unset OP_SERVICE_ACCOUNT_TOKEN OP_USER AUTH_TOKEN CT0 "
         "GEMINI_API_KEY NOVITA_API_KEY XAI_API_KEY\n"
-        f"exec {FIXED_PYTHON} {FIXED_RUNBOOK} \"$@\"\n"
+        f"exec {FIXED_PYTHON} {environment['HERMES_AGENT_PHOTO_RUNBOOK']} \"$@\"\n"
     )
     metadata = launcher.stat()
     assert metadata.st_uid == os.getuid()
@@ -142,6 +156,10 @@ def test_atomic_exchange_rollback_restores_previous_snapshot(tmp_path):
         check=False,
         capture_output=True,
         text=True,
+        env={
+            **os.environ,
+            **_deployment_runtime(tmp_path),
+        },
     )
 
     assert result.returncode == 0, result.stderr

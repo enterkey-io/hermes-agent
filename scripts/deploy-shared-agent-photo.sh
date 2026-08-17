@@ -8,8 +8,8 @@ target_dir="$shared_root/agent-photo"
 profiles_dir="${HERMES_PROFILES_DIR:-/home/elliott/.hermes/profiles}"
 launcher_root="${HERMES_AGENT_PHOTO_BIN_DIR:-/home/elliott/.local/bin}"
 launcher_path="$launcher_root/hermes-agent-photo"
-fixed_python="/home/elliott/.hermes/hermes-agent/venv/bin/python"
-fixed_runbook="/home/elliott/hermes-runbooks/scripts/run-hermes-agent-photo.py"
+fixed_python="${HERMES_AGENT_PHOTO_PYTHON:-/home/elliott/.hermes/hermes-agent/venv/bin/python}"
+fixed_runbook="${HERMES_AGENT_PHOTO_RUNBOOK:-/home/elliott/hermes-runbooks/scripts/run-hermes-agent-photo.py}"
 archive_local=false
 snapshot_stage=""
 launcher_stage=""
@@ -271,7 +271,7 @@ write_staged_launcher() {
 }
 
 verify_launcher() {
-  "$fixed_python" - "$1" "$(id -u)" <<'PY'
+  "$fixed_python" - "$1" "$(id -u)" "$fixed_python" "$fixed_runbook" <<'PY'
 import os
 import stat
 import sys
@@ -283,8 +283,7 @@ expected = (
     "#!/bin/sh\n"
     "unset OP_SERVICE_ACCOUNT_TOKEN OP_USER AUTH_TOKEN CT0 "
     "GEMINI_API_KEY NOVITA_API_KEY XAI_API_KEY\n"
-    "exec /home/elliott/.hermes/hermes-agent/venv/bin/python "
-    "/home/elliott/hermes-runbooks/scripts/run-hermes-agent-photo.py \"$@\"\n"
+    f"exec {sys.argv[3]} {sys.argv[4]} \"$@\"\n"
 )
 metadata = path.lstat()
 if (
