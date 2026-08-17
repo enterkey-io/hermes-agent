@@ -155,6 +155,14 @@ class TestTickWorkdirPartition:
 
         monkeypatch.setattr(sched, "get_due_jobs", lambda: [workdir_a, workdir_b, parallel_job])
         monkeypatch.setattr(sched, "advance_next_runs", lambda *_a, **_kw: None)
+        monkeypatch.setattr(
+            sched,
+            "claim_job_for_fire",
+            lambda job_id, **_kw: next(
+                job for job in (workdir_a, workdir_b, parallel_job)
+                if job["id"] == job_id
+            ),
+        )
         lock_dir = tmp_path / "cron-lock"
         monkeypatch.setattr(
             sched,
@@ -172,6 +180,7 @@ class TestTickWorkdirPartition:
             *,
             defer_agent_teardown=None,
             _admitted_run=None,
+            **_kw,
         ):
             # Return a minimal tuple matching run_job's signature.
             with order_lock:

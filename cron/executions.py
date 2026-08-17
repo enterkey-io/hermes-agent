@@ -19,7 +19,10 @@ from typing import Any, Dict, Iterator, List, Optional
 from hermes_constants import get_hermes_home
 from hermes_time import now as _hermes_now
 
-EXECUTIONS_FILE = get_hermes_home().resolve() / "cron" / "executions.db"
+# Optional test override. Production resolves the path at transaction time so
+# dashboard operations that temporarily enter another profile cannot leak that
+# profile's execution records into the import-time home.
+EXECUTIONS_FILE: Optional[Path] = None
 MAX_TERMINAL_EXECUTIONS = 1000
 _TERMINAL_STATES = ("completed", "failed", "unknown")
 _IMPORT_EXECUTIONS_FILE = EXECUTIONS_FILE
@@ -318,11 +321,8 @@ def _open_private_cron_lock(lock_path: Path) -> int:
 
 def _current_executions_file() -> Path:
     """Resolve the ledger once from the active immutable profile context."""
-    configured = Path(
-        os.path.abspath(os.fspath(Path(EXECUTIONS_FILE).expanduser()))
-    )
-    if configured != _IMPORT_EXECUTIONS_FILE:
-        return configured
+    if EXECUTIONS_FILE is not None:
+        return Path(os.path.abspath(os.fspath(EXECUTIONS_FILE.expanduser())))
     return Path(
         os.path.abspath(
             os.fspath(

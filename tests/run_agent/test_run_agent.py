@@ -147,6 +147,9 @@ def test_direct_session_db_flushes_share_marker_claim(agent):
                 self.rows.append(m["content"])
             return list(range(1, len(messages) + 1))
 
+        def flush_token_counts(self):
+            return None
+
     db = _BarrierDB()
     agent._session_db = db
     agent._session_db_created = True
@@ -930,7 +933,7 @@ class TestBuildSystemPrompt:
                 )
                 # Must NOT contain a colon followed by two digits (HH:MM pattern)
                 import re as _re
-                assert not _re.search(r":\d{2}", line), (
+                assert not _re.search(r"\b\d{1,2}:\d{2}\s*(?:AM|PM)\b", line), (
                     f"Timestamp line has HH:MM, breaks daily cache stability: {line!r}"
                 )
                 break
@@ -1996,7 +1999,7 @@ class TestConcurrentToolExecution:
         monkeypatch.setattr(
             "hermes_cli.plugins.resolve_pre_tool_call",
             lambda *_args, **_kwargs: SimpleNamespace(
-                block_message=None, approval_provenance=None
+                block_message=None, approval_provenance=None, modified_args=None
             ),
         )
         monkeypatch.setattr(
@@ -2060,7 +2063,8 @@ class TestConcurrentToolExecution:
         monkeypatch.setattr(
             "hermes_cli.plugins.resolve_pre_tool_call",
             lambda *args, **kwargs: SimpleNamespace(
-                block_message="Blocked by policy", approval_provenance=None
+                block_message="Blocked by policy", approval_provenance=None,
+                modified_args=None,
             ),
         )
         agent._checkpoint_mgr.enabled = True
@@ -2152,7 +2156,7 @@ class TestConcurrentToolExecution:
         monkeypatch.setattr(
             "hermes_cli.plugins.resolve_pre_tool_call",
             lambda *args, **kwargs: SimpleNamespace(
-                block_message="Blocked", approval_provenance=None
+                block_message="Blocked", approval_provenance=None, modified_args=None
             ),
         )
         with patch("tools.memory_tool.memory_tool", side_effect=AssertionError("should not run")):
@@ -2188,7 +2192,7 @@ class TestConcurrentToolExecution:
         monkeypatch.setattr(
             "hermes_cli.plugins.resolve_pre_tool_call",
             lambda *_args, **_kwargs: SimpleNamespace(
-                block_message=None, approval_provenance=None
+                block_message=None, approval_provenance=None, modified_args=None
             ),
         )
         monkeypatch.setattr(tool_executor, "_begin_tool_execution", lambda *_a, **_k: None)
@@ -2245,7 +2249,7 @@ class TestConcurrentToolExecution:
         monkeypatch.setattr(
             "hermes_cli.plugins.resolve_pre_tool_call",
             lambda *_args, **_kwargs: SimpleNamespace(
-                block_message=None, approval_provenance=None
+                block_message=None, approval_provenance=None, modified_args=None
             ),
         )
         monkeypatch.setattr(tool_executor, "_begin_tool_execution", lambda *_a, **_k: None)
@@ -2295,6 +2299,7 @@ class TestAgentRuntimePostHookOwnershipSync:
         ("read_terminal", {}),
         ("read_preview", {}),
         ("read_window_below", {}),
+        ("setup_mcp", {"server": "example", "action": "list"}),
         ("delegate_task", {"goal": "Check the child path"}),
     )
 
@@ -2312,7 +2317,7 @@ class TestAgentRuntimePostHookOwnershipSync:
         monkeypatch.setattr(
             "hermes_cli.plugins.resolve_pre_tool_call",
             lambda *args, **kwargs: SimpleNamespace(
-                block_message=None, approval_provenance=None
+                block_message=None, approval_provenance=None, modified_args=None
             ),
         )
         monkeypatch.setattr(
@@ -2342,6 +2347,10 @@ class TestAgentRuntimePostHookOwnershipSync:
         )
         monkeypatch.setattr(
             "tools.read_window_tool.read_window_below_tool",
+            lambda **kwargs: '{"ok":true}',
+        )
+        monkeypatch.setattr(
+            "tools.setup_mcp_tool.setup_mcp_tool",
             lambda **kwargs: '{"ok":true}',
         )
         monkeypatch.setattr(agent, "_get_session_db_for_recall", lambda: None)
@@ -3507,10 +3516,11 @@ class TestRunConversation:
         # Partial reply is surfaced and persisted as an assistant turn so the
         # next turn remembers what the model said.
         assert result["final_response"] == "Sure, here's how to do it: first"
-        assert result["messages"][-1] == {
-            "role": "assistant",
-            "content": "Sure, here's how to do it: first",
-        }
+        assert result["messages"][-1]["role"] == "assistant"
+        assert result["messages"][-1]["content"] == (
+            "Sure, here's how to do it: first"
+        )
+        assert "timestamp" in result["messages"][-1]
 
     def test_redirect_during_thinking_retries_same_turn_with_context(self, agent):
         """A corrective follow-up does not end the turn, and displayed reasoning

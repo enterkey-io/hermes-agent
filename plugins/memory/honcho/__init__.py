@@ -24,9 +24,34 @@ from typing import Any, Callable, Dict, List, Optional
 
 from agent.memory_manager import sanitize_context
 from agent.memory_provider import TRIVIAL_PROMPT_RE, MemoryProvider, is_trivial_prompt
+from plugins.memory.honcho.client import spawn_context_thread
 from tools.registry import tool_error
 
 logger = logging.getLogger(__name__)
+
+
+# Gateway-internal notifications can arrive through the same user-role channel
+# as genuine user messages. They are execution metadata, not conversation, and
+# must never become durable personal memory. Keep this deliberately anchored:
+# a human discussing one of these strings mid-message is still valid input.
+_INTERNAL_GATEWAY_TURN_RE = re.compile(
+    r"^\s*(?:"
+    r"\[ASYNC (?:DELEGATION )?(?:BATCH )?COMPLETE[^\]]*\]|"
+    r"\[CONTEXT COMPACTION[^\]]*\]|"
+    r"\[CONTEXT SUMMARY\]:?|"
+    r"\[PRIOR CONTEXT[^\]]*\]|"
+    r"\[Your active task list was preserved across context compression\]|"
+    r"\[IMPORTANT: Background process \d+ matched watch pattern[^\n]*|"
+    r"A background fan-out of \d+ subagent\(s\) you dispatched earlier has finished\.|"
+    r"A background subagent you dispatched earlier has finished\."
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _is_internal_gateway_turn(text: str) -> bool:
+    """Return True for machine-generated gateway/delegation notifications."""
+    return bool(_INTERNAL_GATEWAY_TURN_RE.match(text or ""))
 
 
 # ---------------------------------------------------------------------------
@@ -330,7 +355,7 @@ class HonchoMemoryProvider(MemoryProvider):
                     if self._shutting_down:
                         self._finalize_shutdown_if_idle()
 
-            thread = threading.Thread(target=_tracked_target, daemon=True, name=name)
+            thread = spawn_context_thread(_tracked_target, name=name)
             self._worker_threads.add(thread)
             if publish_attr:
                 setattr(self, publish_attr, thread)
@@ -362,7 +387,10 @@ class HonchoMemoryProvider(MemoryProvider):
 
             if self._manager is not None and not self._manager_shutdown:
                 try:
-                    drained = self._manager.shutdown()
+                    if self._config and not self._config.save_messages:
+                        drained = self._manager.stop_async_writer()
+                    else:
+                        drained = self._manager.shutdown()
                 except Exception as exc:
                     logger.debug("Honcho manager shutdown failed: %s", exc)
                     return False
@@ -870,9 +898,7 @@ class HonchoMemoryProvider(MemoryProvider):
                     except Exception as e:
                         logger.debug("Honcho first-turn base context failed: %s", e)
 
-                _bt = threading.Thread(
-                    target=_fetch_base, daemon=True, name="honcho-base-first"
-                )
+                _bt = spawn_context_thread(_fetch_base, name="honcho-base-first")
                 _bt.start()
                 _base_wait = (
                     max(0.0, first_turn_base_deadline - time.monotonic())
@@ -1489,8 +1515,19 @@ class HonchoMemoryProvider(MemoryProvider):
 
         Messages exceeding the Honcho API limit (default 25k chars) are
         split into multiple messages with continuation markers.
+
+        Honors saveMessages: false — the provider then never persists raw
+        turns to Honcho (read/tools paths stay fully functional).
         """
         if self._cron_skipped or self._shutting_down:
+            return
+        # ``saveMessages`` is the operator's hard write gate. Previously it
+        # was parsed into HonchoClientConfig but never enforced here, so a
+        # cached hybrid provider kept writing even after containment was set.
+        if self._config and not getattr(self._config, "save_messages", True):
+            return
+        if _is_internal_gateway_turn(user_content):
+            logger.debug("Honcho sync skipped machine-generated gateway turn")
             return
         if self._recall_mode == "tools" and not self._session_ready():
             return
@@ -1501,17 +1538,29 @@ class HonchoMemoryProvider(MemoryProvider):
         msg_limit = self._config.message_max_chars if self._config else 25000
         clean_user_content = sanitize_context(user_content or "").strip()
         clean_assistant_content = sanitize_context(assistant_content or "").strip()
+        # Skip only when the whole turn is empty. An interrupted or tool-only
+        # turn can legitimately have an empty assistant side; the user's
+        # message must still be persisted (the manager already drops
+        # empty-user turns upstream). Empty sides are skipped per-loop below
+        # so we never write empty-string messages either.
+        if not clean_user_content and not clean_assistant_content:
+            return
 
         def _sync():
             if self._shutting_down:
                 return
             try:
                 session = self._manager.get_or_create(self._session_key)
-                for chunk in self._chunk_message(clean_user_content, msg_limit):
-                    session.add_message("user", chunk)
-                for chunk in self._chunk_message(clean_assistant_content, msg_limit):
-                    session.add_message("assistant", chunk)
-                self._manager._flush_session(session)
+                if clean_user_content:
+                    for chunk in self._chunk_message(clean_user_content, msg_limit):
+                        session.add_message("user", chunk)
+                if clean_assistant_content:
+                    for chunk in self._chunk_message(clean_assistant_content, msg_limit):
+                        session.add_message("assistant", chunk)
+                # Route through save() so writeFrequency is honored —
+                # _flush_session() directly bypassed "session"/N batching
+                # and flushed every turn regardless of config.
+                self._manager.save(session)
             except Exception as e:
                 logger.debug("Honcho sync_turn failed: %s", e)
 
@@ -1541,6 +1590,11 @@ class HonchoMemoryProvider(MemoryProvider):
             return
         if self._cron_skipped or self._shutting_down:
             return
+        # ``saveMessages`` is the operator's hard write gate; the memory-tool
+        # mirror is an automatic Honcho mutation path and must respect it too,
+        # otherwise containment would only cover conversation turns.
+        if self._config and not getattr(self._config, "save_messages", True):
+            return
         if self._recall_mode == "tools" and not self._session_ready():
             return
         if not self._session_ready():
@@ -1560,6 +1614,8 @@ class HonchoMemoryProvider(MemoryProvider):
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
         """Flush all pending messages to Honcho on session end."""
         if self._cron_skipped:
+            return
+        if not getattr(self._config, "save_messages", True):
             return
         if not self._manager:
             return
@@ -1647,13 +1703,31 @@ class HonchoMemoryProvider(MemoryProvider):
                     return tool_error("Missing required parameter: query")
                 peer = args.get("peer", "user")
                 reasoning_level = args.get("reasoning_level")
-                result = self._manager.dialectic_query(
-                    self._session_key, query,
-                    reasoning_level=reasoning_level,
-                    peer=peer,
-                    # Explicit reasoning bypasses the automatic-injection cap.
-                    apply_injection_cap=False,
-                )
+                try:
+                    result = self._manager.dialectic_query(
+                        self._session_key, query,
+                        reasoning_level=reasoning_level,
+                        peer=peer,
+                        # Explicit reasoning bypasses the automatic-injection cap.
+                        apply_injection_cap=False,
+                        # Explicit tool call: surface timeouts/server errors as
+                        # errors instead of collapsing them into "no result",
+                        # which is indistinguishable from an empty answer.
+                        raise_errors=True,
+                    )
+                except HonchoAuthError:
+                    # Let the outer dispatch's auth-specific handler render this.
+                    raise
+                except Exception as e:
+                    logger.warning("honcho_reasoning failed: %s", e)
+                    return tool_error(
+                        f"Honcho reasoning query failed ({e}). This is a backend "
+                        "error, not an empty result — the peer may still have "
+                        "relevant context. Slow dialectic calls at higher "
+                        "reasoning levels can exceed the configured timeout; "
+                        "consider a lower reasoning_level or raising the "
+                        "'timeout' value in honcho.json."
+                    )
                 # Update cadence tracker so auto-injection respects the gap after an explicit call
                 self._last_dialectic_turn = self._turn_count
                 return json.dumps({"result": result or "No result from Honcho."})

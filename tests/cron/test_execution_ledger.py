@@ -55,6 +55,24 @@ def test_execution_transitions_are_durable(monkeypatch, tmp_path):
     assert persisted == [completed]
 
 
+def test_execution_ledger_follows_the_current_profile_home(monkeypatch, tmp_path):
+    import cron.executions as executions
+
+    current_home = {"path": tmp_path / "default"}
+    monkeypatch.setattr(executions, "EXECUTIONS_FILE", None)
+    monkeypatch.setattr(executions, "get_hermes_home", lambda: current_home["path"])
+
+    default_row = executions.create_execution("default-job", source="builtin")
+    current_home["path"] = tmp_path / "worker"
+    worker_row = executions.create_execution("worker-job", source="builtin")
+
+    assert executions.list_executions() == [worker_row]
+    current_home["path"] = tmp_path / "default"
+    assert executions.list_executions() == [default_row]
+    assert (tmp_path / "default" / "cron" / "executions.db").is_file()
+    assert (tmp_path / "worker" / "cron" / "executions.db").is_file()
+
+
 def test_terminal_execution_cannot_be_rewritten(monkeypatch, tmp_path):
     executions = _point_ledger(monkeypatch, tmp_path)
     record = executions.create_execution("immutable", source="builtin")
@@ -207,7 +225,9 @@ def test_late_profile_context_does_not_write_import_time_execution_ledger(
     active_home = tmp_path / "profiles" / "active"
     import_time_ledger = executions.EXECUTIONS_FILE
     import_time_bytes = (
-        import_time_ledger.read_bytes() if import_time_ledger.exists() else None
+        import_time_ledger.read_bytes()
+        if import_time_ledger is not None and import_time_ledger.exists()
+        else None
     )
 
     with _profile_cron_scope(active_home):
@@ -216,9 +236,9 @@ def test_late_profile_context_does_not_write_import_time_execution_ledger(
     active_ledger = active_home / "cron" / "executions.db"
     assert active_ledger.is_file()
     assert executions.EXECUTIONS_FILE == import_time_ledger
-    if import_time_bytes is None:
+    if import_time_ledger is not None and import_time_bytes is None:
         assert not import_time_ledger.exists()
-    else:
+    elif import_time_ledger is not None:
         assert import_time_ledger.read_bytes() == import_time_bytes
 
 
@@ -328,7 +348,7 @@ def test_generic_submit_failure_finishes_attempt_and_releases_guard(monkeypatch)
         lambda execution_id, **kwargs: finished.append((execution_id, kwargs)),
     )
     monkeypatch.setattr(scheduler, "get_due_jobs", lambda: [{"id": "submit-fail"}])
-    monkeypatch.setattr(scheduler, "advance_next_runs", lambda _ids: 0)
+    monkeypatch.setattr(scheduler, "claim_job_for_fire", lambda _job_id: True)
     monkeypatch.setattr(scheduler, "_get_parallel_pool", lambda _workers: BrokenPool())
 
     assert scheduler.tick(verbose=False, sync=False) == 0

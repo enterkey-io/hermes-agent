@@ -38,6 +38,11 @@ def _patch_pipeline(monkeypatch, *, success=True, output="out", final="final res
     monkeypatch.setattr(s, "save_job_output", fake_save)
     monkeypatch.setattr(s, "_deliver_result", fake_deliver)
     monkeypatch.setattr(s, "mark_job_run", fake_mark)
+    monkeypatch.setattr(
+        s,
+        "claim_job_for_fire",
+        lambda job_id, **_kw: {"id": job_id, "name": "t"},
+    )
     return calls
 
 
@@ -467,8 +472,8 @@ def test_run_one_job_tears_down_deferred_agent_when_save_raises(monkeypatch):
 
     ok = s.run_one_job({"id": "j10", "name": "t"})
 
-    # save raised → outer handler marks failure and returns False, but the
-    # deferred agent was still torn down (no delivery, no leak).
+    # Save raised, so the outer handler sends a failure alert and returns
+    # False, while still tearing down the deferred agent without a leak.
     assert ok is False
-    assert "deliver" not in order
-    assert order == ["save-raise", "agent.close", "cleanup_stale"], order
+    assert "deliver" in order
+    assert order == ["save-raise", "agent.close", "cleanup_stale", "deliver"], order

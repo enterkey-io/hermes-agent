@@ -72,6 +72,9 @@ class TestRunningJobGuard:
         dispatched = []
         monkeypatch.setattr(sched, "get_due_jobs", lambda: [job])
         monkeypatch.setattr(sched, "advance_next_runs", lambda *_a, **_kw: 0)
+        monkeypatch.setattr(
+            sched, "claim_job_for_fire", lambda *_a, **_kw: dict(job)
+        )
         monkeypatch.setattr(sched, "run_job", lambda j, **_kw: dispatched.append(j["id"]) or (True, "out", "resp", None))
         monkeypatch.setattr(sched, "save_job_output", lambda *_a, **_kw: None)
         monkeypatch.setattr(sched, "mark_job_run", lambda *_a, **_kw: None)
@@ -140,12 +143,16 @@ class TestSyncMode:
             *,
             defer_agent_teardown=None,
             _admitted_run=None,
+            **_kw,
         ):
             barrier.wait()  # blocks until test thread also waits
             return True, "out", "resp", None
 
         monkeypatch.setattr(sched, "get_due_jobs", lambda: [job])
         monkeypatch.setattr(sched, "advance_next_runs", lambda *_a, **_kw: None)
+        monkeypatch.setattr(
+            sched, "claim_job_for_fire", lambda *_a, **_kw: dict(job)
+        )
         monkeypatch.setattr(sched, "run_job", slow_run)
         monkeypatch.setattr(sched, "save_job_output", lambda *_a, **_kw: "/tmp/out")
         monkeypatch.setattr(sched, "mark_job_run", lambda *_a, **_kw: None)
@@ -199,6 +206,9 @@ class TestSequentialPool:
 
         monkeypatch.setattr(sched, "get_due_jobs", lambda: [job])
         monkeypatch.setattr(sched, "advance_next_runs", lambda *_a, **_kw: 0)
+        monkeypatch.setattr(
+            sched, "claim_job_for_fire", lambda *_a, **_kw: dict(job)
+        )
         monkeypatch.setattr(sched, "run_job", slow_run)
         monkeypatch.setattr(sched, "save_job_output", lambda *_a, **_kw: "/tmp/out")
         monkeypatch.setattr(sched, "mark_job_run", lambda *_a, **_kw: None)

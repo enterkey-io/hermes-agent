@@ -108,6 +108,10 @@ def test_trusted_scheduler_tick_attaches_registered_dispatch(protected_tool):
             "cron.scheduler.create_execution",
             return_value={"id": "execution-tick"},
         ),
+        patch(
+            "cron.scheduler.claim_job_for_fire",
+            return_value={**job, "fire_claim": {"by": "owner-tick"}},
+        ),
         patch("cron.scheduler.run_one_job", side_effect=capture),
         patch("cron.scheduler._get_parallel_pool", return_value=pool),
         patch("cron.scheduler._kill_orphaned_mcp_children", create=True),
@@ -140,6 +144,7 @@ def test_private_tick_impl_does_not_accept_forged_scheduler_provenance(
             "cron.scheduler.create_execution",
             return_value={"id": "execution-forged"},
         ),
+        patch("cron.scheduler.claim_job_for_fire", return_value=job),
         patch(
             "cron.scheduler._issue_registered_cron_dispatch",
             side_effect=lambda *_args, **_kwargs: events.append("issue"),
@@ -238,6 +243,11 @@ def test_public_tick_runs_ordinary_due_job_without_mutating_protected_sibling(
         "create_execution",
         lambda job_id, **_kwargs: events.append(("create", job_id))
         or {"id": "execution-ordinary"},
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "claim_job_for_fire",
+        lambda job_id, **_kwargs: ordinary if job_id == ordinary["id"] else None,
     )
     monkeypatch.setattr(
         scheduler,
@@ -450,7 +460,8 @@ def test_public_fire_denies_exact_protected_job_but_runs_ordinary_sibling(
     monkeypatch.setattr(scheduler, "_hermes_home", protected_tool)
     monkeypatch.setattr(
         "cron.jobs.claim_job_for_fire",
-        lambda job_id: events.append(("claim", job_id)) or True,
+        lambda job_id, **_kwargs: events.append(("claim", job_id))
+        or {"id": job_id, "name": "manual"},
     )
     monkeypatch.setattr(
         "cron.jobs.get_job",
