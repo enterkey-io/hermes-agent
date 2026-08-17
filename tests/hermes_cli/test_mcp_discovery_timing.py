@@ -85,6 +85,30 @@ def test_resolve_discovery_timeout_explicit_overrides_single_query():
     assert mcp_startup._resolve_discovery_timeout(5.0, single_query=True) == 5.0
 
 
+def test_slash_worker_uses_first_command_discovery_bound(monkeypatch):
+    """Slash workers snapshot tools once, so their initial wait uses 15s mode."""
+    import tui_gateway.slash_worker as slash_worker
+
+    calls: list[tuple[str, object]] = []
+    monkeypatch.setattr(
+        mcp_startup,
+        "start_background_mcp_discovery",
+        lambda **kwargs: calls.append(("start", kwargs["thread_name"])),
+    )
+    monkeypatch.setattr(
+        mcp_startup,
+        "wait_for_mcp_discovery",
+        lambda **kwargs: calls.append(("wait", kwargs.get("single_query"))),
+    )
+
+    slash_worker._prepare_slash_worker_runtime()
+
+    assert calls == [
+        ("start", "slash-worker-mcp-discovery"),
+        ("wait", True),
+    ]
+
+
 # ── ensure_mcp_discovery_before_agent_build ─────────────────────────────────
 
 
