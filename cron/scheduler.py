@@ -498,6 +498,7 @@ from cron.jobs import (
     claim_dispatch,
     claim_job_for_fire,
     fire_claim_fence,
+    clear_run_claim,
     get_due_jobs,
     get_job,
     heartbeat_fire_claim,
@@ -7518,6 +7519,35 @@ def _tick_impl(
             membership is released in the worker's finally block.
             """
             job_id = job["id"]
+
+            def _clear_run_claim_best_effort() -> None:
+                """Best-effort claim cleanup on the dispatch-failure paths.
+
+                Only one-shot jobs carry a ``run_claim`` (stamped by
+                get_due_jobs, #59229), so recurring jobs skip the call
+                entirely — clear_run_claim acquires _jobs_lock (blocking
+                cross-process flock) and does a full load_jobs read, and the
+                dispatch-failure paths fire exactly when the process can
+                least afford N pointless lock/read round-trips (interpreter
+                shutdown, EMFILE).  clear_run_claim itself does
+                load_jobs/save_jobs file I/O; on those degraded paths it can
+                raise, and these early-exits exist precisely to skip cleanly
+                — a stale claim expiring at the TTL is a better outcome than
+                crashing the tick (#86522).
+                """
+                _schedule = job.get("schedule")
+                if not (isinstance(_schedule, dict) and _schedule.get("kind") == "once"):
+                    return
+                try:
+                    clear_run_claim(job_id)
+                except Exception as claim_err:
+                    logger.warning(
+                        "Could not clear run_claim for job '%s' after dispatch "
+                        "failure: %s (claim will expire at TTL)",
+                        job.get("name", job_id),
+                        claim_err,
+                    )
+
             # A tick can race gateway teardown: once the interpreter is
             # finalizing, ``pool.submit`` raises "cannot schedule new futures
             # after interpreter shutdown" and crashes the tick. Skip cleanly —
@@ -7528,6 +7558,7 @@ def _tick_impl(
                     "Job '%s' not dispatched — interpreter is shutting down",
                     job.get("name", job_id),
                 )
+                _clear_run_claim_best_effort()
                 return None
             if not try_register_running_job(job_id):
                 logger.info("Job '%s' already running — skipping", job.get("name", job_id))
@@ -7553,6 +7584,7 @@ def _tick_impl(
                 # audit requirement: every add is paired with guaranteed
                 # cleanup).
                 release_running_job(job_id)
+                _clear_run_claim_best_effort()
                 logger.exception(
                     "Job '%s' not dispatched: execution creation failed: %s",
                     job.get("name", job_id),
@@ -7574,6 +7606,7 @@ def _tick_impl(
                 fut = pool.submit(_run_and_release)
             except Exception as submit_err:
                 release_running_job(job_id)
+                _clear_run_claim_best_effort()
                 finish_execution(
                     execution["id"],
                     success=False,
