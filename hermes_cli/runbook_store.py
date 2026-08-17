@@ -357,7 +357,10 @@ def _ensure_private_directory(path: Path) -> None:
     metadata = path.lstat()
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
         raise PermissionError(f"runbook store directory is unsafe: {path}")
-    if metadata.st_uid != os.geteuid():
+    get_effective_uid = getattr(os, "geteuid", None)
+    if get_effective_uid is None:
+        raise PermissionError("the runbook store requires a POSIX host")
+    if metadata.st_uid != get_effective_uid():
         raise PermissionError(f"runbook store directory has an unexpected owner: {path}")
     if stat.S_IMODE(metadata.st_mode) != 0o700:
         path.chmod(0o700, follow_symlinks=False)

@@ -36,6 +36,7 @@ def isolated_profiles(tmp_path, monkeypatch, _isolate_hermes_home):
     """Isolated default home + one named profile, each with its own skills."""
     from hermes_constants import get_hermes_home
     from hermes_cli import profiles
+    from cron import jobs as cron_jobs
 
     default_home = get_hermes_home()
     profiles_root = default_home / "profiles"
@@ -49,6 +50,11 @@ def isolated_profiles(tmp_path, monkeypatch, _isolate_hermes_home):
 
     monkeypatch.setattr(profiles, "_get_default_hermes_home", lambda: default_home)
     monkeypatch.setattr(profiles, "_get_profiles_root", lambda: profiles_root)
+    monkeypatch.setattr(
+        cron_jobs,
+        "_ensure_persistable_inference_contract",
+        lambda job, **_kwargs: job,
+    )
     return {"default": default_home, "worker_alpha": worker_home}
 
 

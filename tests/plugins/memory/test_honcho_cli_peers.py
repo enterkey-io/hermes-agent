@@ -63,18 +63,16 @@ class TestAllProfileHostConfigs:
         assert host == "hermes_work"  # not "hermes.work"
         assert block.get("peerName") == "alice"  # the populated block was found
 
-    def test_sanitized_profile_names_resolve(self, honcho_home, monkeypatch):
-        """Profiles needing sanitization (dots/spaces in the name) also
-        resolve — profile_host_key maps 'my.profile' -> 'hermes_my_profile';
-        the inline dot form never could."""
+    def test_underscore_profile_names_resolve(self, honcho_home, monkeypatch):
+        """Valid underscore profile names resolve to their canonical host key."""
         monkeypatch.setattr(
             "hermes_cli.profiles.list_profiles",
             lambda: [SimpleNamespace(name="default"),
-                     SimpleNamespace(name="my.profile")],
+                     SimpleNamespace(name="my_profile")],
         )
         rows = honcho_cli._all_profile_host_configs()
         by_name = {name: block for name, _, block in rows}
-        assert by_name["my.profile"].get("peerName") == "bob"
+        assert by_name["my_profile"].get("peerName") == "bob"
 
     def test_legacy_dot_form_host_key_still_readable(self, honcho_home, monkeypatch):
         """Back-compat: honcho.json files with LEGACY dot-form host keys

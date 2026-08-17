@@ -1,6 +1,6 @@
 ---
 name: agent-photo
-description: "Use when the user asks a Hermes agent to create a new photo of herself or edit an existing agent photo. Builds an identity-locked prompt from the active profile, selects one approved paid provider, saves results to profile media, and returns Hermes-native MEDIA attachments without duplicate delivery."
+description: Create or edit an identity-locked Hermes agent photo.
 version: 2.0.0
 author: Elliott Hermes
 license: MIT
@@ -62,7 +62,7 @@ Use one provider per request. The script does not switch providers after failure
 ## Workflow
 
 The sole execution path for previews and paid generation is
-`/home/elliott/.local/bin/hermes-agent-photo`. Never invoke the underlying
+`$HOME/.local/bin/hermes-agent-photo`. Never invoke the underlying
 generator or a package runner directly.
 
 ### 1. Confirm authority
@@ -78,7 +78,7 @@ Read `references/photo-prompting-rules.md` when the scene is unusual, close-up, 
 ### 3. Preview without spending
 
 ```bash
-/home/elliott/.local/bin/hermes-agent-photo \
+"$HOME/.local/bin/hermes-agent-photo" \
   --preview-prompt \
   "close portrait, looking into the lens, relaxed half-smile, leather jacket, warm window light"
 ```
@@ -88,7 +88,7 @@ Review the final prompt for contradictory poses, invented identity traits, repea
 ### 4. Generate once
 
 ```bash
-/home/elliott/.local/bin/hermes-agent-photo \
+"$HOME/.local/bin/hermes-agent-photo" \
   --approved \
   --model gemini \
   "close portrait, looking into the lens, relaxed half-smile, leather jacket, warm window light"
@@ -97,7 +97,7 @@ Review the final prompt for contradictory poses, invented identity traits, repea
 For an existing profile-local baseline or source image:
 
 ```bash
-/home/elliott/.local/bin/hermes-agent-photo \
+"$HOME/.local/bin/hermes-agent-photo" \
   --approved \
   --model grok \
   --source "$HERMES_HOME/baselines/full-body.jpg" \
@@ -111,7 +111,7 @@ Use `-n 2` through `-n 10` with Grok only when the user explicitly requests opti
 The script prints one line per generated image:
 
 ```text
-MEDIA: /home/elliott/.hermes/profiles/<agent>/media/<filename>.png
+MEDIA: $HERMES_HOME/media/<filename>.png
 ```
 
 Include each printed `MEDIA:` line once in the assistant reply. Put the natural-language caption in that same reply. Do not also invoke another file, message, or attachment tool for those paths, and do not send a second copy of the caption.

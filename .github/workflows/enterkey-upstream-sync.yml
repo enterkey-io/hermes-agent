@@ -1,0 +1,116 @@
+name: Enterkey upstream integration
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: enterkey-upstream-integration
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  integrate:
+    name: Prepare tested upstream release
+    if: github.repository == 'enterkey-io/hermes-agent'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ secrets.ENTERKEY_SYNC_TOKEN }}
+      SYNC_BRANCH: automation/upstream-sync
+      UPSTREAM_REPOSITORY: https://github.com/NousResearch/hermes-agent.git
+    steps:
+      - name: Require the trusted integration credential
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::ENTERKEY_SYNC_TOKEN is not configured"
+            exit 1
+          fi
+
+      - name: Check out the deployable Enterkey release
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          ref: main
+          token: ${{ secrets.ENTERKEY_SYNC_TOKEN }}
+
+      - name: Merge current Nous main on an integration branch
+        id: merge
+        run: |
+          set -euo pipefail
+          git config user.name "Enterkey Release Automation"
+          git config user.email "release-automation@enterkey.io"
+          git remote add upstream "$UPSTREAM_REPOSITORY"
+          git fetch --prune upstream main
+          git fetch --prune origin main
+          git fetch origin "$SYNC_BRANCH" || true
+
+          if git merge-base --is-ancestor upstream/main origin/main; then
+            echo "has_update=false" >> "$GITHUB_OUTPUT"
+            echo "conflict=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git switch --force-create "$SYNC_BRANCH" origin/main
+          if git merge --no-ff --no-edit upstream/main; then
+            echo "has_update=true" >> "$GITHUB_OUTPUT"
+            echo "conflict=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          conflicts="$(git diff --name-only --diff-filter=U | paste -sd, -)"
+          git merge --abort
+          echo "has_update=true" >> "$GITHUB_OUTPUT"
+          echo "conflict=true" >> "$GITHUB_OUTPUT"
+          echo "conflicts=$conflicts" >> "$GITHUB_OUTPUT"
+
+      - name: Report a merge conflict
+        if: steps.merge.outputs.conflict == 'true'
+        env:
+          CONFLICTS: ${{ steps.merge.outputs.conflicts }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="Automated Nous integration is blocked"
+          issue="$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number // empty')"
+          body="The scheduled Nous-to-Enterkey merge has conflicts in: \`$CONFLICTS\`.
+
+          No release branch was changed and the dashboard updater remains on the last tested Enterkey release.
+
+          Workflow run: $RUN_URL"
+          if [ -n "$issue" ]; then
+            gh issue comment "$issue" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi
+
+      - name: Publish the integration branch
+        if: steps.merge.outputs.has_update == 'true' && steps.merge.outputs.conflict == 'false'
+        run: |
+          set -euo pipefail
+          git push --force-with-lease origin "HEAD:refs/heads/$SYNC_BRANCH"
+
+      - name: Open or refresh the gated release pull request
+        if: steps.merge.outputs.has_update == 'true' && steps.merge.outputs.conflict == 'false'
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          pr="$(gh pr list --state open --head "$SYNC_BRANCH" --base main --json number --jq '.[0].number // empty')"
+          if [ -z "$pr" ]; then
+            gh pr create \
+              --base main \
+              --head "$SYNC_BRANCH" \
+              --title "chore: integrate current Nous main" \
+              --body "Automated upstream integration prepared by $RUN_URL. This PR promotes only after the complete Hermes CI gate passes."
+            pr="$(gh pr list --state open --head "$SYNC_BRANCH" --base main --json number --jq '.[0].number // empty')"
+          fi
+          gh pr edit "$pr" --add-label automated-upstream-sync
+          gh pr merge "$pr" --auto --merge
+
+          for issue in $(gh issue list --state open --search "Automated Nous integration is blocked in:title" --json number --jq '.[].number'); do
+            gh issue close "$issue" --comment "The integration branch now merges cleanly; CI and automatic promotion are proceeding in PR #$pr."
+          done

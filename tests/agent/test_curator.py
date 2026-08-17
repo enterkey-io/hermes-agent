@@ -208,14 +208,14 @@ def _write_cron_job(home: Path, skill_ref: str, monkeypatch):
     cron_dir = home / "cron"
     cron_dir.mkdir(parents=True, exist_ok=True)
     (cron_dir / "jobs.json").write_text(
-        json.dumps([{
+        json.dumps({"jobs": [{
             "id": "job1",
             "name": "quarterly digest",
             "enabled": True,
             "prompt": "write the digest",
             "skills": [skill_ref],
             "schedule": {"kind": "cron", "expr": "0 9 1 */3 *"},
-        }]),
+        }]}),
         encoding="utf-8",
     )
     import cron.jobs as cron_jobs

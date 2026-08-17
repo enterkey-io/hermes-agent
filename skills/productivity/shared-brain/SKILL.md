@@ -1,6 +1,13 @@
 ---
 name: shared-brain
-description: Use when an agent needs shared knowledge about Elliott's operations, projects, people, meetings, vendors, systems, history, or reusable facts that may exist across Craft and legacy sources.
+description: Search Elliott's shared GBrain knowledge safely.
+version: 1.0.0
+author: Elliott Hermes
+license: MIT
+platforms: [linux]
+metadata:
+  hermes:
+    tags: [memory, gbrain, search]
 ---
 
 # Shared Brain
@@ -27,10 +34,10 @@ between Craft, GBrain, and profile memory.
 Use only the local read-only broker client:
 
 ```bash
-node /home/elliott/.hermes/shared-skills/shared-brain/scripts/gbrain-broker-client.mjs sources --source shared_craft --params '{}'
-node /home/elliott/.hermes/shared-skills/shared-brain/scripts/gbrain-broker-client.mjs search --source shared_craft --params '{"query":"...","limit":5}'
-node /home/elliott/.hermes/shared-skills/shared-brain/scripts/gbrain-broker-client.mjs get --source shared_craft --params '{"page_ref":"..."}'
-node /home/elliott/.hermes/shared-skills/shared-brain/scripts/gbrain-broker-client.mjs graph --source shared_craft --params '{"page_ref":"...","depth":1}'
+node "$HOME/.hermes/shared-skills/shared-brain/scripts/gbrain-broker-client.mjs" sources --source shared_craft --params '{}'
+node "$HOME/.hermes/shared-skills/shared-brain/scripts/gbrain-broker-client.mjs" search --source shared_craft --params '{"query":"...","limit":5}'
+node "$HOME/.hermes/shared-skills/shared-brain/scripts/gbrain-broker-client.mjs" get --source shared_craft --params '{"page_ref":"..."}'
+node "$HOME/.hermes/shared-skills/shared-brain/scripts/gbrain-broker-client.mjs" graph --source shared_craft --params '{"page_ref":"...","depth":1}'
 ```
 
 Read [protocol.md](references/protocol.md) before using the client. Search

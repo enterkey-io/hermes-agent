@@ -175,7 +175,7 @@ def _authorize_operator(policy: Mapping[str, Any], operator: str) -> None:
         expected_uid = int(binding["uid"])
     except (KeyError, TypeError, ValueError) as exc:
         raise PermissionError("operator approval-policy binding is invalid") from exc
-    if expected_uid != os.geteuid():
+    if expected_uid != secure_io.current_uid():
         raise PermissionError("claimed operator does not match the authenticated local agent")
 
 
@@ -383,12 +383,12 @@ def _read_proposal(
 ) -> tuple[bytes, dict[str, Any]]:
     try:
         proposals = secure_io.open_descendant(
-            runbook_dir, (".proposals",), owner_uid=os.geteuid()
+            runbook_dir, (".proposals",), owner_uid=secure_io.current_uid()
         )
         try:
-            markdown = secure_io.read_file(proposals, f"{proposal_id}.md", owner_uid=os.geteuid())
+            markdown = secure_io.read_file(proposals, f"{proposal_id}.md", owner_uid=secure_io.current_uid())
             metadata = json.loads(
-                secure_io.read_file(proposals, f"{proposal_id}.json", owner_uid=os.geteuid()).decode("utf-8")
+                secure_io.read_file(proposals, f"{proposal_id}.json", owner_uid=secure_io.current_uid()).decode("utf-8")
             )
         finally:
             proposals.close()
@@ -460,28 +460,28 @@ def _write_index(
     *, value: bytes | None = None,
 ) -> bytes:
     value = _index_value(metadata, source_hash, operator) if value is None else value
-    secure_io.replace_file(runbook_dir, ".index.json", value, owner_uid=os.geteuid())
+    secure_io.replace_file(runbook_dir, ".index.json", value, owner_uid=secure_io.current_uid())
     return value
 
 
 def _write_revision_snapshot(
     runbook_dir: secure_io.SecureDir, approval_id: str, current: bytes, operator: str
 ) -> tuple[secure_io.SecureDir, str, str]:
-    revisions = secure_io.open_descendant(runbook_dir, (".revisions",), owner_uid=os.geteuid(), create=True)
+    revisions = secure_io.open_descendant(runbook_dir, (".revisions",), owner_uid=secure_io.current_uid(), create=True)
     markdown_name = f"{approval_id}.md"
     metadata_name = f"{approval_id}.json"
     try:
-        secure_io.replace_file(revisions, markdown_name, current, owner_uid=os.geteuid())
+        secure_io.replace_file(revisions, markdown_name, current, owner_uid=secure_io.current_uid())
         secure_io.replace_file(
             revisions, metadata_name,
             json.dumps({"approved_by": operator, "created_at": _now(), "sha256": _sha256_bytes(current)}, sort_keys=True).encode("utf-8"),
-            owner_uid=os.geteuid(),
+            owner_uid=secure_io.current_uid(),
         )
         return revisions, markdown_name, metadata_name
     except Exception:
         for name in (markdown_name, metadata_name):
             try:
-                secure_io.unlink_optional(revisions, name, owner_uid=os.geteuid())
+                secure_io.unlink_optional(revisions, name, owner_uid=secure_io.current_uid())
             except Exception:
                 pass
         revisions.close()
@@ -541,23 +541,23 @@ def _restore_canonical(
 ) -> None:
     cleanup_error: Exception | None = None
     try:
-        current = secure_io.read_file(runbook_dir, "RUNBOOK.md", owner_uid=os.geteuid())
+        current = secure_io.read_file(runbook_dir, "RUNBOOK.md", owner_uid=secure_io.current_uid())
         if current == candidate:
             if previous is None:
-                secure_io.unlink_if_matches(runbook_dir, "RUNBOOK.md", candidate, owner_uid=os.geteuid())
+                secure_io.unlink_if_matches(runbook_dir, "RUNBOOK.md", candidate, owner_uid=secure_io.current_uid())
             else:
-                secure_io.replace_file(runbook_dir, "RUNBOOK.md", previous, owner_uid=os.geteuid())
-            current_index = secure_io.read_optional_file(runbook_dir, ".index.json", owner_uid=os.geteuid())
+                secure_io.replace_file(runbook_dir, "RUNBOOK.md", previous, owner_uid=secure_io.current_uid())
+            current_index = secure_io.read_optional_file(runbook_dir, ".index.json", owner_uid=secure_io.current_uid())
             if current_index == candidate_index:
                 if previous_index is None:
-                    secure_io.unlink_optional(runbook_dir, ".index.json", owner_uid=os.geteuid())
+                    secure_io.unlink_optional(runbook_dir, ".index.json", owner_uid=secure_io.current_uid())
                 else:
-                    secure_io.replace_file(runbook_dir, ".index.json", previous_index, owner_uid=os.geteuid())
+                    secure_io.replace_file(runbook_dir, ".index.json", previous_index, owner_uid=secure_io.current_uid())
     finally:
         if revisions is not None and revision_names is not None:
             for name in revision_names:
                 try:
-                    secure_io.unlink_optional(revisions, name, owner_uid=os.geteuid())
+                    secure_io.unlink_optional(revisions, name, owner_uid=secure_io.current_uid())
                 except Exception as exc:
                     cleanup_error = cleanup_error or exc
             revisions.close()
@@ -571,24 +571,24 @@ def _restore_canonical_direct(
 ) -> None:
     """Use a fresh descriptor path if the normal recovery path is unavailable."""
     cleanup_error: Exception | None = None
-    current = secure_io.read_file(runbook_dir, "RUNBOOK.md", owner_uid=os.geteuid())
+    current = secure_io.read_file(runbook_dir, "RUNBOOK.md", owner_uid=secure_io.current_uid())
     if current == candidate:
         if previous is None:
-            secure_io.unlink_if_matches(runbook_dir, "RUNBOOK.md", candidate, owner_uid=os.geteuid())
+            secure_io.unlink_if_matches(runbook_dir, "RUNBOOK.md", candidate, owner_uid=secure_io.current_uid())
         else:
-            secure_io.replace_file(runbook_dir, "RUNBOOK.md", previous, owner_uid=os.geteuid())
-        current_index = secure_io.read_optional_file(runbook_dir, ".index.json", owner_uid=os.geteuid())
+            secure_io.replace_file(runbook_dir, "RUNBOOK.md", previous, owner_uid=secure_io.current_uid())
+        current_index = secure_io.read_optional_file(runbook_dir, ".index.json", owner_uid=secure_io.current_uid())
         if current_index == candidate_index:
             if previous_index is None:
-                secure_io.unlink_optional(runbook_dir, ".index.json", owner_uid=os.geteuid())
+                secure_io.unlink_optional(runbook_dir, ".index.json", owner_uid=secure_io.current_uid())
             else:
-                secure_io.replace_file(runbook_dir, ".index.json", previous_index, owner_uid=os.geteuid())
+                secure_io.replace_file(runbook_dir, ".index.json", previous_index, owner_uid=secure_io.current_uid())
     if revision_names is not None:
-        revisions = secure_io.open_descendant(runbook_dir, (".revisions",), owner_uid=os.geteuid())
+        revisions = secure_io.open_descendant(runbook_dir, (".revisions",), owner_uid=secure_io.current_uid())
         try:
             for name in revision_names:
                 try:
-                    secure_io.unlink_optional(revisions, name, owner_uid=os.geteuid())
+                    secure_io.unlink_optional(revisions, name, owner_uid=secure_io.current_uid())
                 except Exception as exc:
                     cleanup_error = cleanup_error or exc
         finally:
@@ -599,13 +599,13 @@ def _restore_canonical_direct(
 
 def _remove_audit(audit_dir: secure_io.SecureDir, name: str, expected: bytes | None) -> None:
     if expected is not None:
-        secure_io.unlink_if_matches(audit_dir, name, expected, owner_uid=os.geteuid())
+        secure_io.unlink_if_matches(audit_dir, name, expected, owner_uid=secure_io.current_uid())
 
 
 def _remove_audit_direct(audit_dir: secure_io.SecureDir, name: str, expected: bytes | None) -> None:
     """Repeat checked cleanup without a raw unlink TOCTOU fallback."""
     if expected is not None:
-        secure_io.unlink_if_matches(audit_dir, name, expected, owner_uid=os.geteuid())
+        secure_io.unlink_if_matches(audit_dir, name, expected, owner_uid=secure_io.current_uid())
 
 
 def activate_reviewed_proposal(request: ActivationRequest) -> ActivationResult:
@@ -632,16 +632,16 @@ def activate_reviewed_proposal(request: ActivationRequest) -> ActivationResult:
     registry_identity = _registry_identity(canonical_root)
     audit_path = target.parent / ".activations" / f"{approval['approval_id']}.json"
 
-    with secure_io.open_anchor(canonical_root, owner_uid=os.geteuid()) as canonical_dir:
+    with secure_io.open_anchor(canonical_root, owner_uid=secure_io.current_uid()) as canonical_dir:
         runbook_dir = secure_io.open_descendant(
-            canonical_dir, ("runbooks", slug), owner_uid=os.geteuid()
+            canonical_dir, ("runbooks", slug), owner_uid=secure_io.current_uid()
         )
         try:
-            with secure_io.exclusive_lock(runbook_dir, ".activation.lock", owner_uid=os.geteuid()):
+            with secure_io.exclusive_lock(runbook_dir, ".activation.lock", owner_uid=secure_io.current_uid()):
                 with secure_io.open_regular_file(
-                    canonical_dir, "workflow_registry.db", owner_uid=os.geteuid(), create=True
+                    canonical_dir, "workflow_registry.db", owner_uid=secure_io.current_uid(), create=True
                 ) as registry_file:
-                    secure_io.assert_same_file(canonical_dir, registry_file, owner_uid=os.geteuid())
+                    secure_io.assert_same_file(canonical_dir, registry_file, owner_uid=secure_io.current_uid())
                     candidate, candidate_metadata = _read_proposal(
                         runbook_dir, slug, normalized.proposal_id, normalized.proposal_sha256, target
                     )
@@ -649,7 +649,7 @@ def activate_reviewed_proposal(request: ActivationRequest) -> ActivationResult:
                     if candidate_record.status not in {"active", "retired"}:
                         raise PermissionError("reviewed candidate must declare status active or retired")
                     audit_dir = secure_io.open_descendant(
-                        runbook_dir, (".activations",), owner_uid=os.geteuid(), create=True
+                        runbook_dir, (".activations",), owner_uid=secure_io.current_uid(), create=True
                     )
                     revisions: secure_io.SecureDir | None = None
                     revision_names: tuple[str, str] | None = None
@@ -664,7 +664,7 @@ def activate_reviewed_proposal(request: ActivationRequest) -> ActivationResult:
                     audit_bytes: bytes | None = None
                     try:
                         audit_raw = secure_io.read_optional_file(
-                            audit_dir, f"{approval['approval_id']}.json", owner_uid=os.geteuid()
+                            audit_dir, f"{approval['approval_id']}.json", owner_uid=secure_io.current_uid()
                         )
                         if audit_raw is not None:
                             audit = json.loads(audit_raw.decode("utf-8"))
@@ -676,7 +676,7 @@ def activate_reviewed_proposal(request: ActivationRequest) -> ActivationResult:
                             ):
                                 raise PermissionError("approval id is already bound to a different activation")
                             replayed_current = secure_io.read_file(
-                                runbook_dir, "RUNBOOK.md", owner_uid=os.geteuid()
+                                runbook_dir, "RUNBOOK.md", owner_uid=secure_io.current_uid()
                             )
                             current_record, _ = _record_from_bytes(target, replayed_current)
                             if current_record.source_hash != candidate_record.source_hash:
@@ -685,19 +685,19 @@ def activate_reviewed_proposal(request: ActivationRequest) -> ActivationResult:
                                 registry_file.fd, db_identity=registry_identity
                             ) as conn:
                                 secure_io.assert_same_file(
-                                    canonical_dir, registry_file, owner_uid=os.geteuid()
+                                    canonical_dir, registry_file, owner_uid=secure_io.current_uid()
                                 )
                                 workflow = registry.get_definition(conn, candidate_record.id).to_dict()
                                 workflow["steps"] = [
                                     step.to_dict() for step in registry.list_steps(conn, candidate_record.id)
                                 ]
                             secure_io.assert_same_file(
-                                canonical_dir, registry_file, owner_uid=os.geteuid()
+                                canonical_dir, registry_file, owner_uid=secure_io.current_uid()
                             )
                             return ActivationResult(current_record, workflow, audit_path, replayed=True)
 
                         current = secure_io.read_optional_file(
-                            runbook_dir, "RUNBOOK.md", owner_uid=os.geteuid()
+                            runbook_dir, "RUNBOOK.md", owner_uid=secure_io.current_uid()
                         )
                         if current is None:
                             if normalized.expected_active_revision != _ABSENT_REVISION:
@@ -719,7 +719,7 @@ def activate_reviewed_proposal(request: ActivationRequest) -> ActivationResult:
                             _ABSENT_REVISION if current_record is None else current_record.revision
                         )
                         previous_index = secure_io.read_optional_file(
-                            runbook_dir, ".index.json", owner_uid=os.geteuid()
+                            runbook_dir, ".index.json", owner_uid=secure_io.current_uid()
                         )
                         # The terminal audit is a write-ahead commitment. Its
                         # real durable write must happen before any candidate
@@ -736,7 +736,7 @@ def activate_reviewed_proposal(request: ActivationRequest) -> ActivationResult:
                         audit_bytes = json.dumps(audit, sort_keys=True, separators=(",", ":")).encode("utf-8")
                         secure_io.replace_file(
                             audit_dir, f"{approval['approval_id']}.json", audit_bytes,
-                            owner_uid=os.geteuid(),
+                            owner_uid=secure_io.current_uid(),
                         )
                         mutating = True
                         if current is not None:
@@ -745,7 +745,7 @@ def activate_reviewed_proposal(request: ActivationRequest) -> ActivationResult:
                             )
                             revision_names = (revision_md, revision_json)
                         _persistence_boundary("revision")
-                        secure_io.replace_file(runbook_dir, "RUNBOOK.md", candidate, owner_uid=os.geteuid())
+                        secure_io.replace_file(runbook_dir, "RUNBOOK.md", candidate, owner_uid=secure_io.current_uid())
                         _persistence_boundary("canonical")
                         candidate_index = _index_value(
                             candidate_metadata, candidate_record.source_hash, normalized.operator
@@ -785,10 +785,10 @@ def activate_reviewed_proposal(request: ActivationRequest) -> ActivationResult:
                                 # The namespace must still name the checked inode before
                                 # this transaction becomes externally visible.
                                 secure_io.assert_same_file(
-                                    canonical_dir, registry_file, owner_uid=os.geteuid()
+                                    canonical_dir, registry_file, owner_uid=secure_io.current_uid()
                                 )
                         db_committed = True
-                        secure_io.assert_same_file(canonical_dir, registry_file, owner_uid=os.geteuid())
+                        secure_io.assert_same_file(canonical_dir, registry_file, owner_uid=secure_io.current_uid())
                         if revisions is not None:
                             revisions.close()
                         revisions = None
@@ -880,8 +880,8 @@ def load_approval_evidence(path: str | Path) -> Mapping[str, Any]:
     if not evidence_path.is_absolute() or "~" in evidence_path.parts:
         raise PermissionError("approval evidence path must be absolute and must not use ~")
     try:
-        with secure_io.open_anchor(evidence_path.parent, owner_uid=os.geteuid()) as parent:
-            payload = json.loads(secure_io.read_file(parent, evidence_path.name, owner_uid=os.geteuid()).decode("utf-8"))
+        with secure_io.open_anchor(evidence_path.parent, owner_uid=secure_io.current_uid()) as parent:
+            payload = json.loads(secure_io.read_file(parent, evidence_path.name, owner_uid=secure_io.current_uid()).decode("utf-8"))
     except (secure_io.SecurePathError, OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise PermissionError("approval evidence file is unavailable or unsafe") from exc
     if not isinstance(payload, dict):
