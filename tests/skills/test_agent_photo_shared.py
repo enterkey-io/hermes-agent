@@ -14,7 +14,7 @@ import pytest
 
 SKILL_DIR = Path(__file__).parents[2] / "skills" / "media" / "agent-photo"
 SCRIPTS_DIR = SKILL_DIR / "scripts"
-AUTHORIZED_WRAPPER = "/home/elliott/.local/bin/hermes-agent-photo"
+AUTHORIZED_WRAPPER = "$HOME/.local/bin/hermes-agent-photo"
 
 
 def _load_module(name: str, filename: str):

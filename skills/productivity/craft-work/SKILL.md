@@ -1,6 +1,13 @@
 ---
 name: craft-work
-description: Use when reading or changing Elliott's documents, plans, projects, tasks, people, organizations, places, meetings, bookmarks, specifications, decisions, daily notes, weekly reviews, or runbooks.
+description: Manage Elliott's Craft work through the reviewed broker.
+version: 1.0.0
+author: Elliott Hermes
+license: MIT
+platforms: [linux]
+metadata:
+  hermes:
+    tags: [productivity, craft, documents]
 ---
 
 # Craft Work
@@ -28,9 +35,9 @@ Read [authority.md](references/authority.md) whenever two systems overlap.
 Use only the reviewed local broker client:
 
 ```bash
-node /home/elliott/.hermes/shared-skills/craft-work/scripts/craft-ops-client.mjs contracts
-node /home/elliott/.hermes/shared-skills/craft-work/scripts/craft-ops-client.mjs run --contract <contract> --input '<json>'
-node /home/elliott/.hermes/shared-skills/craft-work/scripts/craft-ops-client.mjs reconcile --run-id <run-id>
+node "$HOME/.hermes/shared-skills/craft-work/scripts/craft-ops-client.mjs" contracts
+node "$HOME/.hermes/shared-skills/craft-work/scripts/craft-ops-client.mjs" run --contract <contract> --input '<json>'
+node "$HOME/.hermes/shared-skills/craft-work/scripts/craft-ops-client.mjs" reconcile --run-id <run-id>
 ```
 
 Read [tooling.md](references/tooling.md) before a command. A missing/failing

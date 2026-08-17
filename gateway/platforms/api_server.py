@@ -5997,6 +5997,16 @@ class APIServerAdapter(BasePlatformAdapter):
                     {"status": "accepted", "job_id": job_id}, status=202
                 )
 
+            # Protected jobs require a gateway-internal capability. Treat an
+            # authenticated external fire as accepted but do not let it touch
+            # the execution ledger, claim state, or handler path.
+            from cron.scheduler import _untrusted_cron_job_requires_capability
+
+            if _untrusted_cron_job_requires_capability(job_id):
+                return web.json_response(
+                    {"status": "accepted", "job_id": job_id}, status=202
+                )
+
             # Persist the attempt and exact store owner before acknowledging NAS.
             # A failure here is retryable and the reservation remains attached.
             try:

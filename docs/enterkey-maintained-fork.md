@@ -36,16 +36,17 @@ The stock updater intentionally does not merge `upstream/main` into a fork that
 has fork-only commits. That merge is a code-integration operation and must be
 reviewed and tested before it reaches the deployable branch.
 
-1. Create an upgrade branch from current Enterkey `main`.
-2. Fetch and merge `upstream/main` without rebasing or discarding Enterkey
-   history.
-3. Resolve conflicts in favor of current behavior only after checking both
-   implementations and their tests.
-4. Run focused tests for conflict areas, the updater and cron suites, the web
-   test/build, and broader tests proportional to the affected surface.
-5. Merge the tested branch into Enterkey `main` and push it to `origin`.
-6. Deploy through the stock Hermes update action and verify every managed
-   gateway and the dashboard.
+Enterkey's `Enterkey upstream integration` workflow performs that integration
+every six hours. It merges current Nous `main` into
+`automation/upstream-sync`, maintains one pull request, and enables promotion
+only after the repository's aggregate `All required checks pass` gate
+succeeds. Branch protection prevents an untested integration from reaching
+`main`.
+
+Merge conflicts, CI failures, and CI-sensitive changes remain administrator
+review events. They do not change `origin/main`, so the dashboard updater stays
+on the last tested release. The user-facing update procedure remains one action:
+press **Update now** to deploy the latest promoted Enterkey release.
 
 This separation makes the routine update path safe while keeping upstream code
 integration observable and reversible.

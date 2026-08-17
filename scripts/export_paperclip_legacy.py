@@ -326,7 +326,10 @@ def export_archive(args: argparse.Namespace) -> Path:
 
     attachments = _attachment_inventory(rows, args.storage_root)
     attachment_path = archive / "attachment-inventory.json"
-    attachment_path.write_text(json.dumps(attachments, indent=2, sort_keys=True) + "\n")
+    attachment_path.write_text(
+        json.dumps(attachments, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     files.append(
         {
             "path": str(attachment_path.relative_to(archive)),
@@ -371,9 +374,15 @@ def export_archive(args: argparse.Namespace) -> Path:
         }
     )
     reconciliation_path = archive / "reconciliation.json"
-    reconciliation_path.write_text(json.dumps(reconciliation, indent=2, sort_keys=True) + "\n")
+    reconciliation_path.write_text(
+        json.dumps(reconciliation, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     manifest_path = archive / "manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     restore_path = archive / "RESTORE.md"
     restore_path.write_text(
         "# Paperclip Legacy Archive Restore\n\n"

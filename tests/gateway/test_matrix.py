@@ -2197,7 +2197,9 @@ class TestMatrixUploadAndSend:
 class TestMatrixDiagnostics:
     @pytest.mark.asyncio
     async def test_recovery_key_bootstrap_retries_synapse_password_uia(self):
-        from mautrix.errors import MatrixUnknownRequestError
+        MatrixUnknownRequestError = pytest.importorskip(
+            "mautrix.errors"
+        ).MatrixUnknownRequestError
         from plugins.platforms.matrix.adapter import (
             _generate_matrix_recovery_key_with_password_uia,
         )

@@ -91,17 +91,7 @@ async def test_inbound_fire_cannot_issue_protected_dispatch_or_mutate_state(
     from cron.scheduler_provider import InProcessCronScheduler
 
     events = []
-    completed = threading.Event()
     provider = InProcessCronScheduler()
-    original_fire_due = provider.fire_due
-
-    def observed_fire_due(*args, **kwargs):
-        try:
-            return original_fire_due(*args, **kwargs)
-        finally:
-            completed.set()
-
-    provider.fire_due = observed_fire_due
     monkeypatch.setattr(
         "cron.scheduler_provider.resolve_cron_scheduler",
         lambda: provider,
@@ -144,7 +134,6 @@ async def test_inbound_fire_cannot_issue_protected_dispatch_or_mutate_state(
         )
         assert response.status == 202
 
-    assert completed.wait(1)
     assert events == []
 
 

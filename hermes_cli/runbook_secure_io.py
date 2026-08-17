@@ -41,6 +41,14 @@ class SecurePathError(PermissionError):
     """A privileged activation path failed its descriptor-level policy."""
 
 
+def current_uid() -> int:
+    """Return the effective POSIX UID or fail closed on unsupported hosts."""
+    get_effective_uid = getattr(os, "geteuid", None)
+    if get_effective_uid is None:
+        raise SecurePathError("privileged runbook activation requires a POSIX host")
+    return get_effective_uid()
+
+
 def _check_owner_mode(metadata: os.stat_result, *, directory: bool, owner_uid: int) -> None:
     expected_type = stat.S_ISDIR if directory else stat.S_ISREG
     if not expected_type(metadata.st_mode):
