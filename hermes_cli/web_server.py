@@ -6628,25 +6628,32 @@ async def get_memory_provider_config(name: str, surface: Optional[str] = None, p
     return await asyncio.to_thread(_run)
 
 @app.post("/api/memory/providers/{name}/setup")
-async def setup_memory_provider(name: str, body: MemoryProviderSetupRequest):
+async def setup_memory_provider(
+    name: str, body: MemoryProviderSetupRequest, profile: Optional[str] = None
+):
     _require_valid_memory_provider_name(name)
-    provider = _load_memory_provider(name)
-    if provider is None and not _memory_provider_manifest(name):
-        # No discoverable plugin directory → nothing whose manifest could
-        # legitimately declare setup commands. Refuse before the
-        # command-running path. (provider may be None with a manifest present
-        # when its pip deps aren't installed yet — that's the setup use case.)
-        raise HTTPException(status_code=404, detail=f"Unknown memory provider: {name}")
-    if provider is not None and body.values:
-        try:
-            _write_memory_provider_config_values(name, provider, body.values)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except Exception:
-            _log.exception("Failed to persist memory provider setup values for %s", name)
-            raise HTTPException(status_code=500, detail="Internal server error")
-    _invalidate_plugins_hub_cache()
-    return _install_memory_provider_setup(name)
+
+    def _run():
+        with _config_profile_scope(profile):
+            provider = _load_memory_provider(name)
+            if provider is None and not _memory_provider_manifest(name):
+                # No discoverable plugin directory → nothing whose manifest could
+                # legitimately declare setup commands. Refuse before the
+                # command-running path. (provider may be None with a manifest present
+                # when its pip deps aren't installed yet — that's the setup use case.)
+                raise HTTPException(status_code=404, detail=f"Unknown memory provider: {name}")
+            if provider is not None and body.values:
+                try:
+                    _write_memory_provider_config_values(name, provider, body.values)
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+                except Exception:
+                    _log.exception("Failed to persist memory provider setup values for %s", name)
+                    raise HTTPException(status_code=500, detail="Internal server error")
+            _invalidate_plugins_hub_cache()
+            return _install_memory_provider_setup(name)
+
+    return await asyncio.to_thread(_run)
 
 
 @app.put("/api/memory/providers/{name}/config")
@@ -13780,72 +13787,81 @@ async def remove_credential_pool_entry(provider: str, index: int):
 
 
 @app.get("/api/memory")
-async def get_memory_status():
+async def get_memory_status(profile: Optional[str] = None):
     # load_config(), file stats and provider discovery are disk reads — keep
     # them off the event loop.
     def _run():
-        cfg = load_config()
-        active = ""
-        mem = cfg.get("memory")
-        if isinstance(mem, dict):
-            active = _normalize_memory_provider_name(mem.get("provider"))
+        with _config_profile_scope(profile):
+            cfg = load_config()
+            active = ""
+            mem = cfg.get("memory")
+            if isinstance(mem, dict):
+                active = _normalize_memory_provider_name(mem.get("provider"))
 
-        # Built-in memory file sizes (so the UI can show what a reset would erase).
-        mem_dir = get_hermes_home() / "memories"
-        files = {}
-        for fname, key in (("MEMORY.md", "memory"), ("USER.md", "user")):
-            path = mem_dir / fname
-            files[key] = path.stat().st_size if path.exists() else 0
+            # Built-in memory file sizes (so the UI can show what a reset would erase).
+            mem_dir = get_hermes_home() / "memories"
+            files = {}
+            for fname, key in (("MEMORY.md", "memory"), ("USER.md", "user")):
+                path = mem_dir / fname
+                files[key] = path.stat().st_size if path.exists() else 0
 
-        return {
-            "active": active,
-            "providers": _discover_memory_provider_statuses(),
-            "builtin_files": files,
-        }
+            return {
+                "active": active,
+                "providers": _discover_memory_provider_statuses(),
+                "builtin_files": files,
+            }
 
     return await asyncio.to_thread(_run)
 
 
 @app.put("/api/memory/provider")
-async def set_memory_provider(body: MemoryProviderSelect):
+async def set_memory_provider(
+    body: MemoryProviderSelect, profile: Optional[str] = None
+):
     provider = _normalize_memory_provider_name(body.provider)
 
     def _run():
-        _require_memory_provider_ready(provider)
+        with _config_profile_scope(profile):
+            _require_memory_provider_ready(provider)
 
-        with _CONFIG_MUTATION_LOCK:
-            cfg = load_config()
-            if not isinstance(cfg.get("memory"), dict):
-                cfg["memory"] = {}
-            cfg["memory"]["provider"] = provider
-            save_config(cfg)
-        return {"ok": True, "active": provider}
+            with _CONFIG_MUTATION_LOCK:
+                cfg = load_config()
+                if not isinstance(cfg.get("memory"), dict):
+                    cfg["memory"] = {}
+                cfg["memory"]["provider"] = provider
+                save_config(cfg)
+            _invalidate_plugins_hub_cache()
+            return {"ok": True, "active": provider}
 
     return await asyncio.to_thread(_run)
 
 
 @app.post("/api/memory/reset")
-async def reset_memory(body: MemoryReset):
+async def reset_memory(body: MemoryReset, profile: Optional[str] = None):
     target = (body.target or "all").strip().lower()
     if target not in {"all", "memory", "user"}:
         raise HTTPException(status_code=400, detail="target must be all, memory, or user")
 
-    mem_dir = get_hermes_home() / "memories"
-    deleted = []
-    targets = []
-    if target in {"all", "memory"}:
-        targets.append("MEMORY.md")
-    if target in {"all", "user"}:
-        targets.append("USER.md")
-    for fname in targets:
-        path = mem_dir / fname
-        if path.exists():
-            try:
-                path.unlink()
-                deleted.append(fname)
-            except OSError as exc:
-                raise HTTPException(status_code=500, detail=f"Could not delete {fname}: {exc}")
-    return {"ok": True, "deleted": deleted}
+    def _run():
+        with _config_profile_scope(profile):
+            mem_dir = get_hermes_home() / "memories"
+            deleted = []
+            targets = []
+            if target in {"all", "memory"}:
+                targets.append("MEMORY.md")
+            if target in {"all", "user"}:
+                targets.append("USER.md")
+            for fname in targets:
+                path = mem_dir / fname
+                if path.exists():
+                    try:
+                        path.unlink()
+                        deleted.append(fname)
+                    except OSError as exc:
+                        raise HTTPException(status_code=500, detail=f"Could not delete {fname}: {exc}")
+            return {"ok": True, "deleted": deleted}
+
+    return await asyncio.to_thread(_run)
 
 
 # ---------------------------------------------------------------------------
@@ -17890,16 +17906,13 @@ def _strip_dashboard_manifest(p: Dict[str, Any]) -> Dict[str, Any]:
 
 
 _PLUGINS_HUB_CACHE_TTL_SECONDS = 5.0
-_plugins_hub_cache: Optional[Dict[str, Any]] = None
-_plugins_hub_cache_expires_at = 0.0
+_plugins_hub_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 _plugins_hub_cache_lock = threading.Lock()
 
 
 def _invalidate_plugins_hub_cache() -> None:
-    global _plugins_hub_cache, _plugins_hub_cache_expires_at
     with _plugins_hub_cache_lock:
-        _plugins_hub_cache = None
-        _plugins_hub_cache_expires_at = 0.0
+        _plugins_hub_cache.clear()
 
 
 _plugins_hub_probe_inflight: set = set()
@@ -17940,7 +17953,18 @@ def _schedule_check_fn_probe(fn) -> Optional[threading.Thread]:
     return thread
 
 
-def _merged_plugins_hub(force_refresh: bool = False) -> Dict[str, Any]:
+def _merged_plugins_hub(
+    force_refresh: bool = False, profile: Optional[str] = None
+) -> Dict[str, Any]:
+    """Build the plugins hub for the dashboard's selected profile."""
+    with _config_profile_scope(profile):
+        cache_key = str(get_hermes_home().resolve())
+        return _merged_plugins_hub_scoped(force_refresh, cache_key)
+
+
+def _merged_plugins_hub_scoped(
+    force_refresh: bool, cache_key: str
+) -> Dict[str, Any]:
     """Agent discovery + dashboard manifests + optional provider picker metadata.
 
     IMPORTANT: this powers a dashboard request path, so it must stay read-only
@@ -17950,12 +17974,12 @@ def _merged_plugins_hub(force_refresh: bool = False) -> Dict[str, Any]:
     availability, and we memoize the assembled payload briefly to collapse the
     dashboard's bursty duplicate fetches.
     """
-    global _plugins_hub_cache, _plugins_hub_cache_expires_at
     now = time.monotonic()
     if not force_refresh:
         with _plugins_hub_cache_lock:
-            if _plugins_hub_cache is not None and now < _plugins_hub_cache_expires_at:
-                return _plugins_hub_cache
+            cached = _plugins_hub_cache.get(cache_key)
+            if cached is not None and now < cached[0]:
+                return cached[1]
 
     started_at = time.monotonic()
     from hermes_cli.plugins_cmd import (
@@ -18091,17 +18115,19 @@ def _merged_plugins_hub(force_refresh: bool = False) -> Dict[str, Any]:
             len(memory_providers),
         )
     with _plugins_hub_cache_lock:
-        _plugins_hub_cache = payload
-        _plugins_hub_cache_expires_at = time.monotonic() + _PLUGINS_HUB_CACHE_TTL_SECONDS
+        _plugins_hub_cache[cache_key] = (
+            time.monotonic() + _PLUGINS_HUB_CACHE_TTL_SECONDS,
+            payload,
+        )
     return payload
 
 
 @app.get("/api/dashboard/plugins/hub")
-async def get_plugins_hub(request: Request):
+async def get_plugins_hub(request: Request, profile: Optional[str] = None):
     """Unified agent plugins + dashboard extension metadata (session protected)."""
     _require_token(request)
     try:
-        return _merged_plugins_hub()
+        return await asyncio.to_thread(_merged_plugins_hub, False, profile)
     except Exception as exc:
         _log.warning("plugins/hub failed: %s", exc)
         raise HTTPException(status_code=500, detail="Failed to build plugins hub.") from exc

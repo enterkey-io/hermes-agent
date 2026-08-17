@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { api, fetchJSON } from "./api";
+import { api, fetchJSON, setManagementProfile } from "./api";
 
 const reloadMocks = vi.hoisted(() => ({
   attemptDashboardTokenReloadOnce: vi.fn(() => false),
@@ -33,6 +33,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setManagementProfile("");
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -113,6 +114,37 @@ describe("api.getModelOptions", () => {
 
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/model/options?profile=default&refresh=1&include_unconfigured=1",
+      expect.objectContaining({ credentials: "include" }),
+    );
+  });
+});
+
+describe("management profile scoping", () => {
+  it("scopes memory status and mutations to the selected profile", async () => {
+    const fetchMock = jsonFetchMock({ active: "honcho" });
+    vi.stubGlobal("fetch", fetchMock);
+    setManagementProfile("main");
+
+    await api.getMemory();
+    await api.setMemoryProvider("honcho");
+    await api.resetMemory("user");
+
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "/api/memory?profile=main",
+      "/api/memory/provider?profile=main",
+      "/api/memory/reset?profile=main",
+    ]);
+  });
+
+  it("scopes the plugins hub to the selected profile", async () => {
+    const fetchMock = jsonFetchMock({ plugins: [], providers: {} });
+    vi.stubGlobal("fetch", fetchMock);
+    setManagementProfile("main");
+
+    await api.getPluginsHub();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/dashboard/plugins/hub?profile=main",
       expect.objectContaining({ credentials: "include" }),
     );
   });

@@ -360,6 +360,44 @@ class TestProfileScopedModel:
         assert resp.status_code == 404
 
 
+class TestProfileScopedMemory:
+    def test_memory_status_reads_requested_profile(self, client, isolated_profiles):
+        default = isolated_profiles["default"]
+        worker = isolated_profiles["worker_beta"]
+        (default / "memories").mkdir(exist_ok=True)
+        (worker / "memories").mkdir(exist_ok=True)
+        (default / "memories" / "MEMORY.md").write_text("global", encoding="utf-8")
+        (worker / "memories" / "MEMORY.md").write_text("worker-memory", encoding="utf-8")
+        (worker / "config.yaml").write_text(
+            "memory:\n  provider: honcho\n", encoding="utf-8"
+        )
+
+        resp = client.get("/api/memory", params={"profile": "worker_beta"})
+
+        assert resp.status_code == 200
+        assert resp.json()["active"] == "honcho"
+        assert resp.json()["builtin_files"]["memory"] == len("worker-memory")
+
+    def test_memory_reset_only_deletes_requested_profile(
+        self, client, isolated_profiles
+    ):
+        default = isolated_profiles["default"]
+        worker = isolated_profiles["worker_beta"]
+        for home in (default, worker):
+            (home / "memories").mkdir(exist_ok=True)
+            (home / "memories" / "USER.md").write_text("user", encoding="utf-8")
+
+        resp = client.post(
+            "/api/memory/reset",
+            params={"profile": "worker_beta"},
+            json={"target": "user"},
+        )
+
+        assert resp.status_code == 200
+        assert (default / "memories" / "USER.md").exists()
+        assert not (worker / "memories" / "USER.md").exists()
+
+
 class TestProfileScopedPostSetup:
     def test_post_setup_spawns_with_profile_flag(
         self, client, isolated_profiles, monkeypatch
