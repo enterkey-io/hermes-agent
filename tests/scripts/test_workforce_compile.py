@@ -1,6 +1,8 @@
 import importlib.util
 from pathlib import Path
 
+import yaml
+
 
 ROOT = Path(__file__).parents[2]
 SPEC = importlib.util.spec_from_file_location(
@@ -24,7 +26,7 @@ def test_insert_is_idempotent_and_preserves_unmanaged_content():
     assert first.count(module.BEGIN) == 1
 
 
-def test_canonical_compile_includes_planned_chloe(tmp_path):
+def test_canonical_compile_includes_active_chloe(tmp_path):
     manifest = module.compile_profiles(
         ROOT / "workforce" / "organization.yaml",
         ROOT / "workforce" / "templates" / "workforce-contract.md",
@@ -34,27 +36,40 @@ def test_canonical_compile_includes_planned_chloe(tmp_path):
     assert [item["agent"] for item in manifest["profiles"][:2]] == ["aurora", "grace"]
     assert all(item["original_instruction_preserved_as_exact_suffix"] for item in manifest["profiles"])
     chloe = next(item for item in manifest["profiles"] if item["agent"] == "chloe")
-    assert chloe["status"] == "planned"
+    assert chloe["status"] == "active"
+    assert chloe["source_kind"] == "live-profile"
+    assert chloe["source"] == "/home/elliott/.hermes/profiles/chloe/AGENTS.md"
+    assert chloe["target"] == "/home/elliott/.hermes/profiles/chloe/AGENTS.md"
     text = (tmp_path / "chloe" / "AGENTS.md").read_text()
     assert "may not interpret, rank, recommend" in text
     assert module.BEGIN in text
 
 
 def test_planned_profile_can_use_owner_only_private_source(tmp_path):
+    organization = yaml.safe_load(
+        (ROOT / "workforce" / "organization.yaml").read_text(encoding="utf-8")
+    )
+    chloe = next(item for item in organization["agents"] if item["agent"] == "chloe")
+    chloe["status"] = "planned"
+    chloe["profile_path"] = str(tmp_path / "missing-live-profile")
+    organization_path = tmp_path / "organization.yaml"
+    organization_path.write_text(
+        yaml.safe_dump(organization, sort_keys=False), encoding="utf-8"
+    )
     planned = tmp_path / "planned"
     source = planned / "chloe" / "AGENTS.md"
     source.parent.mkdir(parents=True)
     source.write_text("# Chloe private source\n\nHer established voice.\n")
     output = tmp_path / "output"
     manifest = module.compile_profiles(
-        ROOT / "workforce" / "organization.yaml",
+        organization_path,
         ROOT / "workforce" / "templates" / "workforce-contract.md",
         output,
         planned_source_root=planned,
     )
     entry = next(item for item in manifest["profiles"] if item["agent"] == "chloe")
     assert entry["source_kind"] == "planned-private-source"
-    assert entry["target"] == "/home/elliott/.hermes/profiles/chloe/AGENTS.md"
+    assert entry["target"] == str(tmp_path / "missing-live-profile" / "AGENTS.md")
     assert entry["source_sha256"]
     assert (output / "chloe" / "AGENTS.md").read_text().endswith(
         source.read_text()

@@ -91,7 +91,7 @@ agents:
     profile_path: /home/elliott/.hermes/profiles/milena
   - agent: chloe
     display_name: Chloe
-    status: planned
+    status: active
     operational: true
     department: null
     function: Workforce Observer and Recorder

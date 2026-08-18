@@ -36,7 +36,7 @@ def test_instruction_and_delivery_rollback_restores_complete_active_set(tmp_path
     )
 
     assert report["applied"] is True
-    assert report["profiles_without_pre_cutover_files"] == ["chloe"]
+    assert report["profiles_without_pre_cutover_files"] == []
     assert len(report["restore_files"]) == len(profile_names) * 2
     for name in profile_names:
         assert (profiles / name / "AGENTS.md").read_text() == f"before:{name}\n"

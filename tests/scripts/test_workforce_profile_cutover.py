@@ -13,10 +13,12 @@ def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def test_current_manifest_fails_closed_until_chloe_is_onboarded():
+def test_current_manifest_is_ready_after_chloe_onboarding():
     report, _ = preflight(ROOT / ".hermes/staging/profiles/manifest.json")
-    assert report["valid"] is False
-    assert any("chloe: status is planned" in gate for gate in report["gates"])
+    assert report["valid"] is True
+    assert report["profiles"] == 21
+    assert report["writes_ready"] == 21
+    assert report["gates"] == []
 
 
 def test_atomic_profile_cutover_creates_verified_archive_and_rolls_back(tmp_path: Path):
