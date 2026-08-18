@@ -24,6 +24,16 @@ LEGACY_PATTERNS = {
         r"send_(?:telegram|matrix|photon)|api\.telegram\.org|matrix.*send", re.I
     ),
 }
+PAPERCLIP_PATTERN = re.compile(r"\bpaperclip\b", re.I)
+PAPERCLIP_ARCHIVE_MARKERS = (
+    "do not",
+    "never",
+    "retired",
+    "archive-only",
+    "archive only",
+    "historical",
+    "provenance",
+)
 
 
 def _strings(value: Any, prefix: str = "") -> Iterable[tuple[str, str]]:
@@ -76,6 +86,52 @@ def _hidden_routes(job: dict[str, Any], profile_home: Path) -> list[dict[str, st
 def _origin_markers(job: dict[str, Any]) -> list[str]:
     value = str((job.get("origin") or {}).get("platform") or "").casefold()
     return [value] if value in {"telegram", "matrix", "photon", "buzz"} else []
+
+
+def _paperclip_evidence(
+    job: dict[str, Any], profile_home: Path
+) -> tuple[list[dict[str, str]], str]:
+    mentions: set[tuple[str, bool]] = set()
+    for field, value in _strings(job):
+        for line in value.splitlines():
+            if not PAPERCLIP_PATTERN.search(line):
+                continue
+            normalized = line.casefold()
+            archive_only = any(marker in normalized for marker in PAPERCLIP_ARCHIVE_MARKERS)
+            mentions.add((field, archive_only))
+    script_name = str(job.get("script") or "").strip()
+    if script_name:
+        candidates = [
+            profile_home / "scripts" / script_name,
+            profile_home.parent.parent / "scripts" / script_name,
+        ]
+        for candidate in candidates:
+            if not candidate.is_file():
+                continue
+            try:
+                lines = candidate.read_text(
+                    encoding="utf-8-sig", errors="replace"
+                ).splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                if PAPERCLIP_PATTERN.search(line):
+                    normalized = line.casefold()
+                    archive_only = any(
+                        marker in normalized for marker in PAPERCLIP_ARCHIVE_MARKERS
+                    )
+                    mentions.add(("script", archive_only))
+    evidence = [
+        {"source": source, "archive_only_context": archive_only}
+        for source, archive_only in sorted(mentions)
+    ]
+    if any(not archive_only for _source, archive_only in mentions):
+        disposition = "remove-active-paperclip-route"
+    elif mentions:
+        disposition = "archive-only prohibition/provenance; no active route detected"
+    else:
+        disposition = "historical-lookup-only; no active route detected"
+    return evidence, disposition
 
 
 def _command(profile_home: Path, job_id: str, destination: str) -> str:
@@ -144,6 +200,9 @@ def build_manifest(
                 intended = None
                 staged = None
             hidden = _hidden_routes(job, profiles_root / profile)
+            paperclip_mentions, paperclip_disposition = _paperclip_evidence(
+                job, profiles_root / profile
+            )
             current_platform = current_raw.split(":", 1)[0].casefold()
             disallowed = mode == "team" and (
                 current_platform in {"telegram", "matrix", "photon", "origin", "missing"}
@@ -169,7 +228,21 @@ def build_manifest(
                     "quiet_success": mode in {"team", "local-only"},
                     "exception_reason": rule.get("reason"),
                     "hidden_delivery_paths": hidden,
+                    "direct_send_fallbacks": [
+                        item for item in hidden
+                        if item["kind"] in {"direct_hermes_send", "direct_platform_send"}
+                    ],
                     "origin_provenance_markers": _origin_markers(job),
+                    "registry_cron_status": (
+                        "registered"
+                        if job.get("workflow_id") or job.get("workflow_slug") or job.get("runbook_slug")
+                        else "unregistered"
+                    ),
+                    "registry_cron_mismatch": not bool(
+                        job.get("workflow_id") or job.get("workflow_slug") or job.get("runbook_slug")
+                    ),
+                    "paperclip_mentions": paperclip_mentions,
+                    "legacy_paperclip_disposition": paperclip_disposition,
                     "migration_required": bool(staged),
                     "validation_blocked_until_migrated": disallowed,
                     "staged_change_not_executed": staged,
@@ -194,6 +267,12 @@ def build_manifest(
             "blocked_by_legacy_or_hidden_delivery": sum(
                 row["validation_blocked_until_migrated"] for row in jobs
             ),
+            "registry_cron_mismatches": sum(row["registry_cron_mismatch"] for row in jobs),
+            "direct_send_fallbacks": sum(bool(row["direct_send_fallbacks"]) for row in jobs),
+            "active_paperclip_routes": sum(
+                row["legacy_paperclip_disposition"] == "remove-active-paperclip-route"
+                for row in jobs
+            ),
             "unclassified": len(unclassified),
         },
         "unclassified": unclassified,
@@ -208,6 +287,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--organization", type=Path, required=True)
     parser.add_argument("--policy", type=Path, required=True)
     parser.add_argument("--topology", type=Path, required=True)
+    parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
     try:
         report = build_manifest(
@@ -215,7 +295,12 @@ def main(argv: list[str] | None = None) -> int:
         )
     except (OSError, ValueError, json.JSONDecodeError, yaml.YAMLError) as exc:
         report = {"valid": False, "mutation_performed": False, "error": str(exc)}
-    print(json.dumps(report, indent=2, sort_keys=True))
+    rendered = json.dumps(report, indent=2, sort_keys=True) + "\n"
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(rendered, encoding="utf-8")
+        args.output.chmod(0o600)
+    print(rendered, end="")
     return 0 if report["valid"] else 1
 
 

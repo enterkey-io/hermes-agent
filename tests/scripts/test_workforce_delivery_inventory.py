@@ -40,6 +40,10 @@ def test_delivery_inventory_redacts_targets_and_detects_hidden_fallback(tmp_path
     assert {item["kind"] for item in job["hidden_delivery_paths"]} >= {
         "telegram", "direct_hermes_send"
     }
+    assert job["direct_send_fallbacks"]
+    assert job["registry_cron_status"] == "unregistered"
+    assert job["registry_cron_mismatch"] is True
+    assert job["legacy_paperclip_disposition"].startswith("historical-lookup-only")
     assert "12345" not in json.dumps(report)
 
 
@@ -66,3 +70,52 @@ def test_private_personal_exception_stays_out_of_shared_buzz(tmp_path):
     assert job["classification"] == "private-personal"
     assert job["intended_room"] is None
     assert job["migration_required"] is False
+
+
+def test_paperclip_route_is_explicitly_dispositioned(tmp_path):
+    _write_jobs(
+        tmp_path,
+        "main",
+        [{
+            "id": "job-1",
+            "name": "legacy task creation",
+            "enabled": True,
+            "deliver": "origin",
+            "prompt": "Create a task in Paperclip after the check",
+            "workflow_id": "wf-1",
+        }],
+    )
+    report = build_manifest(
+        tmp_path,
+        ROOT / "workforce" / "organization.yaml",
+        ROOT / "workforce" / "delivery-policy.yaml",
+        ROOT / "workforce" / "buzz-topology.yaml",
+    )
+    job = report["jobs"][0]
+    assert job["legacy_paperclip_disposition"] == "remove-active-paperclip-route"
+    assert job["registry_cron_mismatch"] is False
+    assert report["summary"]["active_paperclip_routes"] == 1
+
+
+def test_archive_only_paperclip_prohibition_is_not_an_active_route(tmp_path):
+    _write_jobs(
+        tmp_path,
+        "main",
+        [{
+            "id": "job-1",
+            "name": "archive-safe check",
+            "enabled": True,
+            "deliver": "origin",
+            "prompt": "Do not create Paperclip issues; Paperclip is archive-only.",
+            "workflow_id": "wf-1",
+        }],
+    )
+    report = build_manifest(
+        tmp_path,
+        ROOT / "workforce" / "organization.yaml",
+        ROOT / "workforce" / "delivery-policy.yaml",
+        ROOT / "workforce" / "buzz-topology.yaml",
+    )
+    job = report["jobs"][0]
+    assert job["legacy_paperclip_disposition"].startswith("archive-only")
+    assert report["summary"]["active_paperclip_routes"] == 0
