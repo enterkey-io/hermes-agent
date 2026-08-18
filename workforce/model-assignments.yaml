@@ -1,0 +1,75 @@
+schema_version: 1
+effective_date: 2026-08-18
+status: trial
+approved_by: elliott
+
+presets:
+  sol-medium:
+    provider: openai-codex
+    model: gpt-5.6-sol
+    reasoning_effort: medium
+  terra-high:
+    provider: openai-codex
+    model: gpt-5.6-terra
+    reasoning_effort: high
+  luna-xhigh:
+    provider: openai-codex
+    model: gpt-5.6-luna
+    reasoning_effort: xhigh
+
+route_policy:
+  main_telegram_buzz_api:
+    source: agent_assignment
+    note: Buzz and the ordinary agent default must never use GLM.
+  matrix:
+    provider: ollama-cloud
+    model: glm-5.2:cloud
+    reasoning_effort: medium
+    note: GLM is reserved for Matrix chat only.
+  voice:
+    source: profile_platform_override
+    current_default_when_configured:
+      provider: openai-codex
+      model: gpt-5.4-mini
+      reasoning_effort: low
+    note: Chloe has no voice route until her deferred Vox onboarding is completed.
+  approval_review:
+    provider: openai-codex
+    model: gpt-5.6-terra
+    reasoning_effort: xhigh
+    note: The smart approval reviewer is independent of conversation and channel models.
+  cron:
+    source: per_job_pin
+    note: Scheduled jobs do not inherit this roster and require a separate reviewed migration.
+
+assignments:
+  aurora: {profile: aurora, preset: sol-medium}
+  grace: {profile: grace, preset: sol-medium}
+  brenna: {profile: brenna, preset: luna-xhigh}
+  milena: {profile: milena, preset: luna-xhigh}
+  chloe: {profile: chloe, preset: luna-xhigh}
+  emily: {profile: emily, preset: sol-medium}
+  sage: {profile: sage, preset: terra-high}
+  iris: {profile: iris, preset: terra-high}
+  sloane: {profile: sloane, preset: terra-high}
+  maya: {profile: maya, preset: terra-high}
+  reese: {profile: reese, preset: terra-high}
+  morgan: {profile: morgan, preset: terra-high}
+  alina: {profile: alina, preset: sol-medium}
+  root: {profile: main, preset: sol-medium}
+  bridgette: {profile: bridgette, preset: terra-high}
+  margot: {profile: margot, preset: terra-high}
+  kenzie: {profile: kenzie, preset: terra-high}
+  xenia: {profile: xenia, preset: sol-medium}
+  oyku: {profile: oyku, preset: terra-high}
+  maggie: {profile: maggie, preset: sol-medium}
+  mel: {profile: mel, preset: terra-high}
+
+change_contract:
+  - Update this registry first and record Elliott's approval.
+  - Update each profile's model provider, default model, and reasoning effort.
+  - Keep Matrix provider, model, and reasoning effort explicit in every operational profile.
+  - Do not add a Buzz model override; Buzz inherits the approved agent assignment.
+  - Reconcile any model language embedded in profile instructions.
+  - Treat Cron job pins as a separate inventory and approval decision.
+  - Back up changed profiles, restart only affected gateways, and validate effective routes.
