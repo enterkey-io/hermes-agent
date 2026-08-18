@@ -167,6 +167,13 @@ def validate(
         cutover_gates.append(
             "Chloe profile onboarding and Elliott-approved personal canon are incomplete"
         )
+    registry_mismatches = int(
+        (delivery.get("summary") or {}).get("registry_cron_mismatches") or 0
+    )
+    if registry_mismatches:
+        cutover_gates.append(
+            f"{registry_mismatches} enabled Cron jobs require reviewed Registry/runbook links"
+        )
     cutover_gates.extend(
         [
             "Buzz rooms and room UUID map require explicit creation authorization",
@@ -188,7 +195,7 @@ def validate(
         "friend_preservation": friends,
         "delivery_summary": delivery.get("summary"),
         "staged_implementation_ready": not errors,
-        "whole_workforce_cutover_ready": not errors and not planned,
+        "whole_workforce_cutover_ready": not errors and not planned and not registry_mismatches,
         "cutover_gates": cutover_gates,
         "live_cutover_authorized": False,
     }

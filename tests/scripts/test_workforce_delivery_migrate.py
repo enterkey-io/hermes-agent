@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from scripts.workforce_delivery_migrate import migrate
 
 
@@ -13,7 +15,8 @@ def test_delivery_migration_rewrites_team_route_without_touching_friend(tmp_path
     main_jobs.parent.mkdir(parents=True)
     main_jobs.write_text(json.dumps({"jobs": [{
         "id": "root-job", "name": "check", "enabled": True,
-        "deliver": "telegram:123", "prompt": "Send the exception to Telegram."
+        "deliver": "telegram:123", "prompt": "Send the exception to Telegram.",
+        "workflow_id": "wf-root-job"
     }]}))
     friend_jobs = profiles / "amy" / "cron" / "jobs.json"
     friend_jobs.parent.mkdir(parents=True)
@@ -38,3 +41,22 @@ def test_delivery_migration_rewrites_team_route_without_touching_friend(tmp_path
     assert "Telegram" not in updated["prompt"]
     assert "[WORKFORCE DELIVERY POLICY]" in updated["prompt"]
     assert friend_jobs.read_bytes() == before_friend
+
+
+def test_delivery_apply_blocks_unregistered_cron_job(tmp_path):
+    profiles = tmp_path / "profiles"
+    jobs = profiles / "main" / "cron" / "jobs.json"
+    jobs.parent.mkdir(parents=True)
+    jobs.write_text(json.dumps({"jobs": [{
+        "id": "root-job", "name": "check", "enabled": True,
+        "deliver": "origin", "prompt": "Check status."
+    }]}))
+    with pytest.raises(ValueError, match="blocked until every enabled Cron job"):
+        migrate(
+            profiles_root=profiles,
+            organization=ROOT / "workforce" / "organization.yaml",
+            policy=ROOT / "workforce" / "delivery-policy.yaml",
+            topology=ROOT / "workforce" / "buzz-topology.yaml",
+            room_map={"director-operations": "11111111-1111-1111-1111-111111111111"},
+            apply=True,
+        )

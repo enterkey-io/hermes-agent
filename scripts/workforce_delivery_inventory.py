@@ -241,6 +241,9 @@ def build_manifest(
                     "registry_cron_mismatch": not bool(
                         job.get("workflow_id") or job.get("workflow_slug") or job.get("runbook_slug")
                     ),
+                    "validation_blocked_until_registry_reconciled": not bool(
+                        job.get("workflow_id") or job.get("workflow_slug") or job.get("runbook_slug")
+                    ),
                     "paperclip_mentions": paperclip_mentions,
                     "legacy_paperclip_disposition": paperclip_disposition,
                     "migration_required": bool(staged),

@@ -95,6 +95,11 @@ def migrate(
     manifest = build_manifest(profiles_root, organization, policy, topology)
     if not manifest["valid"]:
         raise ValueError("delivery manifest is not valid")
+    if apply and manifest["summary"].get("registry_cron_mismatches"):
+        raise ValueError(
+            "delivery cutover is blocked until every enabled Cron job has a "
+            "reviewed Workflow Registry/runbook link"
+        )
     by_profile: dict[str, list[dict[str, Any]]] = {}
     for item in manifest["jobs"]:
         if item["classification"] in {"team", "local-only"}:
