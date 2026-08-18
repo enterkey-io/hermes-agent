@@ -201,6 +201,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--profiles-root", type=Path, required=True)
     parser.add_argument("--backup-manifest", type=Path, required=True)
     parser.add_argument("--delivery-manifest", type=Path, required=True)
+    parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
     try:
         report = validate(
@@ -212,7 +213,12 @@ def main(argv: list[str] | None = None) -> int:
         )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         report = {"valid": False, "errors": [str(exc)], "live_cutover_authorized": False}
-    print(json.dumps(report, indent=2, sort_keys=True))
+    rendered = json.dumps(report, indent=2, sort_keys=True) + "\n"
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(rendered, encoding="utf-8")
+        args.output.chmod(0o600)
+    print(rendered, end="")
     return 0 if report["valid"] else 1
 
 
