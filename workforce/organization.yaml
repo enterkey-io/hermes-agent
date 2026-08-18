@@ -68,7 +68,7 @@ agents:
     mission: Extract, verify, and close LIFT commitments without letting follow-up disappear.
     owned_outcomes: [LIFT commitments, meeting follow-up, accountability evidence]
     authority: [perform routine LIFT follow-up preparation and evidence work]
-    prohibited_actions: [take non-LIFT ownership, send external messages without approval, join Admin by default]
+    prohibited_actions: [take non-LIFT ownership, send external messages without approval, join admin by default]
     escalation_target: grace
     cross_team_request_path: Route cross-boundary needs through Grace.
     buzz_rooms: []

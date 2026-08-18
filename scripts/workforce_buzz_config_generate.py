@@ -30,6 +30,11 @@ def load_room_map(path: Path, topology: dict[str, Any]) -> dict[str, str]:
         raise ValueError("room map must be a mapping")
     result = {str(name): str(value) for name, value in raw.items()}
     expected = {room["name"] for room in topology["rooms"]}
+    expected.update(
+        name
+        for names in topology.get("profile_additional_rooms", {}).values()
+        for name in names
+    )
     missing = sorted(expected - result.keys())
     if missing:
         raise ValueError(f"room map missing: {', '.join(missing)}")
@@ -58,6 +63,8 @@ def generate(
         for member in room["members"]:
             if member in rooms_by_agent:
                 rooms_by_agent[member].append(room["name"])
+    for agent, room_names in topology.get("profile_additional_rooms", {}).items():
+        rooms_by_agent[agent].extend(room_names)
     changes = []
     for agent in org.operational_agents():
         profile_name = Path(agent.profile_path or agent.agent).name

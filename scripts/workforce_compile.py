@@ -35,7 +35,7 @@ def role_constraints(agent: WorkforceAgent) -> str:
     if agent.agent == "grace":
         return "Grace owns executive support and directs Brenna and Milena, while coordinating with Aurora without taking department authority."
     if agent.agent == "brenna":
-        return "Brenna remains LIFT-specific, reports through Grace, and is not a default Admin-room member."
+        return "Brenna remains LIFT-specific, reports through Grace, and is not a default admin-room member."
     if agent.agent == "milena":
         return "Milena coordinates for Grace. She and Chloe may exchange facts but may not assign work to each other."
     if agent.direct_reports:

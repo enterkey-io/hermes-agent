@@ -14,7 +14,7 @@ def test_topology_preserves_confirmed_admin_and_excludes_friends():
         ROOT / "workforce" / "buzz-topology.yaml",
         ROOT / "workforce" / "organization.yaml",
     )
-    admin = next(room for room in topology["rooms"] if room["name"] == "Admin")
+    admin = next(room for room in topology["rooms"] if room["name"] == "admin")
     assert set(admin["members"]) == {"elliott", "aurora", "chloe", "grace", "milena"}
     assert all("amy" not in room["members"] for room in topology["rooms"])
     assert all("kourtnie" not in room["members"] for room in topology["rooms"])
@@ -23,13 +23,14 @@ def test_topology_preserves_confirmed_admin_and_excludes_friends():
         for room in topology["rooms"]
         if room["name"].startswith("director-")
     )
+    assert topology["profile_additional_rooms"] == {"chloe": ["general"]}
 
 
 def test_compare_is_read_only_and_reports_membership_drift():
     topology = {
         "rooms": [
             {
-                "name": "Admin",
+                "name": "admin",
                 "status": "confirmed",
                 "members": ["elliott", "aurora", "chloe", "grace", "milena"],
             }
@@ -37,7 +38,7 @@ def test_compare_is_read_only_and_reports_membership_drift():
     }
     report = compare(
         topology,
-        [{"name": "Admin", "members": ["elliott", "aurora", "grace", "stranger"]}],
+        [{"name": "admin", "members": ["elliott", "aurora", "grace", "stranger"]}],
     )
     assert report["mutation_performed"] is False
     assert report["rooms"][0]["missing_members"] == ["chloe", "milena"]

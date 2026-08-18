@@ -48,7 +48,7 @@ def _owner(line: str) -> tuple[str, str | None, str]:
         "xenia": "director-trading",
         "grace": "executive-support",
         "alina": "director-agent-systems",
-        "aurora": "Admin",
+        "aurora": "admin",
         "main": "director-operations",
     }.get(profile)
     privacy = "private-personal" if "wardrobe" in line.casefold() else "operational"

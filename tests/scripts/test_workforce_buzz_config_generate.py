@@ -14,6 +14,7 @@ def test_config_plan_is_complete_exact_and_non_mutating(tmp_path: Path):
         room["name"]: f"00000000-0000-4000-8000-{index:012d}"
         for index, room in enumerate(topology["rooms"], 1)
     }
+    room_map["general"] = "ffffffff-ffff-4fff-8fff-ffffffffffff"
     room_map_path = tmp_path / "rooms.yaml"
     room_map_path.write_text(yaml.safe_dump(room_map))
     profiles = tmp_path / "profiles"
@@ -36,6 +37,12 @@ def test_config_plan_is_complete_exact_and_non_mutating(tmp_path: Path):
     by_agent = {item["agent"]: item for item in report["profiles"]}
     assert by_agent["root"]["profile"] == "main"
     assert by_agent["root"]["home_room"] == "director-operations"
-    assert by_agent["chloe"]["home_room"] == "Admin"
+    assert by_agent["chloe"]["home_room"] == "admin"
+    assert "general" in by_agent["chloe"]["rooms"]
+    assert all(
+        "general" not in item["rooms"]
+        for agent, item in by_agent.items()
+        if agent != "chloe"
+    )
     assert all(len(item["commands_not_executed"]) == 3 for item in report["profiles"])
     assert (profiles / "aurora/config.yaml").read_text().find("channels: old") >= 0

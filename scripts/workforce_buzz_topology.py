@@ -60,7 +60,7 @@ def load_topology(path: Path, organization_path: Path) -> dict[str, Any]:
     if admin is None or set(admin["members"]) != {
         "elliott", "aurora", "chloe", "grace", "milena"
     }:
-        raise BuzzTopologyError("Admin membership must exactly match the confirmed roster")
+        raise BuzzTopologyError("admin membership must exactly match the confirmed roster")
     director_rooms = [room for room in rooms if room["name"].startswith("director-")]
     for room in director_rooms:
         if "chloe" not in room["members"] or "aurora" not in room["members"]:
@@ -81,7 +81,36 @@ def load_topology(path: Path, organization_path: Path) -> dict[str, Any]:
             raise BuzzTopologyError(f"{agent}: unknown home room {room_name}")
         if agent not in room["members"]:
             raise BuzzTopologyError(f"{agent}: not a member of home room {room_name}")
-    return {"schema_version": 1, "rooms": rooms, "profile_home_rooms": home_rooms}
+    raw_additional = raw.get("profile_additional_rooms") or {}
+    if not isinstance(raw_additional, dict):
+        raise BuzzTopologyError("profile_additional_rooms must be a mapping")
+    additional_rooms: dict[str, list[str]] = {}
+    managed_memberships = {
+        agent: {room["name"].casefold() for room in rooms if agent in room["members"]}
+        for agent in operational
+    }
+    for raw_agent, raw_names in raw_additional.items():
+        agent = str(raw_agent).casefold()
+        if agent not in operational:
+            raise BuzzTopologyError(f"additional-room profile is not operational: {agent}")
+        if not isinstance(raw_names, list):
+            raise BuzzTopologyError(f"{agent}: additional rooms must be a list")
+        names_for_agent = [str(name).strip() for name in raw_names]
+        folded = [name.casefold() for name in names_for_agent]
+        if any(not name for name in names_for_agent) or len(folded) != len(set(folded)):
+            raise BuzzTopologyError(f"{agent}: additional rooms must be unique and non-empty")
+        duplicates = sorted(set(folded) & managed_memberships[agent])
+        if duplicates:
+            raise BuzzTopologyError(
+                f"{agent}: additional rooms duplicate managed membership: {', '.join(duplicates)}"
+            )
+        additional_rooms[agent] = names_for_agent
+    return {
+        "schema_version": 1,
+        "rooms": rooms,
+        "profile_home_rooms": home_rooms,
+        "profile_additional_rooms": additional_rooms,
+    }
 
 
 def _run_buzz(cli: str, relay: str, args: list[str]) -> Any:

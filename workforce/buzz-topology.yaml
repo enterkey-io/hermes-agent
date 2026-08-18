@@ -1,8 +1,8 @@
 schema_version: 1
 profile_home_rooms:
-  aurora: Admin
+  aurora: admin
   grace: executive-support
-  chloe: Admin
+  chloe: admin
   milena: executive-support
   brenna: lift-accountability
   emily: director-product
@@ -21,8 +21,10 @@ profile_home_rooms:
   oyku: trading-staff
   maggie: director-finance
   mel: director-vision
+profile_additional_rooms:
+  chloe: [general]
 rooms:
-  - name: Admin
+  - name: admin
     status: confirmed
     visibility: private
     purpose: Reserved escalations, material risks, unresolved dependencies, and meaningful workforce outcomes.
