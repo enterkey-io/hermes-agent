@@ -180,6 +180,7 @@ def build_manifest(
             if mode != "team":
                 room = None
             failure_room = str(rule.get("failure_room") or room or "") or None
+            quiet_success = bool(rule.get("quiet_success", True))
             if mode == "team" and room not in room_names:
                 raise ValueError(f"{key}: unknown intended Buzz room {room!r}")
             if failure_room and failure_room not in room_names:
@@ -225,7 +226,7 @@ def build_manifest(
                     "intended_destination": intended,
                     "intended_room": room,
                     "failure_room": failure_room,
-                    "quiet_success": mode in {"team", "local-only"},
+                    "quiet_success": quiet_success,
                     "exception_reason": rule.get("reason"),
                     "hidden_delivery_paths": hidden,
                     "direct_send_fallbacks": [

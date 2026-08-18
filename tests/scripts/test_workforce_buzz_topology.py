@@ -23,6 +23,13 @@ def test_topology_preserves_confirmed_admin_and_excludes_friends():
         for room in topology["rooms"]
         if room["name"].startswith("director-")
     )
+    executive_support = next(
+        room for room in topology["rooms"] if room["name"] == "executive-support"
+    )
+    assert executive_support["status"] == "confirmed"
+    assert set(executive_support["members"]) == {
+        "elliott", "aurora", "chloe", "grace", "brenna", "milena"
+    }
     assert topology["profile_additional_rooms"] == {"chloe": ["general"]}
 
 

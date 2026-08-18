@@ -72,6 +72,42 @@ def test_private_personal_exception_stays_out_of_shared_buzz(tmp_path):
     assert job["migration_required"] is False
 
 
+def test_lift_and_meeting_prep_route_to_executive_support(tmp_path):
+    _write_jobs(
+        tmp_path,
+        "brenna",
+        [{
+            "id": "e0c7626e4467",
+            "name": "LIFT pulse",
+            "enabled": True,
+            "deliver": "origin",
+            "workflow_id": "wf-lift-pulse",
+        }],
+    )
+    _write_jobs(
+        tmp_path,
+        "grace",
+        [{
+            "id": "be5404c1511b",
+            "name": "LIFT meeting prep",
+            "enabled": True,
+            "deliver": "origin",
+            "workflow_id": "wf-meeting-prep",
+        }],
+    )
+    report = build_manifest(
+        tmp_path,
+        ROOT / "workforce" / "organization.yaml",
+        ROOT / "workforce" / "delivery-policy.yaml",
+        ROOT / "workforce" / "buzz-topology.yaml",
+    )
+    by_profile = {job["profile"]: job for job in report["jobs"]}
+    assert by_profile["brenna"]["intended_room"] == "executive-support"
+    assert by_profile["grace"]["intended_room"] == "executive-support"
+    assert by_profile["brenna"]["quiet_success"] is False
+    assert by_profile["grace"]["quiet_success"] is True
+
+
 def test_paperclip_route_is_explicitly_dispositioned(tmp_path):
     _write_jobs(
         tmp_path,

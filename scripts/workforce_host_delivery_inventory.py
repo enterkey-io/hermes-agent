@@ -13,6 +13,7 @@ from typing import Any
 
 
 ROUTE_PATTERNS = {
+    "buzz": re.compile(r"\bbuzz:", re.I),
     "telegram": re.compile(r"telegram", re.I),
     "matrix": re.compile(r"matrix", re.I),
     "photon": re.compile(r"photon", re.I),
@@ -81,7 +82,9 @@ def build(text: str) -> dict[str, Any]:
         paths = list(SCRIPT_PATH.finditer(line))
         if paths:
             basename = Path(paths[0].group("path")).name
-        migration = privacy == "operational" and bool(routes)
+        legacy_route = bool(set(routes) & {"telegram", "matrix", "photon", "elliott-msg"})
+        unbound_direct_send = "hermes-send" in routes and "buzz" not in routes
+        migration = privacy == "operational" and (legacy_route or unbound_direct_send)
         entries.append({
             "ordinal": ordinal,
             "line_sha256": hashlib.sha256(line.encode()).hexdigest(),

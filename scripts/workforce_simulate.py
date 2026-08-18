@@ -19,10 +19,18 @@ SAFE_ROUTINE_SIGNALS = (
     "verify the result",
     "close the loop",
 )
-SUBSTANTIAL_SIGNALS = (
+SUBSTANTIAL_SIGNAL_SIGNALS = (
     "I do not launch it",
     "submit one concrete workforce signal for Aurora",
     "decision ownership",
+)
+AURORA_EXECUTION_SIGNALS = (
+    "translate that intent into execution",
+    "delegate the rest to the right owner",
+    "set an evidence-based checkpoint",
+    "follow through until the outcome is completed",
+    "I do not send a signal to myself",
+    "approve, reject, defer, narrow, or reroute it",
 )
 RESERVED_SIGNALS = (
     "spending",
@@ -51,7 +59,9 @@ def simulate(organization: Path, staging_root: Path) -> dict[str, Any]:
             re.sub(r"\s+", " ", signal).casefold() in normalized for signal in signals
         )
         safe = contains(SAFE_ROUTINE_SIGNALS)
-        substantial = contains(SUBSTANTIAL_SIGNALS)
+        substantial = contains(
+            AURORA_EXECUTION_SIGNALS if agent.agent == "aurora" else SUBSTANTIAL_SIGNAL_SIGNALS
+        )
         reserved = contains(RESERVED_SIGNALS)
         durable = contains(DURABLE_SIGNALS)
         manager_route = agent.manager == "elliott"
@@ -65,7 +75,11 @@ def simulate(organization: Path, staging_root: Path) -> dict[str, Any]:
             "agent": agent.agent,
             "status": agent.status,
             "routine_approved_work": "execute_verify_close" if safe else "failed",
-            "substantial_new_work": "signal_aurora_do_not_launch" if substantial else "failed",
+            "substantial_new_work": (
+                "aurora_decides_delegates_and_follows_through"
+                if substantial and agent.agent == "aurora"
+                else "signal_aurora_do_not_launch" if substantial else "failed"
+            ),
             "reserved_action": "escalate_gate_continue_safe_work" if reserved else "failed",
             "durable_record_routing": "canonical_systems" if durable else "failed",
             "manager_can_assign": manager_route,

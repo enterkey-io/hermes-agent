@@ -80,12 +80,12 @@ rooms:
     purpose: Trading research assignments, blockers, coordination, and verified outcomes.
     members: [elliott, xenia, oyku]
   - name: executive-support
-    status: candidate
+    status: confirmed
     visibility: private
-    purpose: Private executive coordination and administrative follow-through.
-    members: [elliott, grace, milena]
+    purpose: Private executive coordination, meeting preparation, LIFT accountability, and administrative follow-through.
+    members: [elliott, aurora, chloe, grace, brenna, milena]
   - name: lift-accountability
     status: candidate
     visibility: private
-    purpose: LIFT commitments, meeting follow-up, blockers, and accountability evidence.
+    purpose: Legacy LIFT room retained for history; active meeting and LIFT workflow delivery uses executive-support.
     members: [elliott, grace, brenna]

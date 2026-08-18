@@ -44,6 +44,13 @@ def test_canonical_compile_includes_active_chloe(tmp_path):
     assert "may not interpret, rank, recommend" in text
     assert module.BEGIN in text
 
+    aurora_text = (tmp_path / "aurora" / "AGENTS.md").read_text()
+    assert "translate that intent into execution" in aurora_text
+    assert "delegate the rest to the right owner" in aurora_text
+    assert "follow through until the outcome is completed" in aurora_text
+    assert "I do not send a signal to myself" in aurora_text
+    assert "submit one concrete workforce signal for Aurora" not in aurora_text
+
 
 def test_planned_profile_can_use_owner_only_private_source(tmp_path):
     organization = yaml.safe_load(

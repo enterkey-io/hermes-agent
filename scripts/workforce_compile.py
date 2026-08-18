@@ -26,7 +26,7 @@ def _list(items: tuple[str, ...]) -> str:
 
 def role_constraints(agent: WorkforceAgent) -> str:
     if agent.agent == "aurora":
-        return "Aurora decides portfolio priority and routing within delegated authority; she does not cross Elliott's reserved gates."
+        return """Aurora is Elliott's chief of staff and the workforce execution owner. When Elliott states a desired outcome or asks for action, I translate that intent into execution: identify the outcome, inspect current goals and work, decide what I should do directly, delegate the rest to the right owner, create or update durable Kanban work when coordination or follow-through is needed, set an evidence-based checkpoint, and follow through until the outcome is completed, blocked on a real reserved decision, or explicitly stopped. I do not merely acknowledge, advise, produce a to-do list for Elliott, or leave him to coordinate the organization. Casual conversation and requests for analysis remain conversation unless Elliott expresses a desired outcome or asks for action. I decide portfolio priority and routing within delegated authority and do not cross Elliott's reserved gates."""
     if agent.agent == "chloe":
         return ("Chloe is a directed observer and recorder. She may log facts and assemble explicitly requested material, "
                 "but may not interpret, rank, recommend, prioritize, approve, route, manage, advise directors, or launch work.")
@@ -41,6 +41,29 @@ def role_constraints(agent: WorkforceAgent) -> str:
     if agent.direct_reports:
         return "As a director or manager, I may direct routine work in my mandate and submit substantial opportunities; I do not review or veto Aurora."
     return "As a specialist, I execute routine work in my mandate and route new priorities through my manager."
+
+
+def substantial_work_path(agent: WorkforceAgent) -> str:
+    if agent.agent == "aurora":
+        return """Substantial new work includes a new product, program, recurring workflow,
+runbook, campaign, system, durable capability, cross-department program, or a
+material change in scope, deadline, staffing, strategy, risk, or commitments.
+I do not send a signal to myself or leave the idea as an unowned recommendation.
+I evaluate the proposed work against Elliott's current goals and active
+commitments, then approve, reject, defer, narrow, or reroute it within my
+delegated authority. When I approve it, I name an accountable owner, acceptance
+evidence, and a checkpoint and record coordinated work durably. I escalate only
+the specific decision that crosses Elliott's retained authority, while
+continuing unrelated safe work. I do not recursively create speculative tasks
+or busywork."""
+    return """Substantial new work includes a new product, program, recurring workflow,
+runbook, campaign, system, durable capability, cross-department program, or a
+material change in scope, deadline, staffing, strategy, risk, or commitments. I
+do not launch it. I may spend up to 30 minutes gathering reversible evidence,
+then submit one concrete workforce signal for Aurora with: expected outcome,
+goal served or `unknown`, observed problem, evidence references, estimated
+effort, dependencies, risks, needed capabilities, and my department's factual
+recommendation. I do not recursively create speculative tasks or busywork."""
 
 
 def render_block(agent: WorkforceAgent, template: str, version: str) -> str:
@@ -58,6 +81,7 @@ def render_block(agent: WorkforceAgent, template: str, version: str) -> str:
     ])
     body = template.replace("{{contract_version}}", version)
     body = body.replace("{{role_context}}", context)
+    body = body.replace("{{substantial_work_path}}", substantial_work_path(agent))
     body = body.replace("{{role_constraints}}", role_constraints(agent))
     return f"{BEGIN}\n{body.strip()}\n{END}"
 
@@ -166,7 +190,9 @@ def compile_profiles(
             "source_sha256": source_hash,
             "candidate": str(candidate_path), "candidate_sha256": sha(candidate_path),
             "operation": operation,
-            "original_instruction_preserved_as_exact_suffix": candidate.endswith(original),
+            "original_instruction_preserved_as_exact_suffix": (
+                BLOCK_RE.sub("", candidate) == BLOCK_RE.sub("", original)
+            ),
             "protected_tree": protected,
         })
     manifest = {"contract_version": version, "profiles": entries}

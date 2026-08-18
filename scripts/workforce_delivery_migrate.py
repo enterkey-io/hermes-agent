@@ -26,6 +26,10 @@ PLATFORM_REPLACEMENTS = (
     (re.compile(r"matrix", re.I), "Buzz"),
     (re.compile(r"photon", re.I), "Buzz"),
 )
+MANAGED_DELIVERY_BLOCK = re.compile(
+    r"\n*\[WORKFORCE DELIVERY POLICY\]\n.*\Z",
+    re.DOTALL,
+)
 
 
 def _load_room_map(path: Path) -> dict[str, str]:
@@ -50,19 +54,25 @@ def _verified_backup(path: Path) -> None:
         raise ValueError("verified backup is incomplete")
 
 
-def _rewrite_prompt(value: str, room: str) -> str:
+def _rewrite_prompt(value: str, room: str, *, quiet_success: bool) -> str:
     rewritten = value
     for pattern, replacement in PLATFORM_REPLACEMENTS:
         rewritten = pattern.sub(replacement, rewritten)
+    rewritten = MANAGED_DELIVERY_BLOCK.sub("", rewritten).rstrip()
+    success_policy = (
+        "Routine success is silent when there is no decision-changing result, "
+        "exception, blocker, or runbook-required report."
+        if quiet_success else
+        "Deliver the runbook-required report on its normal cadence; do not suppress "
+        "it merely because it reports no exception or change."
+    )
     marker = (
         "\n\n[WORKFORCE DELIVERY POLICY]\n"
         f"Return team-facing output only through the Cron destination for Buzz room `{room}`. "
         "Do not call a platform messaging tool or use a fallback destination. "
-        "Routine success is silent when there is no decision-changing result, exception, or blocker.\n"
+        f"{success_policy}\n"
     )
-    if "[WORKFORCE DELIVERY POLICY]" not in rewritten:
-        rewritten = rewritten.rstrip() + marker
-    return rewritten
+    return rewritten + marker
 
 
 def _atomic_write_json(path: Path, payload: Any) -> None:
@@ -130,23 +140,32 @@ def migrate(
                     raise ValueError(f"missing room UUID for {room}")
                 destination = f"buzz:{room_id}"
                 old_prompt = str(job.get("prompt") or "")
-                new_prompt = _rewrite_prompt(old_prompt, room)
-                if old_prompt != new_prompt:
+                new_prompt = _rewrite_prompt(
+                    old_prompt,
+                    room,
+                    quiet_success=bool(item["quiet_success"]),
+                )
+                prompt_changed = old_prompt != new_prompt
+                if prompt_changed:
                     job["prompt"] = new_prompt
                     profile_changed = True
             else:
                 destination = "local"
-            if str(job.get("deliver") or "missing") != destination:
+                prompt_changed = False
+            destination_changed = str(job.get("deliver") or "missing") != destination
+            if destination_changed:
                 job["deliver"] = destination
                 profile_changed = True
-            changes.append(
-                {
-                    "profile": profile,
-                    "job_id": item["job_id"],
-                    "destination": destination,
-                    "prompt_policy_added": item["classification"] == "team",
-                }
-            )
+            if prompt_changed or destination_changed:
+                changes.append(
+                    {
+                        "profile": profile,
+                        "job_id": item["job_id"],
+                        "destination": destination,
+                        "prompt_changed": prompt_changed,
+                        "destination_changed": destination_changed,
+                    }
+                )
         if apply and profile_changed:
             _atomic_write_json(path, payload)
     return {
