@@ -674,6 +674,29 @@ class BuzzAdapter(BasePlatformAdapter):
             return None
         return (metadata or {}).get("thread_id") or reply_to
 
+    async def _dm_mention_args(self, chat_id: str) -> List[str]:
+        """Address an outbound DM to its sole peer explicitly.
+
+        Buzz validates every ``@Name`` token in message content.  A model may
+        naturally address the user by a name that is not the display name Buzz
+        knows for that member, which makes an otherwise valid DM fail unless
+        the recipient pubkey is supplied via ``--mention``.  The explicit
+        recipient also gives the resulting event its structural p-tag.
+
+        Never infer this for rooms: group-channel mentions must keep Buzz's
+        normal membership and name validation.
+        """
+        channel_id = str(chat_id)
+        state = self._channel_state.get(channel_id) or {}
+        if state.get("chat_type") != "dm":
+            return []
+        peer = _normalize_user_ref(str(state.get("peer_pubkey") or ""))
+        if not peer or peer == self._self_pubkey:
+            peer = await self._two_party_dm_peer(channel_id)
+            if peer:
+                state["peer_pubkey"] = peer
+        return ["--mention", peer] if peer else []
+
     async def send(
         self,
         chat_id: str,
@@ -684,6 +707,7 @@ class BuzzAdapter(BasePlatformAdapter):
         if not content:
             return SendResult(success=False, error="Empty message")
         args = ["messages", "send", "--channel", str(chat_id), "--content", "-"]
+        args += await self._dm_mention_args(str(chat_id))
         # Keep room replies at one thread level. The gateway's direct reply
         # target can be the latest child message, while thread_id is the
         # canonical root parsed from the inbound NIP-10 tags. DMs stay flat.
@@ -760,6 +784,7 @@ class BuzzAdapter(BasePlatformAdapter):
                 "--file", str(local),
                 "--content", "-",
             ]
+            args += await self._dm_mention_args(str(chat_id))
             reply_target = self._reply_target(chat_id, reply_to, metadata)
             if reply_target:
                 args += ["--reply-to", str(reply_target)]
@@ -1066,6 +1091,8 @@ class BuzzAdapter(BasePlatformAdapter):
             # leaked in via ``channels list`` latches to chat_type="dm" here,
             # so it bypasses the mention gate from the very first poll.
             self._maybe_latch_dm(channel_id, state, event)
+            if state["chat_type"] == "dm":
+                self._remember_dm_peer(state, event.get("pubkey"))
         self._trim_seen(state)
 
     async def _discover_dms(self, *, seed: bool) -> None:
@@ -1087,12 +1114,24 @@ class BuzzAdapter(BasePlatformAdapter):
         if code == 0:
             for dm in _parse_json_list(out):
                 dm_id = str(dm.get("dm_id") or "")
-                if not dm_id or dm_id in self._channel_state:
+                if not dm_id:
                     continue
-                if seed:
-                    await self._seed_channel(dm_id, chat_type="dm")
+                state = self._channel_state.get(dm_id)
+                if state is None:
+                    if seed:
+                        await self._seed_channel(dm_id, chat_type="dm")
+                    else:
+                        self._channel_state[dm_id] = {
+                            "chat_type": "dm",
+                            "last_ts": 0,
+                            "seen": OrderedDict(),
+                        }
+                    state = self._channel_state[dm_id]
                 else:
-                    self._channel_state[dm_id] = {"chat_type": "dm", "last_ts": 0, "seen": OrderedDict()}
+                    state["chat_type"] = "dm"
+                peer_pubkey = await self._two_party_dm_peer(dm_id)
+                if peer_pubkey:
+                    state["peer_pubkey"] = peer_pubkey
                 self._channel_names.setdefault(dm_id, "DM")
 
         code, out, _err = await self._run_cli(["channels", "list"])
@@ -1107,12 +1146,12 @@ class BuzzAdapter(BasePlatformAdapter):
             if not self._may_reclassify_as_dm(ch_id):
                 continue
             existing = self._channel_state.get(ch_id)
-            if existing is not None and existing.get("chat_type") == "dm":
-                continue
-            chat_type = "dm" if await self._is_two_party_dm(ch_id) else "group"
+            peer_pubkey = await self._two_party_dm_peer(ch_id)
+            chat_type = "dm" if peer_pubkey else "group"
             if existing is not None:
                 if chat_type == "dm":
                     existing["chat_type"] = "dm"
+                    existing["peer_pubkey"] = peer_pubkey
                     logger.info(
                         "Buzz: configured conversation %s reclassified as DM "
                         "(two-party membership)",
@@ -1127,6 +1166,8 @@ class BuzzAdapter(BasePlatformAdapter):
                     "last_ts": 0,
                     "seen": OrderedDict(),
                 }
+            if peer_pubkey:
+                self._channel_state[ch_id]["peer_pubkey"] = peer_pubkey
 
     async def _poll_channel(self, channel_id: str) -> None:
         state = self._channel_state.get(channel_id)
@@ -1178,6 +1219,8 @@ class BuzzAdapter(BasePlatformAdapter):
         self._maybe_latch_dm(channel_id, state, event)
 
         is_dm = state["chat_type"] == "dm"
+        if is_dm:
+            self._remember_dm_peer(state, pubkey)
         # In shared channels, respond only when addressed — unless
         # require_mention is disabled, in which case respond to every message.
         # DMs always dispatch.
@@ -1288,21 +1331,35 @@ class BuzzAdapter(BasePlatformAdapter):
         description = str(meta.get("description") or "").strip()
         return name == "DM" and not description
 
-    async def _is_two_party_dm(self, channel_id: str) -> bool:
-        """Confirm a DM-shaped channel by its two-party membership."""
-        if not self._self_pubkey or not self._may_reclassify_as_dm(channel_id):
-            return False
+    async def _two_party_dm_peer(self, channel_id: str) -> Optional[str]:
+        """Return the sole other member when a conversation has two parties."""
+        if not self._self_pubkey:
+            return None
         code, out, _err = await self._run_cli(
             ["channels", "members", "--channel", channel_id]
         )
         if code != 0:
-            return False
+            return None
         pubkeys = {
-            str(member.get("pubkey") or "").lower()
+            normalized
             for member in _parse_json_list(out)
-            if member.get("pubkey")
+            if (normalized := _normalize_user_ref(str(member.get("pubkey") or "")))
         }
-        return len(pubkeys) == 2 and self._self_pubkey in pubkeys
+        if len(pubkeys) != 2 or self._self_pubkey not in pubkeys:
+            return None
+        return next(pubkey for pubkey in pubkeys if pubkey != self._self_pubkey)
+
+    async def _is_two_party_dm(self, channel_id: str) -> bool:
+        """Confirm a DM-shaped channel by its two-party membership."""
+        if not self._may_reclassify_as_dm(channel_id):
+            return False
+        return await self._two_party_dm_peer(channel_id) is not None
+
+    def _remember_dm_peer(self, state: dict, pubkey: Any) -> None:
+        """Cache a valid non-self sender as the recipient for later DM sends."""
+        peer = _normalize_user_ref(str(pubkey or ""))
+        if peer and peer != self._self_pubkey:
+            state["peer_pubkey"] = peer
 
     def _is_direct_message_event(self, channel_id: str, event: dict) -> bool:
         """True when ``event`` is shaped like a direct message to us: a chat

@@ -425,6 +425,7 @@ class TestDmClassification:
         assert a._channel_state[DM_CHANNEL]["chat_type"] == "dm"
         assert a._channel_state[DM_CHANNEL]["last_ts"] == 5
         assert "seeded-event" in a._channel_state[DM_CHANNEL]["seen"]
+        assert a._channel_state[DM_CHANNEL]["peer_pubkey"] == OTHER_PUBKEY
         assert a._may_reclassify_as_dm(DM_CHANNEL) is True
         assert CHANNEL not in a._channel_state
         assert a._may_reclassify_as_dm(CHANNEL) is False
@@ -512,7 +513,12 @@ class TestBuzzAdapterSend:
     @pytest.mark.asyncio
     async def test_dm_reply_stays_top_level(self):
         adapter = _make_adapter()
-        adapter._channel_state[DM_CHANNEL] = {"chat_type": "dm", "last_ts": 0, "seen": {}}
+        adapter._channel_state[DM_CHANNEL] = {
+            "chat_type": "dm",
+            "last_ts": 0,
+            "seen": {},
+            "peer_pubkey": OTHER_PUBKEY,
+        }
         cli = _ScriptedCli()
         cli.script("messages", "send", {"accepted": True, "event_id": "evt-dm"})
         adapter._run_cli = cli
@@ -527,6 +533,40 @@ class TestBuzzAdapterSend:
         assert result.success is True
         args, _stdin = cli.calls[0]
         assert "--reply-to" not in args
+        assert args[args.index("--mention") + 1] == OTHER_PUBKEY
+
+    @pytest.mark.asyncio
+    async def test_dm_send_discovers_and_mentions_peer_when_not_cached(self):
+        adapter = _make_adapter()
+        adapter._channel_state[DM_CHANNEL] = {"chat_type": "dm", "last_ts": 0, "seen": {}}
+        cli = _ScriptedCli()
+        cli.script("channels", "members", [
+            {"pubkey": SELF_PUBKEY, "role": "member"},
+            {"pubkey": OTHER_PUBKEY, "role": "member"},
+        ])
+        cli.script("messages", "send", {"accepted": True, "event_id": "evt-dm-lazy"})
+        adapter._run_cli = cli
+
+        result = await adapter.send(DM_CHANNEL, "@enterkey no worries, I've got this")
+
+        assert result.success is True
+        send_args, _stdin = next(call for call in cli.calls if call[0][:2] == ["messages", "send"])
+        assert send_args[send_args.index("--mention") + 1] == OTHER_PUBKEY
+        assert adapter._channel_state[DM_CHANNEL]["peer_pubkey"] == OTHER_PUBKEY
+
+    @pytest.mark.asyncio
+    async def test_group_send_does_not_add_explicit_mention(self):
+        adapter = _make_adapter()
+        adapter._channel_state[CHANNEL] = {"chat_type": "group", "last_ts": 0, "seen": {}}
+        cli = _ScriptedCli()
+        cli.script("messages", "send", {"accepted": True, "event_id": "evt-group"})
+        adapter._run_cli = cli
+
+        result = await adapter.send(CHANNEL, "@enterkey room reply")
+
+        assert result.success is True
+        args, _stdin = cli.calls[0]
+        assert "--mention" not in args
 
 
     @pytest.mark.asyncio
@@ -567,7 +607,12 @@ class TestBuzzAdapterSend:
         img = tmp_path / "shot.png"
         img.write_bytes(b"\x89PNG fake")
         adapter = _make_adapter()
-        adapter._channel_state[DM_CHANNEL] = {"chat_type": "dm", "last_ts": 0, "seen": {}}
+        adapter._channel_state[DM_CHANNEL] = {
+            "chat_type": "dm",
+            "last_ts": 0,
+            "seen": {},
+            "peer_pubkey": OTHER_PUBKEY,
+        }
         cli = _ScriptedCli()
         cli.script("messages", "send", {"accepted": True, "event_id": "evt-dm-image"})
         adapter._run_cli = cli
@@ -582,6 +627,7 @@ class TestBuzzAdapterSend:
         assert result.success is True
         args, _stdin = cli.calls[0]
         assert "--reply-to" not in args
+        assert args[args.index("--mention") + 1] == OTHER_PUBKEY
 
     @pytest.mark.asyncio
     async def test_send_image_file_sanitizes_mismatched_source(self, tmp_path):
