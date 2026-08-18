@@ -39,11 +39,15 @@ def preflight(manifest_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]
         agent = str(row.get("agent") or "")
         status = str(row.get("status") or "")
         source = Path(str(row.get("source") or ""))
+        target = Path(str(row.get("target") or row.get("source") or ""))
         candidate = Path(str(row.get("candidate") or ""))
         if status != "active":
             gates.append(f"{agent}: status is {status}, not active")
-        if not source.is_file():
+        if not target.is_file():
             gates.append(f"{agent}: live AGENTS.md is absent")
+            continue
+        if not source.is_file():
+            gates.append(f"{agent}: compiler source AGENTS.md is absent")
             continue
         if not candidate.is_file():
             gates.append(f"{agent}: candidate AGENTS.md is absent")
@@ -58,10 +62,11 @@ def preflight(manifest_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]
             {
                 "agent": agent,
                 "source": source,
+                "target": target,
                 "candidate": candidate,
                 "source_bytes": source_bytes,
                 "candidate_bytes": candidate_bytes,
-                "source_mode": source.stat().st_mode & 0o777,
+                "source_mode": target.stat().st_mode & 0o777,
                 "source_sha256": _sha_bytes(source_bytes),
                 "candidate_sha256": _sha_bytes(candidate_bytes),
             }
@@ -75,7 +80,7 @@ def preflight(manifest_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]
         "expected_writes": [
             {
                 "agent": item["agent"],
-                "target": str(item["source"]),
+                "target": str(item["target"]),
                 "source_sha256": item["source_sha256"],
                 "candidate_sha256": item["candidate_sha256"],
             }
@@ -92,13 +97,13 @@ def create_immediate_backup(output: Path, prepared: list[dict[str, Any]]) -> dic
     records = []
     with tarfile.open(archive_path, "w") as archive:
         for item in prepared:
-            profile = item["source"].parent.name
+            profile = item["target"].parent.name
             arcname = f"profiles/{profile}/AGENTS.md"
-            archive.add(item["source"], arcname=arcname, recursive=False)
+            archive.add(item["target"], arcname=arcname, recursive=False)
             records.append(
                 {
                     "agent": item["agent"],
-                    "target": str(item["source"]),
+                    "target": str(item["target"]),
                     "archive_member": arcname,
                     "sha256": item["source_sha256"],
                     "mode": item["source_mode"],
@@ -138,14 +143,14 @@ def apply_cutover(manifest_path: Path, verified_backup: Path, immediate_backup: 
     written = []
     try:
         for item in prepared:
-            _atomic_write(item["source"], item["candidate_bytes"], item["source_mode"])
+            _atomic_write(item["target"], item["candidate_bytes"], item["source_mode"])
             written.append(item)
         for item in prepared:
-            if _sha_bytes(item["source"].read_bytes()) != item["candidate_sha256"]:
+            if _sha_bytes(item["target"].read_bytes()) != item["candidate_sha256"]:
                 raise ValueError(f"post-write hash mismatch: {item['agent']}")
     except Exception:
         for item in written:
-            _atomic_write(item["source"], item["source_bytes"], item["source_mode"])
+            _atomic_write(item["target"], item["source_bytes"], item["source_mode"])
         raise
     report["applied"] = True
     report["immediate_backup"] = backup_result

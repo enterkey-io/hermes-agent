@@ -161,7 +161,8 @@ def compile_profiles(
             protected = _protected_tree(Path(agent.profile_path))
         entries.append({
             "agent": agent.agent, "status": agent.status,
-            "source": str(source), "source_kind": source_kind,
+            "source": str(source), "target": str(live_source),
+            "source_kind": source_kind,
             "source_sha256": source_hash,
             "candidate": str(candidate_path), "candidate_sha256": sha(candidate_path),
             "operation": operation,

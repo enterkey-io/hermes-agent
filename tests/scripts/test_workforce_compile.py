@@ -54,6 +54,7 @@ def test_planned_profile_can_use_owner_only_private_source(tmp_path):
     )
     entry = next(item for item in manifest["profiles"] if item["agent"] == "chloe")
     assert entry["source_kind"] == "planned-private-source"
+    assert entry["target"] == "/home/elliott/.hermes/profiles/chloe/AGENTS.md"
     assert entry["source_sha256"]
     assert (output / "chloe" / "AGENTS.md").read_text().endswith(
         source.read_text()
