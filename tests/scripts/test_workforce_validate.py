@@ -28,6 +28,16 @@ def test_whole_workforce_validator_accepts_compiled_fixture(tmp_path):
             "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
             "mtime_ns": path.stat().st_mtime_ns,
         })
+    volatile = profiles / "kourtnie" / "skills" / ".usage.json"
+    volatile.parent.mkdir(parents=True, exist_ok=True)
+    volatile.write_text("runtime-before")
+    records.append({
+        "path": "profiles/kourtnie/skills/.usage.json",
+        "type": "file",
+        "sha256": hashlib.sha256(volatile.read_bytes()).hexdigest(),
+        "mtime_ns": volatile.stat().st_mtime_ns,
+    })
+    volatile.write_text("runtime-after")
     backup = tmp_path / "backup.json"
     backup.write_text(json.dumps({"files": records}))
     delivery = tmp_path / "delivery.json"

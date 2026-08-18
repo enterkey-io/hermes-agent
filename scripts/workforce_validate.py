@@ -26,6 +26,17 @@ REQUIRED_CONTRACT_SIGNALS = (
     "Keep routine success quiet",
 )
 
+# These files are maintained by the running skill-curator/usage telemetry, so
+# their hashes and mtimes can move even while a friend profile is completely
+# outside this project.  Identity, instructions, skill definitions, and all
+# other durable profile files remain protected by the comparison below.
+FRIEND_RUNTIME_MUTABLE_SUFFIXES = (
+    "/channel_directory.json",
+    "/config.non-secret.yaml",
+    "/skills/.curator_state",
+    "/skills/.usage.json",
+)
+
 
 def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -42,7 +53,7 @@ def _friend_preservation(
         relative = str(record.get("path") or "")
         if not relative.startswith(protected) or record.get("type") != "file":
             continue
-        if relative.endswith(("/channel_directory.json", "/config.non-secret.yaml")):
+        if relative.endswith(FRIEND_RUNTIME_MUTABLE_SUFFIXES):
             continue
         checked += 1
         current = profiles_root.parent / relative
