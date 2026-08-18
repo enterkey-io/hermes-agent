@@ -38,6 +38,16 @@ def test_whole_workforce_validator_accepts_compiled_fixture(tmp_path):
         "mtime_ns": volatile.stat().st_mtime_ns,
     })
     volatile.write_text("runtime-after")
+    cron_state = profiles / "kourtnie" / "cron" / "jobs.json"
+    cron_state.parent.mkdir(parents=True, exist_ok=True)
+    cron_state.write_text('{"next_run_at":"before"}')
+    records.append({
+        "path": "profiles/kourtnie/cron/jobs.json",
+        "type": "file",
+        "sha256": hashlib.sha256(cron_state.read_bytes()).hexdigest(),
+        "mtime_ns": cron_state.stat().st_mtime_ns,
+    })
+    cron_state.write_text('{"next_run_at":"after"}')
     backup = tmp_path / "backup.json"
     backup.write_text(json.dumps({"files": records}))
     delivery = tmp_path / "delivery.json"

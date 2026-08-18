@@ -113,7 +113,12 @@ def _protected_tree(profile: Path) -> dict[str, object]:
     return {"file_count": len(records), "aggregate_sha256": digest}
 
 
-def compile_profiles(org_path: Path, template_path: Path, output: Path) -> dict:
+def compile_profiles(
+    org_path: Path,
+    template_path: Path,
+    output: Path,
+    planned_source_root: Path | None = None,
+) -> dict:
     org = load_organization(org_path)
     raw = yaml.safe_load(org_path.read_text(encoding="utf-8"))
     version = str(raw.get("workforce_contract_version") or org.schema_version)
@@ -123,7 +128,21 @@ def compile_profiles(org_path: Path, template_path: Path, output: Path) -> dict:
     for agent in _compile_order(org):
         target = output / agent.agent
         target.mkdir(parents=True, exist_ok=True)
-        source = Path(agent.profile_path or "") / "AGENTS.md"
+        live_source = Path(agent.profile_path or "") / "AGENTS.md"
+        planned_source = (
+            planned_source_root / agent.agent / "AGENTS.md"
+            if planned_source_root is not None else None
+        )
+        source = live_source
+        source_kind = "live-profile"
+        if (
+            not live_source.is_file()
+            and agent.status == "planned"
+            and planned_source is not None
+            and planned_source.is_file()
+        ):
+            source = planned_source
+            source_kind = "planned-private-source"
         if source.is_file():
             original = source.read_text(encoding="utf-8-sig")
             candidate, operation = insert_block(original, render_block(agent, template, version))
@@ -132,6 +151,7 @@ def compile_profiles(org_path: Path, template_path: Path, output: Path) -> dict:
             original = f"# {agent.display_name} Operating Instructions\n"
             candidate, operation = insert_block(original, render_block(agent, template, version))
             source_hash = None
+            source_kind = "generated-placeholder"
         else:
             raise FileNotFoundError(f"active profile instruction missing: {source}")
         candidate_path = target / "AGENTS.md"
@@ -141,7 +161,8 @@ def compile_profiles(org_path: Path, template_path: Path, output: Path) -> dict:
             protected = _protected_tree(Path(agent.profile_path))
         entries.append({
             "agent": agent.agent, "status": agent.status,
-            "source": str(source), "source_sha256": source_hash,
+            "source": str(source), "source_kind": source_kind,
+            "source_sha256": source_hash,
             "candidate": str(candidate_path), "candidate_sha256": sha(candidate_path),
             "operation": operation,
             "original_instruction_preserved_as_exact_suffix": candidate.endswith(original),
@@ -188,8 +209,18 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--organization-reference", type=Path)
     parser.add_argument("--manifest-report", type=Path)
+    parser.add_argument(
+        "--planned-source-root",
+        type=Path,
+        help="owner-only source profiles for planned agents with no live profile",
+    )
     args = parser.parse_args()
-    manifest = compile_profiles(args.organization, args.template, args.output)
+    manifest = compile_profiles(
+        args.organization,
+        args.template,
+        args.output,
+        planned_source_root=args.planned_source_root,
+    )
     if args.organization_reference:
         args.organization_reference.parent.mkdir(parents=True, exist_ok=True)
         args.organization_reference.write_text(

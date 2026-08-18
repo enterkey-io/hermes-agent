@@ -35,6 +35,7 @@ FRIEND_RUNTIME_MUTABLE_SUFFIXES = (
     "/config.non-secret.yaml",
     "/skills/.curator_state",
     "/skills/.usage.json",
+    "/cron/jobs.json",
 )
 
 

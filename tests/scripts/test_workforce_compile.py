@@ -40,6 +40,26 @@ def test_canonical_compile_includes_planned_chloe(tmp_path):
     assert module.BEGIN in text
 
 
+def test_planned_profile_can_use_owner_only_private_source(tmp_path):
+    planned = tmp_path / "planned"
+    source = planned / "chloe" / "AGENTS.md"
+    source.parent.mkdir(parents=True)
+    source.write_text("# Chloe private source\n\nHer established voice.\n")
+    output = tmp_path / "output"
+    manifest = module.compile_profiles(
+        ROOT / "workforce" / "organization.yaml",
+        ROOT / "workforce" / "templates" / "workforce-contract.md",
+        output,
+        planned_source_root=planned,
+    )
+    entry = next(item for item in manifest["profiles"] if item["agent"] == "chloe")
+    assert entry["source_kind"] == "planned-private-source"
+    assert entry["source_sha256"]
+    assert (output / "chloe" / "AGENTS.md").read_text().endswith(
+        source.read_text()
+    )
+
+
 def test_generated_reference_excludes_friends_from_dispatch():
     rendered = module.render_organization_reference(
         ROOT / "workforce" / "organization.yaml"
