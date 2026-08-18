@@ -1,0 +1,35 @@
+schema_version: 1
+profile_defaults:
+  aurora: {mode: team, room: Admin, audience: executive}
+  brenna: {mode: team, room: lift-accountability, audience: lift}
+  milena: {mode: team, room: executive-support, audience: executive-support}
+  emily: {mode: team, room: director-product, audience: product-leadership}
+  sage: {mode: team, room: product-staff, audience: product-staff}
+  iris: {mode: team, room: product-staff, audience: product-staff}
+  sloane: {mode: team, room: product-staff, audience: product-staff}
+  maya: {mode: team, room: product-staff, audience: product-staff}
+  reese: {mode: team, room: product-staff, audience: product-staff}
+  morgan: {mode: team, room: product-staff, audience: product-staff}
+  alina: {mode: team, room: director-agent-systems, audience: agent-systems-leadership}
+  main: {mode: team, room: director-operations, audience: operations-leadership}
+  bridgette: {mode: team, room: director-marketing, audience: marketing-leadership}
+  margot: {mode: team, room: marketing-staff, audience: marketing-staff}
+  kenzie: {mode: team, room: marketing-staff, audience: marketing-staff}
+  xenia: {mode: team, room: director-trading, audience: trading-leadership}
+  oyku: {mode: team, room: trading-staff, audience: trading-staff}
+  maggie: {mode: team, room: director-finance, audience: finance-leadership}
+  mel: {mode: team, room: director-vision, audience: vision-leadership}
+  grace: {mode: team, room: executive-support, audience: executive-support}
+job_overrides:
+  grace/019c9f963374: {mode: private-personal, reason: personal morning outreach}
+  grace/537d8032bdaf: {mode: private-personal, reason: personal weekday continuity}
+  grace/9e0af1442da4: {mode: private-personal, reason: personal weekend continuity}
+  grace/e24182c7ae77: {mode: private-personal, reason: personal weekend outreach}
+  grace/be5404c1511b: {mode: team, room: lift-accountability, audience: lift}
+  grace/a666c92adcc1: {mode: local-only, failure_room: lift-accountability, reason: silent reconciliation collector}
+  grace/e1637ad77350: {mode: local-only, failure_room: executive-support, reason: silent health collector}
+  kenzie/4cc02b6ce4b6: {mode: private-personal, reason: personal check-in}
+  kenzie/833f425bdc36: {mode: private-personal, reason: personal check-in}
+  kenzie/cded864f9831: {mode: private-personal, reason: personal check-in}
+  maya/ed046d36dac5: {mode: private-personal, reason: personal check-in}
+  reese/b18566dd76fc: {mode: private-personal, reason: personal check-in}

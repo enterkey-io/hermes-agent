@@ -69,6 +69,13 @@ class WorkflowPatchRequest(BaseModel):
     steps: list[dict[str, Any]] | None = None
 
 
+class WorkflowControlRequest(BaseModel):
+    action: str = Field(..., pattern="^(pause|start|resume)$")
+    expected_version: int
+    confirmed: bool = False
+    approver: str | None = None
+
+
 class RunStartRequest(BaseModel):
     workflow_id: str | None = None
     workflow_slug: str | None = None
@@ -112,19 +119,76 @@ def _http_error(exc: Exception) -> HTTPException:
 def _definition_dict(conn, workflow_id: str) -> dict[str, Any]:
     definition = registry.get_definition(conn, workflow_id).to_dict()
     definition["steps"] = [step.to_dict() for step in registry.list_steps(conn, workflow_id)]
+    definition["schedules"] = registry.list_schedule_links(conn, workflow_id)
     definition["runs"] = _runs_for_workflow(conn, workflow_id, limit=25)
     definition["events"] = registry.list_events(
         conn,
         entity_type="workflow_definition",
         entity_id=workflow_id,
     )
-    return definition
+    return _enrich_workflow(definition)
 
 
 def _definition_summary_dict(conn, definition) -> dict[str, Any]:
     item = definition.to_dict()
     item["steps"] = [step.to_dict() for step in registry.list_steps(conn, definition.id)]
-    return item
+    item["schedules"] = registry.list_schedule_links(conn, definition.id)
+    item["runs"] = _runs_for_workflow(conn, definition.id, limit=5)
+    return _enrich_workflow(item)
+
+
+def _enrich_workflow(item: dict[str, Any]) -> dict[str, Any]:
+    """Attach organization fields without copying profile or credential data."""
+    enriched = dict(item)
+    try:
+        from hermes_cli.workforce_org import load_organization, organization_path
+
+        path = organization_path()
+        if not path.is_file():
+            raise FileNotFoundError
+        owner = load_organization(path).resolve_profile(
+            str(item.get("owner_profile") or "")
+        )
+        enriched.update(
+            {
+                "department": owner.department or "Executive Support",
+                "function": owner.function,
+                "manager": owner.manager,
+                "owner_status": owner.status,
+            }
+        )
+    except Exception:
+        enriched.update(
+            {"department": None, "function": None, "manager": None, "owner_status": None}
+        )
+    runs = item.get("runs") or []
+    latest = runs[0] if runs else None
+    schedule_links = item.get("schedules") or []
+    step_departments: set[str] = set()
+    try:
+        for step in item.get("steps") or []:
+            executor = str(step.get("executor_profile") or item.get("owner_profile") or "")
+            department = load_organization(path).resolve_profile(executor).department
+            if department and department != enriched.get("department"):
+                step_departments.add(department)
+    except Exception:
+        step_departments = set()
+    enriched.update(
+        {
+            "scheduled_trigger": schedule_links,
+            "current_work": latest if latest and latest.get("status") == "running" else None,
+            "last_outcome": latest,
+            "exceptions": [
+                run for run in runs if run.get("status") in {"failed", "cancelled"}
+            ][:5],
+            "approvals": [
+                step for run in runs for step in run.get("steps", [])
+                if step.get("status") == "waiting_for_approval"
+            ],
+            "cross_team_dependencies": sorted(step_departments),
+        }
+    )
+    return enriched
 
 
 def _runs_for_workflow(conn, workflow_id: str, *, limit: int) -> list[dict[str, Any]]:
@@ -137,7 +201,12 @@ def _runs_for_workflow(conn, workflow_id: str, *, limit: int) -> list[dict[str, 
         """,
         (workflow_id, limit),
     ).fetchall()
-    return [dict(row) for row in rows]
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        item["steps"] = _step_runs_for_run(conn, item["id"])
+        result.append(item)
+    return result
 
 
 def _list_runs(conn, *, workflow_id: str | None, limit: int) -> list[dict[str, Any]]:
@@ -435,6 +504,31 @@ def _load_schedule_inventory() -> list[dict[str, Any]]:
     )
 
 
+def _aurora_queue() -> dict[str, list[dict[str, Any]]]:
+    result = {"signals": [], "fact_packets": [], "reserved_approvals": [], "blockers": [], "routed_work": []}
+    try:
+        from hermes_cli import kanban_db
+
+        with kanban_db.connect_closing() as conn:
+            rows = conn.execute(
+                "SELECT id, title, status, assignee, priority, body FROM tasks "
+                "WHERE status NOT IN ('done','archived') AND "
+                "(assignee='aurora' OR status='blocked') ORDER BY priority DESC, created_at"
+            ).fetchall()
+        for row in rows:
+            item = {key: row[key] for key in ("id", "title", "status", "assignee", "priority")}
+            body = str(row["body"] or "")
+            if '"kind": "workforce_signal"' in body:
+                result["signals"].append(item)
+            elif row["status"] == "blocked":
+                result["blockers"].append(item)
+            else:
+                result["routed_work"].append(item)
+    except Exception:
+        pass
+    return result
+
+
 def _require_elliott_write(request: Request) -> str:
     session = getattr(request.state, "session", None)
     if session is None:
@@ -565,6 +659,7 @@ async def overview() -> dict[str, Any]:
         "migration": migration,
         "legacy": legacy,
         "recent_runs": runs,
+        "aurora_queue": _aurora_queue(),
     }
 
 
@@ -826,6 +921,91 @@ async def patch_workflow(
             if request.steps is not None:
                 registry.replace_steps(conn, workflow_id, request.steps)
             return {"workflow": _definition_dict(conn, workflow_id)}
+    except Exception as exc:
+        raise _http_error(exc)
+
+
+@router.post("/workflows/{workflow_id}/control")
+async def control_workflow(
+    workflow_id: str,
+    request: WorkflowControlRequest,
+    http_request: Request,
+) -> dict[str, Any]:
+    """Pause or activate a workflow with authenticated, audited authority."""
+    try:
+        actor = _require_elliott_write(http_request)
+        if not request.confirmed:
+            raise ValueError("workflow control requires explicit confirmation")
+        with registry.connect_closing() as conn:
+            current = registry.get_definition(conn, workflow_id)
+            if request.action == "pause":
+                if current.status not in {"active", "degraded"}:
+                    raise WorkflowStateError(f"cannot pause workflow in {current.status} state")
+                target = "paused"
+            else:
+                if current.status not in {"draft", "paused", "degraded"}:
+                    raise WorkflowStateError(f"cannot {request.action} workflow in {current.status} state")
+                target = "active"
+            links = registry.list_schedule_links(conn, workflow_id)
+            updated = registry.update_definition(
+                conn,
+                workflow_id,
+                expected_version=request.expected_version,
+                status=target,
+            )
+            from hermes_cli.workflow_runtime import control_linked_cron_jobs
+
+            try:
+                schedule_results = control_linked_cron_jobs(
+                    links,
+                    action=request.action,
+                    reason=f"workflow {current.slug} paused from dashboard by {actor}",
+                )
+            except Exception as control_error:
+                registry.update_definition(
+                    conn,
+                    workflow_id,
+                    expected_version=updated.version,
+                    status=current.status,
+                )
+                registry.record_event(
+                    conn,
+                    "workflow_definition",
+                    workflow_id,
+                    "dashboard_control_failed",
+                    {
+                        "actor": actor,
+                        "action": request.action,
+                        "restored_status": current.status,
+                        "error_type": type(control_error).__name__,
+                    },
+                )
+                raise
+            registry.record_event(
+                conn,
+                "workflow_definition",
+                workflow_id,
+                "dashboard_control",
+                {
+                    "actor": actor,
+                    "action": request.action,
+                    "previous_status": current.status,
+                    "new_status": target,
+                    "schedule_results": schedule_results,
+                    "recovery_action": "resume" if request.action == "pause" else "pause",
+                },
+            )
+            return {
+                "workflow": _definition_dict(conn, updated.id),
+                "control": {
+                    "actor": actor,
+                    "action": request.action,
+                    "previous_status": current.status,
+                    "new_status": target,
+                    "recovery_action": "resume" if request.action == "pause" else "pause",
+                    "schedule_results": schedule_results,
+                },
+            }
     except Exception as exc:
         raise _http_error(exc)
 

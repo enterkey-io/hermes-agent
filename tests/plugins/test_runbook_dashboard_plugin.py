@@ -285,6 +285,11 @@ def test_preview_diff_and_bundle_registration(client):
     assert "CardContent" in bundle
     assert "TabsList" in bundle
     assert "usefulPurpose" in bundle
+    assert "departmentFilter" in bundle
+    assert "ownerFilter" in bundle
+    assert "controlWorkflow" in bundle
+    assert '}, "Pause")' in bundle
+    assert '}, "Resume")' in bundle
     assert "item.canonical === false" in bundle
     assert "hermes-runbooks-workflow-detail" not in bundle
 
@@ -303,6 +308,101 @@ def test_preview_diff_and_bundle_registration(client):
     assert ".hermes-runbooks-relationship-grid" not in styles
     assert "max-height: 50vh" not in styles
     assert "max-height: 34vh" not in styles
+
+
+def test_workflow_control_requires_confirmation_and_controls_linked_schedule(
+    client, tmp_path
+):
+    from cron import jobs as cron_jobs
+
+    profile_home = tmp_path / ".hermes" / "profiles" / "alina"
+    profile_home.mkdir(parents=True)
+    with cron_jobs.use_cron_store(profile_home):
+        job = cron_jobs.create_job(
+            prompt="Prepare the brief",
+            schedule="every 1h",
+            name="Daily brief",
+            deliver="local",
+            provider="openrouter",
+            model="openai/gpt-4o-mini",
+        )
+
+    markdown = _runbook_markdown().replace(
+        "cron_job_id: daily-brief", f"cron_job_id: {job['id']}"
+    )
+    created = client.put(
+        "/api/plugins/runbooks/runbooks/daily-brief",
+        json={"markdown": markdown},
+    )
+    assert created.status_code == 200, created.text
+    workflow = created.json()["workflow"]
+
+    denied = client.post(
+        f"/api/plugins/runbooks/workflows/{workflow['id']}/control",
+        json={
+            "action": "pause",
+            "expected_version": workflow["version"],
+            "confirmed": False,
+        },
+    )
+    assert denied.status_code == 400
+
+    paused = client.post(
+        f"/api/plugins/runbooks/workflows/{workflow['id']}/control",
+        json={
+            "action": "pause",
+            "expected_version": workflow["version"],
+            "confirmed": True,
+            "approver": "spoofed",
+        },
+    )
+    assert paused.status_code == 200, paused.text
+    payload = paused.json()
+    assert payload["workflow"]["status"] == "paused"
+    assert payload["control"]["actor"] == "testclient"
+    assert payload["control"]["schedule_results"][0]["state"] == "paused"
+    with cron_jobs.use_cron_store(profile_home):
+        assert cron_jobs.get_job(job["id"])["enabled"] is False
+
+    resumed = client.post(
+        f"/api/plugins/runbooks/workflows/{workflow['id']}/control",
+        json={
+            "action": "resume",
+            "expected_version": payload["workflow"]["version"],
+            "confirmed": True,
+        },
+    )
+    assert resumed.status_code == 200, resumed.text
+    assert resumed.json()["workflow"]["status"] == "active"
+    with cron_jobs.use_cron_store(profile_home):
+        assert cron_jobs.get_job(job["id"])["enabled"] is True
+
+    events = client.get(
+        f"/api/plugins/runbooks/events?entity_type=workflow_definition&entity_id={workflow['id']}"
+    ).json()["events"]
+    controls = [event for event in events if event["event_type"] == "dashboard_control"]
+    assert [event["payload"]["action"] for event in controls] == ["pause", "resume"]
+
+
+def test_workflow_control_restores_registry_when_linked_schedule_is_missing(client):
+    created = client.put(
+        "/api/plugins/runbooks/runbooks/daily-brief",
+        json={"markdown": _runbook_markdown()},
+    )
+    workflow = created.json()["workflow"]
+    response = client.post(
+        f"/api/plugins/runbooks/workflows/{workflow['id']}/control",
+        json={
+            "action": "pause",
+            "expected_version": workflow["version"],
+            "confirmed": True,
+        },
+    )
+    assert response.status_code == 500
+    current = client.get(
+        f"/api/plugins/runbooks/workflows/{workflow['id']}"
+    ).json()["workflow"]
+    assert current["status"] == "active"
 
 
 def test_legacy_work_is_read_only_and_searchable(client, tmp_path):

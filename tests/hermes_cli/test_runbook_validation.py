@@ -63,3 +63,13 @@ def test_rejects_invalid_runtime_kind() -> None:
 
     with pytest.raises(RunbookValidationError, match="runtime kind"):
         split_frontmatter(markdown)
+
+
+def test_rejects_nonoperational_owner_when_org_installed(monkeypatch) -> None:
+    from pathlib import Path
+
+    org_path = Path(__file__).parents[2] / "workforce" / "organization.yaml"
+    monkeypatch.setenv("HERMES_WORKFORCE_ORG", str(org_path))
+    markdown = valid_markdown().replace("owner_profile: grace", "owner_profile: amy")
+    with pytest.raises(RunbookValidationError, match="cannot own or execute"):
+        split_frontmatter(markdown)

@@ -99,6 +99,8 @@
     const [overview, setOverview] = useState(null);
     const [view, setView] = useState("workflows");
     const [filter, setFilter] = useState("");
+    const [departmentFilter, setDepartmentFilter] = useState("");
+    const [ownerFilter, setOwnerFilter] = useState("");
     const [selectedSlug, setSelectedSlug] = useState("");
     const [selected, setSelected] = useState(null);
     const [markdown, setMarkdown] = useState("");
@@ -146,12 +148,24 @@
 
     const visibleRunbooks = useMemo(function () {
       const q = filter.trim().toLowerCase();
-      if (!q) return runbooks;
       return runbooks.filter(function (item) {
-        return [item.slug, item.title, item.purpose, item.owner_profile, item.status]
+        const workflow = workflowForRunbook(item);
+        const matchesText = !q || [item.slug, item.title, item.purpose, item.owner_profile, item.status,
+          workflow && workflow.department, workflow && workflow.function]
           .join(" ").toLowerCase().indexOf(q) !== -1;
+        const matchesDepartment = !departmentFilter || (workflow && workflow.department === departmentFilter);
+        const matchesOwner = !ownerFilter || item.owner_profile === ownerFilter;
+        return matchesText && matchesDepartment && matchesOwner;
       });
-    }, [runbooks, filter]);
+    }, [runbooks, workflows, filter, departmentFilter, ownerFilter]);
+
+    const workflowDepartments = useMemo(function () {
+      return Array.from(new Set(workflows.map(function (item) { return item.department; }).filter(Boolean))).sort();
+    }, [workflows]);
+
+    const workflowOwners = useMemo(function () {
+      return Array.from(new Set(workflows.map(function (item) { return item.owner_profile; }).filter(Boolean))).sort();
+    }, [workflows]);
 
     const enabledTimeline = useMemo(function () {
       return schedules.filter(function (item) { return item.enabled; }).sort(function (a, b) {
@@ -209,6 +223,20 @@
         job: schedule.job_id,
       });
       window.location.assign("/cron?" + query.toString());
+    }
+
+    function controlWorkflow(workflow, action) {
+      if (!workflow) return;
+      const verb = action === "pause" ? "Pause" : (action === "start" ? "Start" : "Resume");
+      if (!window.confirm(verb + " " + workflow.name + "? This changes the workflow state, updates its linked schedules, and creates an audit event.")) return;
+      setBusy(true);
+      setError("");
+      fetchJSON("/workflows/" + encodeURIComponent(workflow.id) + "/control", {
+        method: "POST",
+        body: JSON.stringify({ action: action, expected_version: workflow.version, confirmed: true }),
+      }).then(refresh).catch(function (err) {
+        setError(err.message || String(err));
+      }).finally(function () { setBusy(false); });
     }
 
     function beginNewWorkflow() {
@@ -445,14 +473,34 @@
 
     function renderWorkflows() {
       return h("section", { className: "hermes-runbooks-view" },
-        h("div", { className: "hermes-runbooks-filter" },
-          h(Label, { htmlFor: "workflow-search" }, "Search workflows"),
-          h(Input, {
-            id: "workflow-search",
-            value: filter,
-            onChange: function (event) { setFilter(event.target.value); },
-            placeholder: "Name, purpose, owner, or status",
-          })
+        h("div", { className: "hermes-runbooks-filter-grid" },
+          h("div", { className: "hermes-runbooks-filter" },
+            h(Label, { htmlFor: "workflow-search" }, "Search workflows"),
+            h(Input, {
+              id: "workflow-search",
+              value: filter,
+              onChange: function (event) { setFilter(event.target.value); },
+              placeholder: "Name, purpose, owner, department, or status",
+            })
+          ),
+          h("div", { className: "hermes-runbooks-filter" },
+            h(Label, { htmlFor: "workflow-department" }, "Department"),
+            h("select", {
+              id: "workflow-department", value: departmentFilter,
+              onChange: function (event) { setDepartmentFilter(event.target.value); },
+            }, h("option", { value: "" }, "All departments"), workflowDepartments.map(function (name) {
+              return h("option", { key: name, value: name }, name);
+            }))
+          ),
+          h("div", { className: "hermes-runbooks-filter" },
+            h(Label, { htmlFor: "workflow-owner" }, "Responsible agent"),
+            h("select", {
+              id: "workflow-owner", value: ownerFilter,
+              onChange: function (event) { setOwnerFilter(event.target.value); },
+            }, h("option", { value: "" }, "All agents"), workflowOwners.map(function (name) {
+              return h("option", { key: name, value: name }, name);
+            }))
+          )
         ),
         h("div", { className: "hermes-runbooks-card-list" }, visibleRunbooks.map(function (item) {
           const workflow = workflowForRunbook(item);
@@ -467,7 +515,8 @@
                 h("div", { className: "hermes-runbooks-workflow-title" },
                   h("h3", null, item.title),
                   h(StatusBadge, { value: item.status }),
-                  h(Badge, { tone: "outline" }, item.owner_profile)
+                  h(Badge, { tone: "outline" }, item.owner_profile),
+                  workflow && workflow.department ? h(Badge, { tone: "outline" }, workflow.department) : null
                 ),
                 purpose ? h("p", null, purpose) : null,
                 h("div", { className: "hermes-runbooks-signals" },
@@ -476,7 +525,21 @@
                   h("span", null, latestRun ? "Last run " + latestRun.status : "No runs yet")
                 )
               ),
-              h(Button, { outlined: true, size: "sm", onClick: function () { openWorkflow(item.slug); } }, "Open")
+              h("div", { className: "hermes-runbooks-actions" },
+                workflow && workflow.status === "active" ? h(Button, {
+                  outlined: true, size: "sm", disabled: busy,
+                  onClick: function () { controlWorkflow(workflow, "pause"); }
+                }, "Pause") : null,
+                workflow && workflow.status === "paused" ? h(Button, {
+                  outlined: true, size: "sm", disabled: busy,
+                  onClick: function () { controlWorkflow(workflow, "resume"); }
+                }, "Resume") : null,
+                workflow && workflow.status === "draft" ? h(Button, {
+                  outlined: true, size: "sm", disabled: busy,
+                  onClick: function () { controlWorkflow(workflow, "start"); }
+                }, "Start") : null,
+                h(Button, { outlined: true, size: "sm", onClick: function () { openWorkflow(item.slug); } }, "Open")
+              )
             )
           );
         })),

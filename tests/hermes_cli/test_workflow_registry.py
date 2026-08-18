@@ -245,3 +245,24 @@ def test_prune_missing_schedule_links_keeps_only_live_jobs(conn) -> None:
         "SELECT profile, cron_job_id FROM workflow_schedules"
     ).fetchall()
     assert [tuple(row) for row in rows] == [("grace", "live")]
+
+
+def test_canonical_organization_rejects_friend_owner(conn, monkeypatch) -> None:
+    org_path = Path(__file__).parents[2] / "workforce" / "organization.yaml"
+    monkeypatch.setenv("HERMES_WORKFORCE_ORG", str(org_path))
+    with pytest.raises(ValueError, match="cannot own or execute"):
+        reg.create_definition(
+            conn, slug="friend-owned", name="Friend Owned",
+            owner_profile="amy", status="active", runtime_kind="hermes",
+        )
+
+
+def test_canonical_organization_rejects_friend_executor(conn, monkeypatch) -> None:
+    org_path = Path(__file__).parents[2] / "workforce" / "organization.yaml"
+    monkeypatch.setenv("HERMES_WORKFORCE_ORG", str(org_path))
+    workflow = _definition(conn, slug="org-aware")
+    with pytest.raises(ValueError, match="cannot own or execute"):
+        reg.replace_steps(
+            conn, workflow.id,
+            [{"step_key": "bad", "name": "Bad", "executor_profile": "kourtnie"}],
+        )

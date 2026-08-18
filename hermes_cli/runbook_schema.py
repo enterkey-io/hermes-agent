@@ -114,6 +114,31 @@ def validate_frontmatter(metadata: dict[str, Any]) -> None:
     ):
         if not isinstance(metadata[key], (dict, list)):
             raise RunbookValidationError(f"{key} must be a mapping or list")
+    _validate_workforce_profiles_if_configured(metadata)
+
+
+def _validate_workforce_profiles_if_configured(metadata: dict[str, Any]) -> None:
+    from hermes_cli.workforce_org import (
+        WorkforceOrganizationError,
+        load_organization,
+        organization_path,
+        validate_workflow_profiles,
+    )
+
+    path = organization_path()
+    if not path.is_file():
+        return
+    executors = [
+        step.get("executor_profile")
+        for step in metadata.get("steps", [])
+        if isinstance(step, dict)
+    ]
+    try:
+        validate_workflow_profiles(
+            load_organization(path), str(metadata.get("owner_profile") or ""), executors
+        )
+    except WorkforceOrganizationError as exc:
+        raise RunbookValidationError(str(exc)) from exc
 
 
 def _require_string(metadata: dict[str, Any], key: str) -> str:

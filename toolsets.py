@@ -346,6 +346,15 @@ TOOLSETS = {
         "includes": [],
     },
 
+    "workforce": {
+        "description": (
+            "Restricted organization-aware opportunity intake. Signals create "
+            "Aurora-owned triage records only and never launch or dispatch work."
+        ),
+        "tools": ["workforce_signal", "workforce_handoff"],
+        "includes": [],
+    },
+
     "discord": {
         "description": "Discord read and participate tools (fetch messages, search members, create threads)",
         "tools": ["discord"],
