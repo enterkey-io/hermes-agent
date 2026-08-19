@@ -130,6 +130,8 @@ def restore(
         for target, (content, mode) in before.items():
             if content is not None:
                 _atomic_write(target, content, mode)
+            elif target.exists() or target.is_symlink():
+                target.unlink()
         raise
     report["applied"] = True
     return report

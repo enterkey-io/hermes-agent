@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts import workforce_delivery_migrate
 from scripts.workforce_delivery_migrate import migrate
 
 
@@ -107,3 +108,84 @@ def test_delivery_migration_replaces_existing_managed_room_policy(tmp_path):
     assert "`executive-support`" in updated["prompt"]
     assert "`lift-accountability`" not in updated["prompt"]
     assert updated["prompt"].count("[WORKFORCE DELIVERY POLICY]") == 1
+
+
+def test_delivery_apply_validates_every_profile_before_first_write(tmp_path):
+    profiles = tmp_path / "profiles"
+    grace_jobs = profiles / "grace" / "cron" / "jobs.json"
+    grace_jobs.parent.mkdir(parents=True)
+    grace_jobs.write_text(json.dumps({"jobs": [{
+        "id": "grace-job", "name": "meeting prep", "enabled": True,
+        "deliver": "telegram:1", "prompt": "Send to Telegram.",
+        "workflow_id": "wf-grace-job",
+    }]}))
+    main_jobs = profiles / "main" / "cron" / "jobs.json"
+    main_jobs.parent.mkdir(parents=True)
+    main_jobs.write_text(json.dumps({"jobs": [{
+        "id": "main-job", "name": "operations check", "enabled": True,
+        "deliver": "telegram:2", "prompt": "Send to Telegram.",
+        "workflow_id": "wf-main-job",
+    }]}))
+    grace_before = grace_jobs.read_bytes()
+    main_before = main_jobs.read_bytes()
+
+    with pytest.raises(ValueError, match="missing room UUID for director-operations"):
+        migrate(
+            profiles_root=profiles,
+            organization=ROOT / "workforce" / "organization.yaml",
+            policy=ROOT / "workforce" / "delivery-policy.yaml",
+            topology=ROOT / "workforce" / "buzz-topology.yaml",
+            room_map={
+                "executive-support": "11111111-1111-1111-1111-111111111111"
+            },
+            apply=True,
+        )
+
+    assert grace_jobs.read_bytes() == grace_before
+    assert main_jobs.read_bytes() == main_before
+
+
+def test_delivery_apply_rolls_back_an_earlier_write_on_io_failure(tmp_path, monkeypatch):
+    profiles = tmp_path / "profiles"
+    grace_jobs = profiles / "grace" / "cron" / "jobs.json"
+    grace_jobs.parent.mkdir(parents=True)
+    grace_jobs.write_text(json.dumps({"jobs": [{
+        "id": "grace-job", "name": "meeting prep", "enabled": True,
+        "deliver": "telegram:1", "prompt": "Send to Telegram.",
+        "workflow_id": "wf-grace-job",
+    }]}))
+    main_jobs = profiles / "main" / "cron" / "jobs.json"
+    main_jobs.parent.mkdir(parents=True)
+    main_jobs.write_text(json.dumps({"jobs": [{
+        "id": "main-job", "name": "operations check", "enabled": True,
+        "deliver": "telegram:2", "prompt": "Send to Telegram.",
+        "workflow_id": "wf-main-job",
+    }]}))
+    grace_before = grace_jobs.read_bytes()
+    main_before = main_jobs.read_bytes()
+    original_write = workforce_delivery_migrate._atomic_write_json
+    calls = 0
+
+    def fail_second(path, payload):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("injected delivery write failure")
+        original_write(path, payload)
+
+    monkeypatch.setattr(workforce_delivery_migrate, "_atomic_write_json", fail_second)
+    with pytest.raises(OSError, match="injected delivery write failure"):
+        migrate(
+            profiles_root=profiles,
+            organization=ROOT / "workforce" / "organization.yaml",
+            policy=ROOT / "workforce" / "delivery-policy.yaml",
+            topology=ROOT / "workforce" / "buzz-topology.yaml",
+            room_map={
+                "executive-support": "11111111-1111-1111-1111-111111111111",
+                "director-operations": "22222222-2222-2222-2222-222222222222",
+            },
+            apply=True,
+        )
+
+    assert grace_jobs.read_bytes() == grace_before
+    assert main_jobs.read_bytes() == main_before

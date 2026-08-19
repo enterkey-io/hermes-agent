@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
 from typing import Any
 
 from hermes_cli import kanban_db
-from hermes_cli.workforce_org import load_organization
+from hermes_cli.workforce_org import active_workforce_agent
 from plugins.workforce_control.store import (
     apply_reconciliation,
     materialize_plan,
@@ -20,15 +18,12 @@ from tools.registry import tool_error, tool_result
 
 
 def _actor() -> str:
-    home = Path(os.environ.get("HERMES_HOME", "")).expanduser()
-    if home.parent.name != "profiles":
-        raise ValueError("workforce control requires an active named profile")
-    return load_organization().from_profile_path(home.name).agent
+    return active_workforce_agent().agent
 
 
 def _enabled() -> bool:
     try:
-        return load_organization().validate_execution_profile(_actor()).operational
+        return active_workforce_agent().operational
     except Exception:
         return False
 

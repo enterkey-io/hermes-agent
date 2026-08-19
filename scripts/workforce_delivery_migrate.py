@@ -93,6 +93,22 @@ def _atomic_write_json(path: Path, payload: Any) -> None:
             pass
 
 
+def _atomic_write_bytes(path: Path, content: bytes, mode: int) -> None:
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temp_name, mode)
+        os.replace(temp_name, path)
+    finally:
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
+
+
 def migrate(
     *,
     profiles_root: Path,
@@ -115,9 +131,11 @@ def migrate(
         if item["classification"] in {"team", "local-only"}:
             by_profile.setdefault(item["profile"], []).append(item)
     changes: list[dict[str, Any]] = []
+    staged_writes: list[dict[str, Any]] = []
     for profile, policies in sorted(by_profile.items()):
         path = profiles_root / profile / "cron" / "jobs.json"
-        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        original = path.read_bytes()
+        payload = json.loads(original.decode("utf-8-sig"))
         rows = payload.get("jobs", []) if isinstance(payload, dict) else payload
         jobs_by_id = {str(job.get("id")): job for job in rows if isinstance(job, dict)}
         profile_changed = False
@@ -166,8 +184,36 @@ def migrate(
                         "destination_changed": destination_changed,
                     }
                 )
-        if apply and profile_changed:
-            _atomic_write_json(path, payload)
+        if profile_changed:
+            staged_writes.append(
+                {
+                    "path": path,
+                    "payload": payload,
+                    "original": original,
+                    "mode": path.stat().st_mode & 0o777,
+                }
+            )
+    if apply:
+        written: list[dict[str, Any]] = []
+        try:
+            for staged in staged_writes:
+                _atomic_write_json(staged["path"], staged["payload"])
+                written.append(staged)
+        except Exception:
+            rollback_errors: list[str] = []
+            for staged in reversed(written):
+                try:
+                    _atomic_write_bytes(
+                        staged["path"], staged["original"], staged["mode"]
+                    )
+                except Exception as rollback_exc:  # pragma: no cover - catastrophic I/O
+                    rollback_errors.append(f"{staged['path']}: {rollback_exc}")
+            if rollback_errors:
+                raise RuntimeError(
+                    "delivery migration failed and rollback was incomplete: "
+                    + "; ".join(rollback_errors)
+                )
+            raise
     return {
         "valid": True,
         "applied": apply,

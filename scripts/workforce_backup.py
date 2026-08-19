@@ -12,6 +12,7 @@ import tarfile
 import tempfile
 from pathlib import Path
 from typing import Any
+import shutil
 
 import yaml
 
@@ -86,6 +87,11 @@ def selected_paths(profile: Path) -> list[Path]:
     return paths
 
 
+def _copytree_ignore(_directory: str, names: list[str]) -> set[str]:
+    """Exclude credential/volatile basenames at every copied tree depth."""
+    return {name for name in names if name in EXCLUDED_NAMES}
+
+
 def _manifest_tree(root: Path) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for path in sorted(root.rglob("*")):
@@ -123,12 +129,16 @@ def create_backup(profiles_root: Path, output_dir: Path) -> dict[str, Any]:
                 target = destination / source.relative_to(profile)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 if source.is_dir() and not source.is_symlink():
-                    import shutil
-                    shutil.copytree(source, target, symlinks=True, copy_function=shutil.copy2)
+                    shutil.copytree(
+                        source,
+                        target,
+                        symlinks=True,
+                        copy_function=shutil.copy2,
+                        ignore=_copytree_ignore,
+                    )
                 elif source.is_symlink():
                     target.symlink_to(os.readlink(source))
                 else:
-                    import shutil
                     shutil.copy2(source, target, follow_symlinks=False)
             config = profile / "config.yaml"
             if config.is_file():

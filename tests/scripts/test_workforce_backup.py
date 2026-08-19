@@ -18,6 +18,10 @@ def test_backup_excludes_secrets_and_restores_hashes(tmp_path):
     (profile / "AGENTS.md").write_text("instructions")
     (profile / "memories" / "MEMORY.md").write_text("memory")
     (profile / "skills" / "one" / "SKILL.md").write_text("skill")
+    (profile / "skills" / "one" / ".env").write_text("NESTED_SECRET=value")
+    (profile / "skills" / "one" / "auth.json").write_text('{"token":"nested"}')
+    (profile / "memories" / "logs").mkdir()
+    (profile / "memories" / "logs" / "secret.log").write_text("volatile")
     (profile / ".env").write_text("SECRET=value")
     (profile / "auth.json").write_text('{"token":"secret"}')
     (profile / "config.yaml").write_text(
@@ -33,6 +37,9 @@ def test_backup_excludes_secrets_and_restores_hashes(tmp_path):
     assert verified["valid"] is True
     assert not (scratch / "profiles" / "agent" / ".env").exists()
     assert not (scratch / "profiles" / "agent" / "auth.json").exists()
+    assert not (scratch / "profiles" / "agent" / "skills" / "one" / ".env").exists()
+    assert not (scratch / "profiles" / "agent" / "skills" / "one" / "auth.json").exists()
+    assert not (scratch / "profiles" / "agent" / "memories" / "logs").exists()
     safe = (scratch / "profiles" / "agent" / "config.non-secret.yaml").read_text()
     assert "default: test" in safe
     assert "hidden" not in safe

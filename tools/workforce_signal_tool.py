@@ -3,26 +3,20 @@
 from __future__ import annotations
 
 import json
-import os
-from pathlib import Path
 from typing import Any
 
 from hermes_cli import kanban_db
-from hermes_cli.workforce_org import WorkforceOrganizationError, load_organization
+from hermes_cli.workforce_org import (
+    WorkforceOrganizationError,
+    active_workforce_agent,
+)
 from plugins.workforce_control.store import record_signal
 from tools.registry import registry, tool_error, tool_result
 
 
-def _active_profile_name() -> str:
-    home = Path(os.environ.get("HERMES_HOME", "")).expanduser()
-    if home.parent.name == "profiles" and home.name:
-        return home.name
-    raise WorkforceOrganizationError("workforce_signal requires an active named profile")
-
-
 def _enabled() -> bool:
     try:
-        source = load_organization().from_profile_path(_active_profile_name())
+        source = active_workforce_agent()
         return (
             source.operational
             and source.status in {"active", "planned"}
@@ -41,8 +35,7 @@ def _required_text(args: dict[str, Any], name: str) -> str:
 
 def _handle(args: dict[str, Any], **_kwargs: Any) -> str:
     try:
-        org = load_organization()
-        source = org.from_profile_path(_active_profile_name())
+        source = active_workforce_agent()
         if not source.operational or source.status not in {"active", "planned"}:
             return tool_error(f"{source.agent} is not eligible to submit workforce signals")
         if source.agent == "mel":

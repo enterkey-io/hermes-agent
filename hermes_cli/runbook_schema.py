@@ -120,11 +120,14 @@ def validate_frontmatter(metadata: dict[str, Any]) -> None:
 def _validate_workforce_profiles_if_configured(metadata: dict[str, Any]) -> None:
     from hermes_cli.workforce_org import (
         WorkforceOrganizationError,
+        is_workforce_managed,
         load_organization,
         organization_path,
         validate_workflow_profiles,
     )
 
+    if not is_workforce_managed(metadata):
+        return
     path = organization_path()
     if not path.is_file():
         return

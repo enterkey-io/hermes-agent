@@ -11,7 +11,7 @@ from typing import Any, Iterable, Mapping
 
 import yaml
 
-from hermes_constants import get_default_hermes_root
+from hermes_constants import get_default_hermes_root, get_hermes_home
 
 
 ALLOWED_STATUSES = {"active", "planned", "friend", "retired", "artifact"}
@@ -164,6 +164,14 @@ def normalize_agent_id(value: str) -> str:
     return str(value or "").strip().casefold()
 
 
+def is_workforce_managed(metadata: Mapping[str, Any]) -> bool:
+    """Return whether a workflow/runbook explicitly opts into workforce policy."""
+    if metadata.get("workforce_managed") is True:
+        return True
+    related = metadata.get("related")
+    return isinstance(related, Mapping) and related.get("workforce_managed") is True
+
+
 def organization_path() -> Path:
     override = os.environ.get("HERMES_WORKFORCE_ORG", "").strip()
     return Path(override).expanduser() if override else get_default_hermes_root() / "organization" / "organization.yaml"
@@ -205,6 +213,22 @@ def load_organization(path: Path | None = None, *, validate_profiles: bool = Fal
     org = WorkforceOrganization(version, agents, source, technical_ownership)
     validate_organization(org, validate_profiles=validate_profiles)
     return org
+
+
+def active_workforce_agent() -> WorkforceAgent:
+    """Resolve the current task-scoped Hermes profile to its workforce agent.
+
+    ``get_hermes_home`` honors the context-local profile override used by the
+    multiplexed gateway before it consults the process environment. Reading
+    ``HERMES_HOME`` directly here can therefore attribute one conversation to
+    the gateway process's launch profile instead of the active conversation.
+    """
+    home = get_hermes_home().expanduser()
+    if home.parent.name != "profiles" or not home.name:
+        raise WorkforceOrganizationError(
+            "workforce tools require an active named profile"
+        )
+    return load_organization().from_profile_path(home)
 
 
 def validate_organization(org: WorkforceOrganization, *, validate_profiles: bool = False) -> None:

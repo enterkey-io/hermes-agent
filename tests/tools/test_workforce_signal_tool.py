@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+from hermes_constants import reset_hermes_home_override, set_hermes_home_override
 from hermes_cli import kanban_db
 from tools import workforce_signal_tool as signal
 
@@ -107,3 +108,22 @@ def test_mel_cannot_route_a_signal(tmp_path, monkeypatch):
     result = json.loads(signal._handle(_payload()))
     assert result.get("success") is not True
     assert "may not route" in result["error"]
+
+
+def test_signal_uses_task_profile_override_before_process_environment(tmp_path, monkeypatch):
+    profiles = tmp_path / "profiles"
+    (profiles / "amy").mkdir(parents=True)
+    (profiles / "emily").mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(profiles / "amy"))
+    monkeypatch.setenv("HERMES_WORKFORCE_ORG", str(SOURCE))
+    db_path = tmp_path / "kanban.db"
+    monkeypatch.setattr(kanban_db, "kanban_db_path", lambda **_kwargs: db_path)
+
+    token = set_hermes_home_override(profiles / "emily")
+    try:
+        result = json.loads(signal._handle(_payload()))
+    finally:
+        reset_hermes_home_override(token)
+
+    assert result["success"] is True
+    assert result["source_agent"] == "emily"

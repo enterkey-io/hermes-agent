@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from hermes_cli.sqlite_util import write_txn
+from hermes_cli.sqlite_util import add_column_if_missing, write_txn
 from hermes_cli.workflow_models import (
     RUNTIME_KINDS,
     RUN_STATUSES,
@@ -36,7 +36,7 @@ from hermes_cli.workflow_models import (
 from hermes_constants import get_default_hermes_root
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS workflow_definitions (
@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS workflow_definitions (
     name            TEXT NOT NULL,
     description     TEXT,
     owner_profile   TEXT NOT NULL,
+    workforce_managed INTEGER NOT NULL DEFAULT 0,
     status          TEXT NOT NULL,
     runtime_kind    TEXT NOT NULL,
     runtime_ref     TEXT,
@@ -191,7 +192,9 @@ def _json_loads(value: str | None) -> Any:
 
 
 def _row_to_definition(row: sqlite3.Row) -> WorkflowDefinition:
-    return WorkflowDefinition(**dict(row))
+    data = dict(row)
+    data["workforce_managed"] = bool(data["workforce_managed"])
+    return WorkflowDefinition(**data)
 
 
 def _row_to_step(row: sqlite3.Row) -> WorkflowStep:
@@ -282,6 +285,12 @@ def init_db(conn: sqlite3.Connection) -> None:
     """Initialize or migrate the registry schema."""
     with write_txn(conn):
         conn.executescript(SCHEMA_SQL)
+        add_column_if_missing(
+            conn,
+            "workflow_definitions",
+            "workforce_managed",
+            "workforce_managed INTEGER NOT NULL DEFAULT 0",
+        )
         conn.execute(
             "INSERT OR REPLACE INTO workflow_registry_meta(key, value) VALUES (?, ?)",
             ("schema_version", str(SCHEMA_VERSION)),
@@ -295,9 +304,10 @@ def _validate_definition_fields(values: Mapping[str, Any]) -> None:
         raise ValueError(f"invalid workflow status: {status!r}")
     if runtime_kind not in RUNTIME_KINDS:
         raise ValueError(f"invalid workflow runtime_kind: {runtime_kind!r}")
-    _validate_workforce_profiles_if_configured(
-        str(values.get("owner_profile") or ""), []
-    )
+    if bool(values.get("workforce_managed")):
+        _validate_workforce_profiles_if_configured(
+            str(values.get("owner_profile") or ""), []
+        )
 
 
 def _validate_workforce_profiles_if_configured(
@@ -405,6 +415,7 @@ def create_definition(conn: sqlite3.Connection, **values: Any) -> WorkflowDefini
         "name": values["name"],
         "description": values.get("description"),
         "owner_profile": values["owner_profile"],
+        "workforce_managed": int(bool(values.get("workforce_managed", False))),
         "status": values.get("status", "draft"),
         "runtime_kind": values.get("runtime_kind", "hermes"),
         "runtime_ref": values.get("runtime_ref"),
@@ -476,6 +487,7 @@ def update_definition(
         "name",
         "description",
         "owner_profile",
+        "workforce_managed",
         "status",
         "runtime_kind",
         "runtime_ref",
@@ -568,10 +580,11 @@ def replace_steps(
                 "max_attempts": step.get("max_attempts"),
             }
         )
-    _validate_workforce_profiles_if_configured(
-        definition.owner_profile,
-        [row["executor_profile"] for row in normalized],
-    )
+    if definition.workforce_managed:
+        _validate_workforce_profiles_if_configured(
+            definition.owner_profile,
+            [row["executor_profile"] for row in normalized],
+        )
     columns = [
         "id",
         "workflow_id",
@@ -624,7 +637,8 @@ def link_schedule(
     last_verified_at: int | None = None,
 ) -> None:
     definition = get_definition(conn, workflow_id)
-    _validate_workforce_profiles_if_configured(definition.owner_profile, [profile])
+    if definition.workforce_managed:
+        _validate_workforce_profiles_if_configured(definition.owner_profile, [profile])
     with write_txn(conn):
         conn.execute(
             """
@@ -710,9 +724,10 @@ def start_run(
 ) -> WorkflowRun:
     definition = get_definition(conn, workflow_id)
     steps = list_steps(conn, workflow_id)
-    _validate_workforce_profiles_if_configured(
-        definition.owner_profile, [step.executor_profile for step in steps]
-    )
+    if definition.workforce_managed:
+        _validate_workforce_profiles_if_configured(
+            definition.owner_profile, [step.executor_profile for step in steps]
+        )
     run_id = _new_id("run")
     now = _now()
     with write_txn(conn):
