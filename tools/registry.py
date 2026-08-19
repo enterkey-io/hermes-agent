@@ -23,6 +23,7 @@ import re
 import sys
 import threading
 import time
+import traceback
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 
@@ -1526,14 +1527,26 @@ class ToolRegistry:
                     tool=name,
                 )
             else:
-                # exc_info already renders the exception, so keep the message copy bounded.
-                logger.exception(
-                    "Tool %s dispatch error: %s", name, _bound_error_text(str(e))
+                bounded_exception = _bound_error_text(str(e))
+                # Keep both the message and traceback bounded. ``logger.exception``
+                # would render the original exception again through ``exc_info``,
+                # defeating the message cap for arbitrarily large upstream bodies.
+                bounded_traceback = "".join(
+                    traceback.format_tb(e.__traceback__, limit=24)
+                )[-_MAX_LOGGED_ERROR_CHARS:]
+                logger.error(
+                    "Tool %s dispatch error: %s\n%s",
+                    name,
+                    bounded_exception,
+                    bounded_traceback,
                 )
                 # Route through the sanitizer so framing tokens / CDATA / fences
                 # in exception strings don't reach the model as structural noise.
                 # See model_tools._sanitize_tool_error for rationale.
-                raw = f"Tool execution failed: {type(e).__name__}: {e}"
+                # Bound before regex sanitization as well: an upstream response can
+                # be arbitrarily large, and scanning it first turns an already
+                # failed tool call into a long-running CPU task.
+                raw = f"Tool execution failed: {type(e).__name__}: {bounded_exception}"
                 try:
                     from model_tools import _sanitize_tool_error
                     sanitized = _sanitize_tool_error(raw)

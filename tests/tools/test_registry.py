@@ -309,6 +309,30 @@ class TestDispatchExceptionLogging:
             assert body not in message
         assert len(result["error"]) < _MAX_TOOL_ERROR_CHARS + 200
 
+    def test_raising_handler_bounds_before_sanitization(self, monkeypatch):
+        import model_tools
+
+        sanitized_inputs = []
+        monkeypatch.setattr(
+            model_tools,
+            "_sanitize_tool_error",
+            lambda message: sanitized_inputs.append(message) or message,
+        )
+        body = "upstream said: " + "Q" * 200_000
+        reg = ToolRegistry()
+        reg.register(
+            name="boom",
+            toolset="core",
+            schema=_make_schema("boom"),
+            handler=lambda args, **kw: (_ for _ in ()).throw(RuntimeError(body)),
+        )
+
+        reg.dispatch("boom", {})
+
+        assert len(sanitized_inputs) == 1
+        assert len(sanitized_inputs[0]) < _MAX_TOOL_ERROR_CHARS + 200
+        assert body not in sanitized_inputs[0]
+
 
 class TestToolsetAvailability:
     def test_no_check_fn_is_available(self):
