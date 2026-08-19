@@ -32,6 +32,7 @@ def test_rendered_proactive_cycles_are_complete_and_workforce_managed(tmp_path):
     assert parsed.metadata["runtime"]["max_iterations"] == 12
     assert parsed.metadata["runtime"]["tool_budget"]["max_calls"] == 8
     assert "kanban_create" not in parsed.metadata["runtime"]["tool_budget"]["allowed_tools"]
+    assert "kanban_archive_stale" in parsed.metadata["runtime"]["tool_budget"]["allowed_tools"]
     assert len(schedules) == 10
     assert {item["profile"] for item in schedules} == {
         "chloe", "milena", "emily", "alina", "main", "bridgette",

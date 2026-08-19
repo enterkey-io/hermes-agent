@@ -26,7 +26,7 @@ BOUNDED_TOOL_BUDGET = {
     "allowed_tools": [
         "kanban_list", "kanban_show", "kanban_complete", "kanban_block",
         "kanban_request_review", "kanban_request_changes", "kanban_comment",
-        "kanban_attachments", "workforce_signal", "runbook_list",
+        "kanban_archive_stale", "kanban_attachments", "workforce_signal", "runbook_list",
         "runbook_search", "runbook_get", "runbook_validate", "runbook_runs",
     ],
 }

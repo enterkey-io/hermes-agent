@@ -22,6 +22,7 @@ runtime:
     - kanban_request_review
     - kanban_request_changes
     - kanban_comment
+    - kanban_archive_stale
     - kanban_attachments
     - workforce_signal
     - runbook_list
@@ -198,7 +199,7 @@ This is a bounded proactive operating cycle, not permission to manufacture work.
 Every firing is an internal control-plane reconciliation, not a general research or systems-audit session.
 
 - Use only the per-job `kanban`, `workforce`, and `runbook` tools. MCP servers, terminal, files, code execution, browser/web research, delegation, and platform messaging are intentionally unavailable.
-- The host runtime also denies task creation, dependency linking, unblocking, workforce handoff, attachments, and runbook mutation during these cycles; the prompt cannot enlarge that allowlist.
+- The host runtime also denies task creation, dependency linking, unblocking, workforce handoff, attachments, and runbook mutation during these cycles; the prompt cannot enlarge that allowlist. It permits stale archival only through `kanban_archive_stale`, which requires an exact cancellation/stop/supersession quote already stored on an inactive task.
 - Make at most eight tool calls total, including at most one write and at most three individual task/workflow detail reads. Prefer one filtered list or dashboard snapshot over repeated item-by-item discovery.
 - Review at most twenty candidate records, limited to the executing role's department or explicit reporting scope and changed, failed, blocked, review, or qualified-signal state. Never enumerate the whole board or workforce.
 - Do not inspect host services, processes, networks, system configuration, credentials, raw databases, conversation archives, unrelated departments, or underlying implementation files.
@@ -209,7 +210,7 @@ Every firing is an internal control-plane reconciliation, not a general research
 2. Establish the current state before planning or reporting using the bounded internal sources above. Inspect the canonical task record, recent execution evidence, and relevant Workflow Registry state. Include directly linked completed or archived work so finished work is not presented as pending, but never scan either archive broadly.
 3. Establish the applicable approved goal. Use Elliott's canonical goals source only through an authorized official integration. Otherwise use an explicit, current goal reference already present in the work or director assignment. If goal evidence is absent or contradictory, do not infer strategy.
 4. Identify at most one highest-value issue or safe next action after considering priority, capacity, dependencies, deadlines, and what it would displace.
-5. If work is already complete, reconcile the existing record and evidence within authority; do not create a replacement task. If it is duplicated or superseded, update or link the canonical record rather than launching another path.
+5. If work is already complete, reconcile the existing record and evidence within authority; do not create a replacement task. If an inactive task has a direct Elliott/director stop, cancellation, or supersession statement in its own body, result, or comments, archive that existing record with `kanban_archive_stale`. Ambiguous evidence or a new strategic judgment must be signaled instead. If it is duplicated or superseded, update the canonical record rather than launching another path.
 6. A failed verification leaves the business outcome open. Link or propose one remediation path; never report the outcome as successful.
 7. Continue clear, routine, reversible work already inside the approved goal and role, then verify the result. Chloe and Mel must obey their narrower step restrictions and never turn observation or ideation into execution.
 8. For a substantial opportunity, ambiguous request, missing goal, cross-boundary issue, or material displacement, record at most one deduplicated non-executing signal for Aurora. Do not create an execution graph.
