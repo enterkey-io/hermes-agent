@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import threading
 from pathlib import Path
 
@@ -61,6 +62,34 @@ def test_schema_idempotent_and_definition_crud(conn) -> None:
             expected_version=fetched.version,
             name="Stale Write",
         )
+
+
+def test_schema_migrates_existing_definition_table_with_workforce_marker(tmp_path) -> None:
+    db_path = tmp_path / "legacy.db"
+    with sqlite3.connect(db_path) as legacy:
+        legacy.execute(
+            """
+            CREATE TABLE workflow_definitions (
+                id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
+                description TEXT, owner_profile TEXT NOT NULL, status TEXT NOT NULL,
+                runtime_kind TEXT NOT NULL, runtime_ref TEXT, source_path TEXT,
+                source_hash TEXT, source_revision TEXT, kanban_board TEXT,
+                repair_task_id TEXT, dedupe_strategy TEXT, timeout_seconds INTEGER,
+                max_attempts INTEGER, version INTEGER NOT NULL DEFAULT 1,
+                created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+                retired_at INTEGER
+            )
+            """
+        )
+    with reg.connect_closing(db_path) as migrated:
+        columns = {
+            row["name"]
+            for row in migrated.execute("PRAGMA table_info(workflow_definitions)")
+        }
+        assert "workforce_managed" in columns
+        assert migrated.execute(
+            "SELECT value FROM workflow_registry_meta WHERE key = 'schema_version'"
+        ).fetchone()["value"] == str(reg.SCHEMA_VERSION)
 
 
 def test_replace_steps_and_contract_round_trip(conn) -> None:
@@ -245,3 +274,43 @@ def test_prune_missing_schedule_links_keeps_only_live_jobs(conn) -> None:
         "SELECT profile, cron_job_id FROM workflow_schedules"
     ).fetchall()
     assert [tuple(row) for row in rows] == [("grace", "live")]
+
+
+def test_canonical_organization_rejects_friend_owner(conn, monkeypatch) -> None:
+    org_path = Path(__file__).parents[2] / "workforce" / "organization.yaml"
+    monkeypatch.setenv("HERMES_WORKFORCE_ORG", str(org_path))
+    with pytest.raises(ValueError, match="cannot own or execute"):
+        reg.create_definition(
+            conn, slug="friend-owned", name="Friend Owned",
+            owner_profile="amy", workforce_managed=True,
+            status="active", runtime_kind="hermes",
+        )
+
+
+def test_canonical_organization_rejects_friend_executor(conn, monkeypatch) -> None:
+    org_path = Path(__file__).parents[2] / "workforce" / "organization.yaml"
+    monkeypatch.setenv("HERMES_WORKFORCE_ORG", str(org_path))
+    workflow = reg.create_definition(
+        conn, slug="org-aware", name="Org aware", owner_profile="grace",
+        workforce_managed=True, status="active", runtime_kind="hermes",
+    )
+    with pytest.raises(ValueError, match="cannot own or execute"):
+        reg.replace_steps(
+            conn, workflow.id,
+            [{"step_key": "bad", "name": "Bad", "executor_profile": "kourtnie"}],
+        )
+
+
+def test_generic_workflow_is_not_constrained_by_workforce_roster(conn, monkeypatch) -> None:
+    org_path = Path(__file__).parents[2] / "workforce" / "organization.yaml"
+    monkeypatch.setenv("HERMES_WORKFORCE_ORG", str(org_path))
+    workflow = reg.create_definition(
+        conn, slug="friend-personal", name="Friend personal workflow",
+        owner_profile="amy", status="active", runtime_kind="hermes",
+    )
+    reg.replace_steps(
+        conn, workflow.id,
+        [{"step_key": "chat", "name": "Chat", "executor_profile": "kourtnie"}],
+    )
+    reg.link_schedule(conn, workflow.id, profile="amy", cron_job_id="personal")
+    assert reg.start_run(conn, workflow.id, trigger_kind="manual").status == "running"

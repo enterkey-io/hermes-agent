@@ -112,6 +112,7 @@ def test_no_subscriber_short_circuits_tick_hook(kanban_home, monkeypatch):
     """With nothing registered, the tick observer is never invoked."""
     from hermes_cli import lifecycle
 
+    monkeypatch.setattr(lifecycle, "has_hook", lambda _hook_name: False)
     invoked: list[str] = []
     real_invoke = lifecycle.invoke_hook
 

@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from hermes_cli.sqlite_util import write_txn
+from hermes_cli.sqlite_util import add_column_if_missing, write_txn
 from hermes_cli.workflow_models import (
     RUNTIME_KINDS,
     RUN_STATUSES,
@@ -36,7 +36,7 @@ from hermes_cli.workflow_models import (
 from hermes_constants import get_default_hermes_root
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS workflow_definitions (
@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS workflow_definitions (
     name            TEXT NOT NULL,
     description     TEXT,
     owner_profile   TEXT NOT NULL,
+    workforce_managed INTEGER NOT NULL DEFAULT 0,
     status          TEXT NOT NULL,
     runtime_kind    TEXT NOT NULL,
     runtime_ref     TEXT,
@@ -191,7 +192,9 @@ def _json_loads(value: str | None) -> Any:
 
 
 def _row_to_definition(row: sqlite3.Row) -> WorkflowDefinition:
-    return WorkflowDefinition(**dict(row))
+    data = dict(row)
+    data["workforce_managed"] = bool(data["workforce_managed"])
+    return WorkflowDefinition(**data)
 
 
 def _row_to_step(row: sqlite3.Row) -> WorkflowStep:
@@ -282,6 +285,12 @@ def init_db(conn: sqlite3.Connection) -> None:
     """Initialize or migrate the registry schema."""
     with write_txn(conn):
         conn.executescript(SCHEMA_SQL)
+        add_column_if_missing(
+            conn,
+            "workflow_definitions",
+            "workforce_managed",
+            "workforce_managed INTEGER NOT NULL DEFAULT 0",
+        )
         conn.execute(
             "INSERT OR REPLACE INTO workflow_registry_meta(key, value) VALUES (?, ?)",
             ("schema_version", str(SCHEMA_VERSION)),
@@ -295,6 +304,28 @@ def _validate_definition_fields(values: Mapping[str, Any]) -> None:
         raise ValueError(f"invalid workflow status: {status!r}")
     if runtime_kind not in RUNTIME_KINDS:
         raise ValueError(f"invalid workflow runtime_kind: {runtime_kind!r}")
+    if bool(values.get("workforce_managed")):
+        _validate_workforce_profiles_if_configured(
+            str(values.get("owner_profile") or ""), []
+        )
+
+
+def _validate_workforce_profiles_if_configured(
+    owner_profile: str, executor_profiles: Iterable[str | None]
+) -> None:
+    """Apply organization policy once a canonical organization is installed."""
+    from hermes_cli.workforce_org import (
+        load_organization,
+        organization_path,
+        validate_workflow_profiles,
+    )
+
+    path = organization_path()
+    if not path.is_file():
+        return
+    validate_workflow_profiles(
+        load_organization(path), owner_profile, executor_profiles
+    )
 
 
 def _event(
@@ -384,6 +415,7 @@ def create_definition(conn: sqlite3.Connection, **values: Any) -> WorkflowDefini
         "name": values["name"],
         "description": values.get("description"),
         "owner_profile": values["owner_profile"],
+        "workforce_managed": int(bool(values.get("workforce_managed", False))),
         "status": values.get("status", "draft"),
         "runtime_kind": values.get("runtime_kind", "hermes"),
         "runtime_ref": values.get("runtime_ref"),
@@ -455,6 +487,7 @@ def update_definition(
         "name",
         "description",
         "owner_profile",
+        "workforce_managed",
         "status",
         "runtime_kind",
         "runtime_ref",
@@ -515,7 +548,7 @@ def replace_steps(
     steps: Iterable[Mapping[str, Any]],
 ) -> list[WorkflowStep]:
     """Replace projected steps for a workflow atomically."""
-    get_definition(conn, workflow_id)
+    definition = get_definition(conn, workflow_id)
     normalized: list[dict[str, Any]] = []
     seen_keys: set[str] = set()
     seen_positions: set[int] = set()
@@ -546,6 +579,11 @@ def replace_steps(
                 "timeout_seconds": step.get("timeout_seconds"),
                 "max_attempts": step.get("max_attempts"),
             }
+        )
+    if definition.workforce_managed:
+        _validate_workforce_profiles_if_configured(
+            definition.owner_profile,
+            [row["executor_profile"] for row in normalized],
         )
     columns = [
         "id",
@@ -598,7 +636,9 @@ def link_schedule(
     enabled: bool = True,
     last_verified_at: int | None = None,
 ) -> None:
-    get_definition(conn, workflow_id)
+    definition = get_definition(conn, workflow_id)
+    if definition.workforce_managed:
+        _validate_workforce_profiles_if_configured(definition.owner_profile, [profile])
     with write_txn(conn):
         conn.execute(
             """
@@ -619,6 +659,25 @@ def link_schedule(
             "schedule_linked",
             {"profile": profile, "cron_job_id": cron_job_id, "enabled": enabled},
         )
+
+
+def list_schedule_links(
+    conn: sqlite3.Connection, workflow_id: str
+) -> list[dict[str, Any]]:
+    """Return the durable cron links for a workflow."""
+    get_definition(conn, workflow_id)
+    rows = conn.execute(
+        "SELECT workflow_id, profile, cron_job_id, enabled, last_verified_at "
+        "FROM workflow_schedules WHERE workflow_id = ? ORDER BY profile, cron_job_id",
+        (workflow_id,),
+    ).fetchall()
+    return [
+        {
+            **dict(row),
+            "enabled": bool(row["enabled"]),
+        }
+        for row in rows
+    ]
 
 
 def prune_missing_schedule_links(
@@ -663,7 +722,12 @@ def start_run(
     kanban_task_id: str | None = None,
     reuse_existing: bool = True,
 ) -> WorkflowRun:
-    get_definition(conn, workflow_id)
+    definition = get_definition(conn, workflow_id)
+    steps = list_steps(conn, workflow_id)
+    if definition.workforce_managed:
+        _validate_workforce_profiles_if_configured(
+            definition.owner_profile, [step.executor_profile for step in steps]
+        )
     run_id = _new_id("run")
     now = _now()
     with write_txn(conn):
@@ -894,7 +958,9 @@ def list_events(
         params.append(entity_id)
     if filters:
         query += " WHERE " + " AND ".join(filters)
-    query += " ORDER BY created_at, id"
+    # Multiple control events can share the same second-resolution timestamp.
+    # rowid preserves insertion order; UUID ids do not.
+    query += " ORDER BY created_at, rowid"
     rows = conn.execute(query, params).fetchall()
     result = []
     for row in rows:

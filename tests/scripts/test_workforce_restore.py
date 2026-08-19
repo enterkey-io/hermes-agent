@@ -1,0 +1,89 @@
+from pathlib import Path
+
+import pytest
+
+from scripts.workforce_backup import create_backup, verify_backup
+from scripts import workforce_restore
+from scripts.workforce_restore import restore
+
+
+ROOT = Path(__file__).parents[2]
+
+
+def test_instruction_and_delivery_rollback_restores_complete_active_set(tmp_path):
+    profiles = tmp_path / "profiles"
+    profile_names = {
+        Path(item.profile_path).name
+        for item in __import__("hermes_cli.workforce_org", fromlist=["load_organization"])
+        .load_organization(ROOT / "workforce/organization.yaml")
+        .operational_agents(include_planned=False)
+    }
+    for name in profile_names:
+        profile = profiles / name
+        (profile / "cron").mkdir(parents=True)
+        (profile / "AGENTS.md").write_text(f"before:{name}\n")
+        (profile / "cron/jobs.json").write_text('{"jobs": []}\n')
+    backup = tmp_path / "backup"
+    create_backup(profiles, backup)
+    verify_backup(backup, tmp_path / "scratch")
+    for name in profile_names:
+        (profiles / name / "AGENTS.md").write_text("after\n")
+        (profiles / name / "cron/jobs.json").write_text('{"jobs": ["after"]}\n')
+
+    report = restore(
+        backup=backup,
+        organization=ROOT / "workforce/organization.yaml",
+        profiles_root=profiles,
+        scope="all",
+        apply=True,
+    )
+
+    assert report["applied"] is True
+    assert report["profiles_without_pre_cutover_files"] == []
+    assert len(report["restore_files"]) == len(profile_names) * 2
+    for name in profile_names:
+        assert (profiles / name / "AGENTS.md").read_text() == f"before:{name}\n"
+        assert (profiles / name / "cron/jobs.json").read_text() == '{"jobs": []}\n'
+
+
+def test_failed_restore_removes_targets_that_did_not_exist_before(tmp_path, monkeypatch):
+    profiles = tmp_path / "profiles"
+    org = __import__("hermes_cli.workforce_org", fromlist=["load_organization"]).load_organization(
+        ROOT / "workforce/organization.yaml"
+    )
+    profile_names = {
+        Path(item.profile_path).name
+        for item in org.operational_agents(include_planned=False)
+    }
+    for name in profile_names:
+        profile = profiles / name
+        (profile / "cron").mkdir(parents=True)
+        (profile / "AGENTS.md").write_text(f"baseline:{name}\n")
+        (profile / "cron/jobs.json").write_text('{"jobs": []}\n')
+    backup = tmp_path / "backup"
+    create_backup(profiles, backup)
+    verify_backup(backup, tmp_path / "scratch")
+
+    for name in profile_names:
+        (profiles / name / "AGENTS.md").unlink()
+    original_write = workforce_restore._atomic_write
+    calls = 0
+
+    def fail_after_first(path, content, mode):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("injected restore failure")
+        original_write(path, content, mode)
+
+    monkeypatch.setattr(workforce_restore, "_atomic_write", fail_after_first)
+    with pytest.raises(OSError, match="injected restore failure"):
+        restore(
+            backup=backup,
+            organization=ROOT / "workforce/organization.yaml",
+            profiles_root=profiles,
+            scope="instructions",
+            apply=True,
+        )
+
+    assert all(not (profiles / name / "AGENTS.md").exists() for name in profile_names)

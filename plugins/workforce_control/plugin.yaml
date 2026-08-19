@@ -1,0 +1,11 @@
+name: workforce-control
+version: 1.0.0
+description: "Outcome, reconciliation, and correction controls for a proactive Hermes workforce."
+author: Enterkey
+kind: backend
+provides_tools:
+  - workforce_plan
+  - workforce_materialize
+  - workforce_reconcile
+  - workforce_correct
+

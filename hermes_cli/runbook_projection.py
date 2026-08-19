@@ -8,6 +8,7 @@ from typing import Any
 from hermes_cli import runbook_store
 from hermes_cli import workflow_registry as registry
 from hermes_cli.workflow_models import WorkflowConflictError, WorkflowNotFoundError
+from hermes_cli.workforce_org import is_workforce_managed
 
 
 def _step_records(metadata: dict[str, Any]) -> list[dict[str, Any]]:
@@ -45,6 +46,7 @@ def project_runbook(record: runbook_store.RunbookRecord) -> dict[str, Any]:
         "name": metadata["title"],
         "description": metadata["purpose"],
         "owner_profile": metadata["owner_profile"],
+        "workforce_managed": is_workforce_managed(metadata),
         "status": metadata["status"],
         "runtime_kind": runtime["kind"],
         "runtime_ref": runtime.get("ref"),
@@ -142,6 +144,7 @@ def project_runbook_transaction(
         "name": metadata["title"],
         "description": metadata["purpose"],
         "owner_profile": metadata["owner_profile"],
+        "workforce_managed": is_workforce_managed(metadata),
         "status": metadata["status"],
         "runtime_kind": runtime["kind"],
         "runtime_ref": runtime.get("ref"),

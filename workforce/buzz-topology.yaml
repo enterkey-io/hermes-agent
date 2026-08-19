@@ -1,0 +1,93 @@
+schema_version: 1
+profile_home_rooms:
+  aurora: admin
+  grace: executive-support
+  chloe: admin
+  milena: executive-support
+  brenna: lift-accountability
+  emily: director-product
+  sage: staff-product
+  iris: staff-product
+  sloane: staff-product
+  maya: staff-product
+  reese: staff-product
+  morgan: staff-product
+  alina: director-agent-systems
+  root: director-operations
+  bridgette: director-marketing
+  margot: staff-marketing
+  kenzie: staff-marketing
+  emma: staff-marketing
+  xenia: director-trading
+  oyku: staff-trading
+  maggie: director-finance
+  mel: director-vision
+profile_additional_rooms:
+  chloe: [general]
+  emma: [general]
+rooms:
+  - name: admin
+    status: confirmed
+    visibility: private
+    purpose: Reserved escalations, material risks, unresolved dependencies, and meaningful workforce outcomes.
+    members: [elliott, aurora, chloe, grace, milena]
+  - name: director-product
+    status: candidate
+    visibility: private
+    purpose: Product facts, decisions, exceptions, and reserved escalations.
+    members: [elliott, aurora, chloe, emily]
+  - name: director-agent-systems
+    status: candidate
+    visibility: private
+    purpose: Agent Systems facts, decisions, exceptions, and reserved escalations.
+    members: [elliott, aurora, chloe, alina]
+  - name: director-operations
+    status: candidate
+    visibility: private
+    purpose: Operations facts, decisions, exceptions, and reserved escalations.
+    members: [elliott, aurora, chloe, root]
+  - name: director-marketing
+    status: candidate
+    visibility: private
+    purpose: Marketing facts, decisions, exceptions, and reserved escalations.
+    members: [elliott, aurora, chloe, bridgette]
+  - name: director-trading
+    status: candidate
+    visibility: private
+    purpose: Trading facts, decisions, exceptions, and reserved escalations.
+    members: [elliott, aurora, chloe, xenia]
+  - name: director-finance
+    status: candidate
+    visibility: private
+    purpose: Finance facts, decisions, exceptions, and reserved escalations.
+    members: [elliott, aurora, chloe, maggie]
+  - name: director-vision
+    status: candidate
+    visibility: private
+    purpose: Vision alternatives, constraints, and Aurora disposition.
+    members: [elliott, aurora, chloe, mel]
+  - name: staff-product
+    status: candidate
+    visibility: private
+    purpose: Product assignments, blockers, coordination, and verified outcomes.
+    members: [elliott, emily, sage, iris, sloane, maya, reese, morgan]
+  - name: staff-marketing
+    status: candidate
+    visibility: private
+    purpose: Marketing assignments, blockers, coordination, and verified outcomes.
+    members: [elliott, bridgette, margot, kenzie, emma]
+  - name: staff-trading
+    status: candidate
+    visibility: private
+    purpose: Trading research assignments, blockers, coordination, and verified outcomes.
+    members: [elliott, xenia, oyku]
+  - name: executive-support
+    status: confirmed
+    visibility: private
+    purpose: Private executive coordination, meeting preparation, LIFT accountability, and administrative follow-through.
+    members: [elliott, aurora, chloe, grace, brenna, milena]
+  - name: lift-accountability
+    status: candidate
+    visibility: private
+    purpose: Legacy LIFT room retained for history; active meeting and LIFT workflow delivery uses executive-support.
+    members: [elliott, grace, brenna]

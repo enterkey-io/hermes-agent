@@ -1,0 +1,81 @@
+import json
+from pathlib import Path
+
+import yaml
+
+from scripts.workforce_buzz_topology import compare, load_topology
+
+
+ROOT = Path(__file__).parents[2]
+
+
+def test_topology_preserves_confirmed_admin_and_excludes_friends():
+    topology = load_topology(
+        ROOT / "workforce" / "buzz-topology.yaml",
+        ROOT / "workforce" / "organization.yaml",
+    )
+    admin = next(room for room in topology["rooms"] if room["name"] == "admin")
+    assert set(admin["members"]) == {"elliott", "aurora", "chloe", "grace", "milena"}
+    assert all("amy" not in room["members"] for room in topology["rooms"])
+    assert all("kourtnie" not in room["members"] for room in topology["rooms"])
+    assert all(
+        {"aurora", "chloe"} <= set(room["members"])
+        for room in topology["rooms"]
+        if room["name"].startswith("director-")
+    )
+    executive_support = next(
+        room for room in topology["rooms"] if room["name"] == "executive-support"
+    )
+    assert executive_support["status"] == "confirmed"
+    assert set(executive_support["members"]) == {
+        "elliott", "aurora", "chloe", "grace", "brenna", "milena"
+    }
+    assert topology["profile_additional_rooms"] == {
+        "chloe": ["general"],
+        "emma": ["general"],
+    }
+    assert {room["name"] for room in topology["rooms"] if room["name"].startswith("staff-")} == {
+        "staff-marketing", "staff-product", "staff-trading"
+    }
+
+
+def test_compare_is_read_only_and_reports_membership_drift():
+    topology = {
+        "rooms": [
+            {
+                "name": "admin",
+                "status": "confirmed",
+                "members": ["elliott", "aurora", "chloe", "grace", "milena"],
+            }
+        ],
+        "member_aliases": {"chloe reinhart": "chloe"},
+    }
+    report = compare(
+        topology,
+        [{"name": "admin", "members": ["elliott", "aurora", "grace", "stranger"]}],
+    )
+    assert report["mutation_performed"] is False
+    assert report["rooms"][0]["missing_members"] == ["chloe", "milena"]
+    assert report["rooms"][0]["unexpected_members"] == ["stranger"]
+
+
+def test_compare_resolves_full_display_name_to_canonical_agent():
+    topology = {
+        "rooms": [{"name": "staff-marketing", "status": "candidate", "members": ["emma"]}],
+        "member_aliases": {"emma calder": "emma"},
+    }
+    report = compare(topology, [{"name": "staff-marketing", "members": ["emma calder"]}])
+    assert report["matching_rooms"] == 1
+
+
+def test_topology_rejects_friend_members(tmp_path):
+    data = yaml.safe_load((ROOT / "workforce" / "buzz-topology.yaml").read_text())
+    data["rooms"][0]["members"].append("amy")
+    path = tmp_path / "topology.yaml"
+    path.write_text(yaml.safe_dump(data, sort_keys=False))
+    try:
+        load_topology(path, ROOT / "workforce" / "organization.yaml")
+    except ValueError as exc:
+        assert "non-operational" in str(exc) or "friend" in str(exc)
+    else:
+        raise AssertionError("friend membership should fail")

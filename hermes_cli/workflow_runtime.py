@@ -118,6 +118,77 @@ def link_existing_cron_job(
     return job
 
 
+def control_linked_cron_jobs(
+    links: list[dict[str, Any]],
+    *,
+    action: str,
+    reason: str,
+) -> list[dict[str, Any]]:
+    """Pause/resume linked cron jobs and compensate if any mutation fails.
+
+    Registry links preserve whether a schedule is intended to be enabled. A
+    workflow resume therefore never enables a schedule whose canonical link is
+    disabled.
+    """
+    if action not in {"pause", "start", "resume"}:
+        raise ValueError(f"unsupported workflow control action: {action}")
+    changed: list[tuple[str, str, dict[str, Any]]] = []
+    results: list[dict[str, Any]] = []
+    try:
+        for link in links:
+            if action != "pause" and not bool(link.get("enabled", True)):
+                continue
+            profile = str(link["profile"])
+            job_id = str(link["cron_job_id"])
+            with _cron_store_for_profile(profile):
+                from cron import jobs as cron_jobs
+
+                existing = next(
+                    (
+                        job
+                        for job in cron_jobs.list_jobs(include_disabled=True)
+                        if job.get("id") == job_id
+                    ),
+                    None,
+                )
+                if existing is None:
+                    raise FileNotFoundError(f"linked cron job not found: {profile}/{job_id}")
+                snapshot = {
+                    key: existing.get(key)
+                    for key in (
+                        "enabled", "state", "paused_at", "paused_reason", "next_run_at"
+                    )
+                }
+                if action == "pause":
+                    updated = cron_jobs.pause_job(job_id, reason)
+                else:
+                    updated = cron_jobs.resume_job(job_id)
+                if updated is None:
+                    raise RuntimeError(f"cron control failed: {profile}/{job_id}")
+            changed.append((profile, job_id, snapshot))
+            results.append(
+                {
+                    "profile": profile,
+                    "cron_job_id": job_id,
+                    "enabled": bool(updated.get("enabled", True)),
+                    "state": updated.get("state"),
+                }
+            )
+    except Exception:
+        for profile, job_id, snapshot in reversed(changed):
+            try:
+                with _cron_store_for_profile(profile):
+                    from cron import jobs as cron_jobs
+
+                    cron_jobs.update_job(job_id, snapshot)
+            except Exception:
+                # Preserve the original failure; the dashboard audit/error path
+                # makes the partial-control condition visible for recovery.
+                pass
+        raise
+    return results
+
+
 def _schedule_text(schedule: dict[str, Any]) -> str:
     for key in ("schedule", "cron", "value"):
         value = schedule.get(key)

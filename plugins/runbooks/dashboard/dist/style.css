@@ -93,6 +93,26 @@
   max-width: 520px;
 }
 
+.hermes-runbooks-filter-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(260px, 2fr) minmax(170px, 1fr) minmax(170px, 1fr);
+}
+
+.hermes-runbooks-filter select {
+  background: var(--background-base);
+  border: 1px solid color-mix(in srgb, var(--midground-base) 18%, transparent);
+  color: var(--midground);
+  min-height: 34px;
+  padding: 6px 8px;
+}
+
+@media (max-width: 760px) {
+  .hermes-runbooks-filter-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .hermes-runbooks-workflow-card,
 .hermes-runbooks-compact-card {
   transition: background-color 120ms ease, border-color 120ms ease;
@@ -420,6 +440,59 @@
   white-space: pre-wrap;
 }
 
+.hermes-runbooks-outcome-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.hermes-runbooks-outcome-content {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.hermes-runbooks-outcome-content > h3 {
+  font-size: 13px;
+  margin: 0 0 2px;
+}
+
+.hermes-runbooks-outcome-row {
+  align-items: center;
+  border-top: 1px solid color-mix(in srgb, var(--midground-base) 12%, transparent);
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto 28px;
+  padding-top: 8px;
+}
+
+.hermes-runbooks-outcome-row > div {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.hermes-runbooks-outcome-row strong {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.hermes-runbooks-outcome-row > div > span,
+.hermes-runbooks-outcome-note,
+.hermes-runbooks-outcome-count {
+  color: color-mix(in srgb, var(--midground-base) 55%, transparent);
+  font-size: 11px;
+}
+
+.hermes-runbooks-outcome-note {
+  margin: 0;
+}
+
+.hermes-runbooks-outcome-count {
+  font-family: var(--theme-font-mono);
+  text-align: right;
+}
+
 @media (max-width: 760px) {
   .hermes-runbooks {
     gap: 12px;
@@ -440,7 +513,7 @@
 
   .hermes-runbooks-tabs {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
     width: 100%;
   }
 
@@ -507,6 +580,10 @@
   }
 
   .hermes-runbooks-archive-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .hermes-runbooks-outcome-grid {
     grid-template-columns: 1fr;
   }
 

@@ -51,6 +51,7 @@ class WorkflowDefinition:
     name: str
     description: str | None
     owner_profile: str
+    workforce_managed: bool
     status: str
     runtime_kind: str
     runtime_ref: str | None
