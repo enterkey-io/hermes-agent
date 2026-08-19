@@ -102,7 +102,9 @@ def test_delivery_migration_replaces_existing_managed_room_policy(tmp_path):
         "enabled": True,
         "deliver": "buzz:99999999-9999-9999-9999-999999999999",
         "prompt": (
-            "Prepare the brief.\n\n[WORKFORCE DELIVERY POLICY]\n"
+            "Prepare the brief. Use only the Cron-configured Buzz destination; "
+            "do not call a platform messaging tool or use a fallback.\n\n"
+            "[WORKFORCE DELIVERY POLICY]\n"
             "Return team-facing output only through the Cron destination for Buzz room "
             "`lift-accountability`. Do not call a platform messaging tool.\n"
         ),

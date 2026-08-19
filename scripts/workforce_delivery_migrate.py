@@ -61,8 +61,12 @@ def _verified_backup(path: Path) -> None:
 
 
 def _rewrite_prompt(value: str, room: str, *, quiet_success: bool) -> str:
-    if RUNBOOK_MANAGED_DELIVERY.search(value) and not any(
+    if (
+        RUNBOOK_MANAGED_DELIVERY.search(value)
+        and not MANAGED_DELIVERY_BLOCK.search(value)
+        and not any(
         pattern.search(value) for pattern, _replacement in PLATFORM_REPLACEMENTS
+        )
     ):
         return value
     rewritten = value
