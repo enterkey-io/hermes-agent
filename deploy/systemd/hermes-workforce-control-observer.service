@@ -1,0 +1,12 @@
+[Unit]
+Description=Hermes Workforce Control deterministic recovery observer
+After=default.target
+ConditionPathExists=%h/.hermes/kanban.db
+
+[Service]
+Type=oneshot
+Environment=HERMES_HOME=%h/.hermes
+WorkingDirectory=%h/.hermes/hermes-agent
+ExecStart=%h/.hermes/hermes-agent/.venv/bin/python %h/.hermes/hermes-agent/scripts/workforce_control_observer.py --database %h/.hermes/kanban.db
+NoNewPrivileges=true
+PrivateTmp=true

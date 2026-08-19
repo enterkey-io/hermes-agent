@@ -31,6 +31,8 @@ PAPERCLIP_ARCHIVE_MARKERS = (
     "retired",
     "archive-only",
     "archive only",
+    "backup-only",
+    "backup only",
     "historical",
     "provenance",
 )
@@ -186,9 +188,14 @@ def build_manifest(
             if failure_room and failure_room not in room_names:
                 raise ValueError(f"{key}: unknown failure Buzz room {failure_room!r}")
             current_raw = str(job.get("deliver") or "missing")
+            current_platform = current_raw.split(":", 1)[0].casefold()
             if mode == "team":
                 intended = f"buzz:<ROOM_UUID:{room}>"
-                staged = _command(profiles_root / profile, job_id, intended)
+                staged = (
+                    None
+                    if current_platform == "buzz"
+                    else _command(profiles_root / profile, job_id, intended)
+                )
             elif mode == "local-only":
                 intended = "local"
                 staged = None if current_raw == "local" else _command(
@@ -204,7 +211,6 @@ def build_manifest(
             paperclip_mentions, paperclip_disposition = _paperclip_evidence(
                 job, profiles_root / profile
             )
-            current_platform = current_raw.split(":", 1)[0].casefold()
             disallowed = mode == "team" and (
                 current_platform in {"telegram", "matrix", "photon", "origin", "missing"}
                 or bool(hidden)
@@ -220,6 +226,11 @@ def build_manifest(
                     "workflow_id": job.get("workflow_id"),
                     "workflow_slug": job.get("workflow_slug") or job.get("runbook_slug"),
                     "current_destination": _redact_destination(current_raw),
+                    "destination_verification": (
+                        "compare the redacted Buzz target with the approved room map"
+                        if mode == "team" and current_platform == "buzz"
+                        else None
+                    ),
                     "classification": mode,
                     "privacy": "private-personal" if mode == "private-personal" else "operational",
                     "audience": rule.get("audience"),
