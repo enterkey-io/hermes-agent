@@ -99,6 +99,7 @@ class WorkforceOrganization:
     schema_version: int
     agents: Mapping[str, WorkforceAgent]
     source_path: Path
+    technical_ownership: Mapping[str, str]
 
     def get(self, agent: str) -> WorkforceAgent:
         key = normalize_agent_id(agent)
@@ -154,6 +155,7 @@ class WorkforceOrganization:
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
+            "technical_ownership": dict(self.technical_ownership),
             "agents": [item.to_dict() for item in self.agents.values()],
         }
 
@@ -194,7 +196,13 @@ def load_organization(path: Path | None = None, *, validate_profiles: bool = Fal
         if key in agents:
             raise WorkforceOrganizationError(f"duplicate agent id: {key}")
         agents[key] = item
-    org = WorkforceOrganization(version, agents, source)
+    technical_ownership = raw.get("technical_ownership") or {}
+    if not isinstance(technical_ownership, dict) or not all(
+        isinstance(key, str) and isinstance(value, str)
+        for key, value in technical_ownership.items()
+    ):
+        raise WorkforceOrganizationError("technical_ownership must be a string mapping")
+    org = WorkforceOrganization(version, agents, source, technical_ownership)
     validate_organization(org, validate_profiles=validate_profiles)
     return org
 
@@ -239,6 +247,11 @@ def validate_organization(org: WorkforceOrganization, *, validate_profiles: bool
             seen.append(current)
             node = org.agents.get(current)
             current = normalize_agent_id(node.manager) if node and node.manager else None
+    for responsibility, owner in org.technical_ownership.items():
+        if owner == "department_director":
+            continue
+        if normalize_agent_id(owner) not in org.agents:
+            errors.append(f"technical ownership {responsibility}: unknown owner {owner!r}")
     if errors:
         raise WorkforceOrganizationError("; ".join(dict.fromkeys(errors)))
 

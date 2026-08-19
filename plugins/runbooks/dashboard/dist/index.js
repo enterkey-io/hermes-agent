@@ -123,6 +123,7 @@
     const workflows = overview ? overview.workflows || [] : [];
     const recentRuns = overview ? overview.recent_runs || [] : [];
     const schedules = overview ? overview.schedules || [] : [];
+    const workforce = overview ? overview.workforce_control || { available: false } : { available: false };
 
     function refresh() {
       setError("");
@@ -625,6 +626,51 @@
       );
     }
 
+    function renderOutcomeGroup(title, items, emptyLabel) {
+      return h(Card, { className: "hermes-runbooks-outcome-card" },
+        h(CardContent, { className: "hermes-runbooks-outcome-content" },
+          h("h3", null, title),
+          items.length ? items.map(function (item, index) {
+            const label = item.item_kind || item.classification || item.scope || item.state || "item";
+            const state = item.current_state || item.status || item.state || "unknown";
+            return h("div", { key: title + ":" + index, className: "hermes-runbooks-outcome-row" },
+              h("div", null,
+                h("strong", null, label),
+                item.classification && item.classification !== label ? h("span", null, item.classification) : null
+              ),
+              h(StatusBadge, { value: state }),
+              h("span", { className: "hermes-runbooks-outcome-count" }, String(item.count || 0))
+            );
+          }) : h("p", { className: "hermes-runbooks-empty-copy" }, emptyLabel)
+        )
+      );
+    }
+
+    function renderOutcomes() {
+      if (!workforce.available) {
+        return h("section", { className: "hermes-runbooks-view" },
+          h("p", { className: "hermes-runbooks-empty-copy" }, "Workforce Control is not initialized. No outcomes or reconciliation actions can run until an authorized activation initializes it.")
+        );
+      }
+      const runtime = workforce.runtime || {};
+      return h("section", { className: "hermes-runbooks-view" },
+        h("div", { className: "hermes-runbooks-view-heading" },
+          h("p", null, "Outcome truth, reconciliation exceptions, and correction learning"),
+          h("div", { className: "hermes-runbooks-actions" },
+            h(StatusBadge, { value: runtime.mode || "unknown", label: "mode " + (runtime.mode || "unknown") }),
+            h(StatusBadge, { value: runtime.kill_switch ? "paused" : "active", label: runtime.kill_switch ? "kill switch on" : "kill switch off" })
+          )
+        ),
+        runtime.pause_reason ? h("p", { className: "hermes-runbooks-outcome-note" }, runtime.pause_reason) : null,
+        h("div", { className: "hermes-runbooks-outcome-grid" },
+          renderOutcomeGroup("Outcome records", workforce.items || [], "No controlled workforce items yet."),
+          renderOutcomeGroup("Plans", workforce.plans || [], "No bounded plans yet."),
+          renderOutcomeGroup("Exceptions", workforce.exceptions || [], "No unresolved reconciliation exceptions."),
+          renderOutcomeGroup("Corrections", workforce.corrections || [], "No correction-learning records yet.")
+        )
+      );
+    }
+
     return h("div", { className: "hermes-runbooks" },
       h("div", { className: "hermes-runbooks-toolbar" },
         h("p", { className: "hermes-runbooks-overview" },
@@ -641,12 +687,13 @@
       ),
       h(TabsList, { className: "hermes-runbooks-tabs" },
         h(TabsTrigger, { active: view === "workflows", value: "workflows", onClick: function () { setView("workflows"); } }, "Workflows"),
+        h(TabsTrigger, { active: view === "outcomes", value: "outcomes", onClick: function () { setView("outcomes"); } }, "Outcomes"),
         h(TabsTrigger, { active: view === "timeline", value: "timeline", onClick: function () { setView("timeline"); } }, "Timeline"),
         h(TabsTrigger, { active: view === "runs", value: "runs", onClick: function () { setView("runs"); } }, "Runs"),
         h(TabsTrigger, { active: view === "legacy", value: "legacy", onClick: function () { setView("legacy"); setTimeout(searchLegacy, 0); } }, "Archive")
       ),
       error ? h("div", { className: "hermes-runbooks-error", role: "alert" }, error) : null,
-      view === "workflows" ? renderWorkflows() : view === "timeline" ? renderTimeline() : view === "runs" ? renderRuns() : renderArchive(),
+      view === "workflows" ? renderWorkflows() : view === "outcomes" ? renderOutcomes() : view === "timeline" ? renderTimeline() : view === "runs" ? renderRuns() : renderArchive(),
       renderWorkflowDialog(),
       renderCreateDialog()
     );

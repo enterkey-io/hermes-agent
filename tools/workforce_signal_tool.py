@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -10,6 +9,7 @@ from typing import Any
 
 from hermes_cli import kanban_db
 from hermes_cli.workforce_org import WorkforceOrganizationError, load_organization
+from plugins.workforce_control.store import record_signal
 from tools.registry import registry, tool_error, tool_result
 
 
@@ -74,24 +74,23 @@ def _handle(args: dict[str, Any], **_kwargs: Any) -> str:
             "department_recommendation": recommendation,
             "aurora_assignment_id": aurora_assignment_id or None,
         }
-        digest = hashlib.sha256(
-            json.dumps(packet, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
         with kanban_db.connect_closing() as conn:
-            task_id = kanban_db.create_task(
+            recorded = record_signal(
                 conn,
-                title=f"Signal: {packet['expected_outcome'][:120]}",
-                body=json.dumps(packet, indent=2, sort_keys=True, ensure_ascii=False),
-                assignee="aurora", created_by=source.agent,
-                workspace_kind="scratch", triage=True,
-                idempotency_key=f"workforce-signal:{digest}",
+                source_agent=source.agent,
+                expected_outcome=packet["expected_outcome"],
+                goal_ref=packet["approved_goal"],
+                observation=packet["observation"],
+                evidence_references=packet["evidence_references"],
+                action_class=str(args.get("action_class") or "opportunity"),
+                target_ref=str(args.get("target_ref") or ""),
+                packet=packet,
             )
-            task = kanban_db.get_task(conn, task_id)
         return tool_result(
-            success=True, signal_id=task_id, status=task.status,
-            assignee=task.assignee, decision_owner="aurora",
+            success=True, signal_id=recorded["task_id"], status=recorded["status"],
+            assignee=recorded["assignee"], decision_owner="aurora",
             source_agent=source.agent, launch_authorized=False,
-            duplicate_key=digest,
+            duplicate_key=recorded["stable_key"], created=recorded["created"],
         )
     except (ValueError, WorkforceOrganizationError, OSError) as exc:
         return tool_error(str(exc))
@@ -116,6 +115,8 @@ WORKFORCE_SIGNAL_SCHEMA = {
             "needed_capabilities": {"type": "array", "items": {"type": "string"}},
             "department_recommendation": {"type": "string"},
             "aurora_assignment_id": {"type": "string"},
+            "action_class": {"type": "string", "default": "opportunity"},
+            "target_ref": {"type": "string"},
         },
         "required": ["expected_outcome", "observation", "estimated_effort"],
         "additionalProperties": False,

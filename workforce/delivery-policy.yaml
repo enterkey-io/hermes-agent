@@ -4,25 +4,26 @@ profile_defaults:
   brenna: {mode: team, room: executive-support, audience: executive-support}
   milena: {mode: team, room: executive-support, audience: executive-support}
   emily: {mode: team, room: director-product, audience: product-leadership}
-  sage: {mode: team, room: product-staff, audience: product-staff}
-  iris: {mode: team, room: product-staff, audience: product-staff}
-  sloane: {mode: team, room: product-staff, audience: product-staff}
-  maya: {mode: team, room: product-staff, audience: product-staff}
-  reese: {mode: team, room: product-staff, audience: product-staff}
-  morgan: {mode: team, room: product-staff, audience: product-staff}
+  sage: {mode: team, room: staff-product, audience: staff-product}
+  iris: {mode: team, room: staff-product, audience: staff-product}
+  sloane: {mode: team, room: staff-product, audience: staff-product}
+  maya: {mode: team, room: staff-product, audience: staff-product}
+  reese: {mode: team, room: staff-product, audience: staff-product}
+  morgan: {mode: team, room: staff-product, audience: staff-product}
   alina: {mode: team, room: director-agent-systems, audience: agent-systems-leadership}
   main: {mode: team, room: director-operations, audience: operations-leadership}
   bridgette: {mode: team, room: director-marketing, audience: marketing-leadership}
-  margot: {mode: team, room: marketing-staff, audience: marketing-staff}
-  kenzie: {mode: team, room: marketing-staff, audience: marketing-staff}
+  margot: {mode: team, room: staff-marketing, audience: staff-marketing}
+  kenzie: {mode: team, room: staff-marketing, audience: staff-marketing}
+  emma: {mode: team, room: staff-marketing, audience: staff-marketing}
   xenia: {mode: team, room: director-trading, audience: trading-leadership}
-  oyku: {mode: team, room: trading-staff, audience: trading-staff}
+  oyku: {mode: team, room: staff-trading, audience: staff-trading}
   maggie: {mode: team, room: director-finance, audience: finance-leadership}
   mel: {mode: team, room: director-vision, audience: vision-leadership}
   grace: {mode: team, room: executive-support, audience: executive-support}
 job_overrides:
   brenna/e0c7626e4467: {mode: team, room: executive-support, audience: executive-support, quiet_success: false}
-  grace/019c9f963374: {mode: private-personal, reason: personal morning outreach}
+  grace/019c9f963374: {mode: team, room: executive-support, audience: executive-support, quiet_success: false, reason: weekday LIFT One Thing is executive-support work}
   grace/537d8032bdaf: {mode: private-personal, reason: personal weekday continuity}
   grace/9e0af1442da4: {mode: private-personal, reason: personal weekend continuity}
   grace/e24182c7ae77: {mode: private-personal, reason: personal weekend outreach}
@@ -36,4 +37,5 @@ job_overrides:
   reese/b18566dd76fc: {mode: private-personal, reason: personal check-in}
   maggie/55abf462ba9f: {mode: team, room: director-finance, audience: finance-leadership, quiet_success: false}
   maggie/c46982c49814: {mode: team, room: director-finance, audience: finance-leadership, quiet_success: false}
-  xenia/a1fe3851b74d: {mode: team, room: director-trading, audience: trading-leadership, quiet_success: false}
+  xenia/a1fe3851b74d: {mode: private-personal, channel: photon, reason: critical personal trading alert; preserve the pre-project iMessage route}
+  xenia/5e918872bd5a: {mode: private-personal, channel: photon, reason: late critical personal trading alert; preserve the iMessage route}

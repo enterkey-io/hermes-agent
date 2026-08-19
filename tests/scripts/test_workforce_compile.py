@@ -26,13 +26,13 @@ def test_insert_is_idempotent_and_preserves_unmanaged_content():
     assert first.count(module.BEGIN) == 1
 
 
-def test_canonical_compile_includes_active_chloe(tmp_path):
+def test_canonical_compile_includes_active_chloe_and_emma(tmp_path):
     manifest = module.compile_profiles(
         ROOT / "workforce" / "organization.yaml",
         ROOT / "workforce" / "templates" / "workforce-contract.md",
         tmp_path,
     )
-    assert len(manifest["profiles"]) == 21
+    assert len(manifest["profiles"]) == 22
     assert [item["agent"] for item in manifest["profiles"][:2]] == ["aurora", "grace"]
     assert all(item["original_instruction_preserved_as_exact_suffix"] for item in manifest["profiles"])
     chloe = next(item for item in manifest["profiles"] if item["agent"] == "chloe")
@@ -43,12 +43,18 @@ def test_canonical_compile_includes_active_chloe(tmp_path):
     text = (tmp_path / "chloe" / "AGENTS.md").read_text()
     assert "may not interpret, rank, recommend" in text
     assert module.BEGIN in text
+    emma = next(item for item in manifest["profiles"] if item["agent"] == "emma")
+    assert emma["status"] == "active"
+    assert emma["source_kind"] == "live-profile"
 
     aurora_text = (tmp_path / "aurora" / "AGENTS.md").read_text()
     assert "translate that intent into execution" in aurora_text
     assert "delegate the rest to the right owner" in aurora_text
     assert "follow through until the outcome is completed" in aurora_text
     assert "I do not send a signal to myself" in aurora_text
+    assert "Proactivity begins with understanding" in aurora_text
+    assert "requirements conversation" in aurora_text
+    assert "do not launch a production graph or downstream task chain" in aurora_text
     assert "submit one concrete workforce signal for Aurora" not in aurora_text
 
 

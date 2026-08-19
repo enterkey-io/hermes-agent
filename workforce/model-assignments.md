@@ -12,7 +12,7 @@ that file first whenever Elliott changes the roster.
 - Matrix is explicitly `ollama-cloud/glm-5.2:cloud` at medium effort for every
   operational profile. GLM is reserved for Matrix chat.
 - Voice remains a separate platform override. Where currently configured it is
-  `openai-codex/gpt-5.4-mini` at low effort. Chloe has no voice route yet.
+  `openai-codex/gpt-5.4-mini` at low effort. Chloe and Emma have no voice route yet.
 - Smart approval review remains `openai-codex/gpt-5.6-terra` at xhigh effort,
   independent of the conversation model.
 - Cron jobs remain independently pinned in each profile's `cron/jobs.json`.
@@ -39,12 +39,19 @@ that file first whenever Elliott changes the roster.
 | Bridgette | `bridgette` | `gpt-5.6-terra`, high | `glm-5.2:cloud`, medium |
 | Margot | `margot` | `gpt-5.6-terra`, high | `glm-5.2:cloud`, medium |
 | Kenzie | `kenzie` | `gpt-5.6-terra`, high | `glm-5.2:cloud`, medium |
+| Emma Calder | `emma` | `gpt-5.6-sol`, low | `glm-5.2:cloud`, medium |
 | Xenia | `xenia` | `gpt-5.6-sol`, medium | `glm-5.2:cloud`, medium |
 | Oyku | `oyku` | `gpt-5.6-terra`, high | `glm-5.2:cloud`, medium |
 | Maggie | `maggie` | `gpt-5.6-sol`, medium | `glm-5.2:cloud`, medium |
 | Mel | `mel` | `gpt-5.6-terra`, high | `glm-5.2:cloud`, medium |
 
-Totals: 7 Sol, 11 Terra, and 3 Luna assignments.
+Totals: 8 Sol, 11 Terra, and 3 Luna assignments.
+
+Emma uses Sol at low effort as a specialist assignment: Sol preserves the
+creative judgment, voice fidelity, and direct taste feedback her role needs,
+while low effort keeps routine design conversation responsive. Complex campaign
+strategy can still be escalated explicitly rather than making every interaction
+pay the director-level reasoning cost.
 
 ## Change procedure
 

@@ -108,6 +108,36 @@ def test_lift_and_meeting_prep_route_to_executive_support(tmp_path):
     assert by_profile["grace"]["quiet_success"] is True
 
 
+def test_weekday_one_thing_routes_to_exec_support_but_personal_checkin_stays_private(tmp_path):
+    _write_jobs(tmp_path, "grace", [
+        {"id": "019c9f963374", "name": "LIFT One Thing", "enabled": True, "deliver": "buzz:old", "workflow_id": "wf-morning"},
+        {"id": "537d8032bdaf", "name": "personal heartbeat", "enabled": True, "deliver": "telegram:123", "workflow_id": "wf-heartbeat"},
+    ])
+    report = build_manifest(
+        tmp_path, ROOT / "workforce/organization.yaml",
+        ROOT / "workforce/delivery-policy.yaml", ROOT / "workforce/buzz-topology.yaml",
+    )
+    by_id = {job["job_id"]: job for job in report["jobs"]}
+    assert by_id["019c9f963374"]["classification"] == "team"
+    assert by_id["019c9f963374"]["intended_room"] == "executive-support"
+    assert by_id["537d8032bdaf"]["classification"] == "private-personal"
+    assert by_id["537d8032bdaf"]["intended_room"] is None
+
+
+def test_xenia_critical_trading_alerts_preserve_photon_imessage(tmp_path):
+    _write_jobs(tmp_path, "xenia", [
+        {"id": "a1fe3851b74d", "name": "VT report", "enabled": True, "deliver": "photon:+15551234567", "workflow_id": "wf-vt"},
+        {"id": "5e918872bd5a", "name": "VT late reconciliation", "enabled": True, "deliver": "photon:+15551234567", "workflow_id": "wf-vt"},
+    ])
+    report = build_manifest(
+        tmp_path, ROOT / "workforce/organization.yaml",
+        ROOT / "workforce/delivery-policy.yaml", ROOT / "workforce/buzz-topology.yaml",
+    )
+    assert all(job["classification"] == "private-personal" for job in report["jobs"])
+    assert all(job["current_destination"] == "photon:<redacted-target>" for job in report["jobs"])
+    assert all(job["migration_required"] is False for job in report["jobs"])
+
+
 def test_paperclip_route_is_explicitly_dispositioned(tmp_path):
     _write_jobs(
         tmp_path,

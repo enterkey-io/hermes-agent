@@ -8,6 +8,10 @@ presets:
     provider: openai-codex
     model: gpt-5.6-sol
     reasoning_effort: medium
+  sol-low:
+    provider: openai-codex
+    model: gpt-5.6-sol
+    reasoning_effort: low
   terra-high:
     provider: openai-codex
     model: gpt-5.6-terra
@@ -32,7 +36,7 @@ route_policy:
       provider: openai-codex
       model: gpt-5.4-mini
       reasoning_effort: low
-    note: Chloe has no voice route until her deferred Vox onboarding is completed.
+    note: Chloe and Emma have no voice route until their deferred Vox onboarding is completed.
   approval_review:
     provider: openai-codex
     model: gpt-5.6-terra
@@ -60,6 +64,7 @@ assignments:
   bridgette: {profile: bridgette, preset: terra-high}
   margot: {profile: margot, preset: terra-high}
   kenzie: {profile: kenzie, preset: terra-high}
+  emma: {profile: emma, preset: sol-low}
   xenia: {profile: xenia, preset: sol-medium}
   oyku: {profile: oyku, preset: terra-high}
   maggie: {profile: maggie, preset: sol-medium}

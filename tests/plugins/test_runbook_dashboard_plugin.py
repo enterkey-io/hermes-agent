@@ -288,6 +288,9 @@ def test_preview_diff_and_bundle_registration(client):
     assert "departmentFilter" in bundle
     assert "ownerFilter" in bundle
     assert "controlWorkflow" in bundle
+    assert '}, "Outcomes")' in bundle
+    assert "renderOutcomes" in bundle
+    assert "workforce_control" in bundle
     assert '}, "Pause")' in bundle
     assert '}, "Resume")' in bundle
     assert "item.canonical === false" in bundle

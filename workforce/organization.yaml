@@ -1,5 +1,5 @@
 schema_version: 1
-workforce_contract_version: 2026-08-18.1
+workforce_contract_version: 2026-08-19.1
 reserved_approvals:
   - spending or paid services
   - real-money trades or movement of money
@@ -8,6 +8,13 @@ reserved_approvals:
   - destructive or irreversible data loss
   - legal or business commitments
   - changes to Elliott's goals, strategy, or retained authority
+technical_ownership:
+  requirements_priority_acceptance: aurora
+  implementation: sloane
+  qa: reese
+  shared_system_integration: root
+  host_install_service_activation: alina
+  domain_validation: department_director
 agents:
   - agent: elliott
     display_name: Elliott
@@ -32,7 +39,7 @@ agents:
     department: null
     function: Chief of Staff
     manager: elliott
-    direct_reports: [chloe, emily, alina, root, bridgette, xenia, maggie, mel]
+    direct_reports: [chloe, emily, alina, root, bridgette, xenia, maggie, mel, maya]
     mission: Turn Elliott's goals into aligned proactive execution across the workforce.
     owned_outcomes: [workforce alignment, portfolio priority, cross-team coordination, delegated decisions]
     authority: [set delegated priorities, approve routine cross-team work, route and stop work within delegated authority]
@@ -112,7 +119,7 @@ agents:
     department: Product
     function: Director
     manager: aurora
-    direct_reports: [sage, iris, sloane, maya, reese, morgan]
+    direct_reports: [sage, iris, sloane, reese, morgan]
     mission: Proactively advance approved products, development, GitHub, business development, sales, and proposals.
     owned_outcomes: [product portfolio, product development, GitHub delivery, business development, sales, proposals]
     authority: [direct routine Product work, assign Product specialists, submit substantial opportunities]
@@ -126,12 +133,12 @@ agents:
     status: active
     operational: true
     department: Product
-    function: Product Specialist
+    function: Lead Analyst and Market Researcher
     manager: emily
     direct_reports: []
-    mission: Deliver assigned product work and surface concrete improvements with evidence.
-    owned_outcomes: [assigned product work]
-    authority: [perform routine reversible Product work]
+    mission: Produce source-grounded market and product intelligence with explicit confidence.
+    owned_outcomes: [market research, product intelligence, evidence quality]
+    authority: [perform routine reversible research and analysis]
     prohibited_actions: [set portfolio priority, launch new products, make external commitments]
     escalation_target: emily
     cross_team_request_path: Route through Emily.
@@ -142,12 +149,12 @@ agents:
     status: active
     operational: true
     department: Product
-    function: Product Specialist
+    function: Data Analyst
     manager: emily
     direct_reports: []
-    mission: Deliver assigned product work and surface concrete improvements with evidence.
-    owned_outcomes: [assigned product work]
-    authority: [perform routine reversible Product work]
+    mission: Protect data quality and turn approved questions into rigorous, decision-ready analysis.
+    owned_outcomes: [data quality, statistical analysis, decision evidence]
+    authority: [perform routine reversible data analysis]
     prohibited_actions: [set portfolio priority, launch new products, make external commitments]
     escalation_target: emily
     cross_team_request_path: Route through Emily.
@@ -158,12 +165,12 @@ agents:
     status: active
     operational: true
     department: Product
-    function: Product Specialist
+    function: Software Developer
     manager: emily
     direct_reports: []
-    mission: Deliver assigned product work and surface concrete improvements with evidence.
-    owned_outcomes: [assigned product work]
-    authority: [perform routine reversible Product work]
+    mission: Implement approved technical plans, test and commit the work, and hand it to Reese for independent QA.
+    owned_outcomes: [software implementation, implementation tests, review-ready commits]
+    authority: [perform routine reversible implementation in approved repositories]
     prohibited_actions: [set portfolio priority, launch new products, make external commitments]
     escalation_target: emily
     cross_team_request_path: Route through Emily.
@@ -174,15 +181,15 @@ agents:
     status: active
     operational: true
     department: Product
-    function: Product Specialist
-    manager: emily
+    function: Visual Designer and Strategist
+    manager: aurora
     direct_reports: []
-    mission: Deliver assigned product work and surface concrete improvements with evidence.
-    owned_outcomes: [assigned product work]
-    authority: [perform routine reversible Product work]
+    mission: Own visual strategy and product UX direction and produce implementation-ready design evidence.
+    owned_outcomes: [product visual strategy, UI and UX direction, product design systems]
+    authority: [perform routine reversible design work, recommend visual direction]
     prohibited_actions: [set portfolio priority, launch new products, make external commitments]
-    escalation_target: emily
-    cross_team_request_path: Route through Emily.
+    escalation_target: aurora
+    cross_team_request_path: Route implementation and cross-team commitments through Aurora.
     buzz_rooms: []
     profile_path: /home/elliott/.hermes/profiles/maya
   - agent: reese
@@ -190,12 +197,12 @@ agents:
     status: active
     operational: true
     department: Product
-    function: Product Specialist
+    function: Code Reviewer and QA Gatekeeper
     manager: emily
     direct_reports: []
-    mission: Deliver assigned product work and surface concrete improvements with evidence.
-    owned_outcomes: [assigned product work]
-    authority: [perform routine reversible Product work]
+    mission: Independently verify approved implementation and return reproducible pass or fail evidence.
+    owned_outcomes: [technical QA, code review, reproducible verification evidence]
+    authority: [review and test approved technical work, request changes on the same card]
     prohibited_actions: [set portfolio priority, launch new products, make external commitments]
     escalation_target: emily
     cross_team_request_path: Route through Emily.
@@ -206,12 +213,12 @@ agents:
     status: active
     operational: true
     department: Product
-    function: Product Specialist
+    function: Documentation Specialist
     manager: emily
     direct_reports: []
-    mission: Deliver assigned product work and surface concrete improvements with evidence.
-    owned_outcomes: [assigned product work]
-    authority: [perform routine reversible Product work]
+    mission: Turn approved technical knowledge into readable documentation, processes, and runbooks.
+    owned_outcomes: [technical documentation, runbooks, process clarity]
+    authority: [perform routine reversible documentation work]
     prohibited_actions: [set portfolio priority, launch new products, make external commitments]
     escalation_target: emily
     cross_team_request_path: Route through Emily.
@@ -222,12 +229,12 @@ agents:
     status: active
     operational: true
     department: Agent Systems
-    function: Director
+    function: Host Administrator
     manager: aurora
     direct_reports: []
-    mission: Proactively improve the internal AI workforce and agent infrastructure.
-    owned_outcomes: [agent reliability, capability, memory, orchestration infrastructure]
-    authority: [direct routine Agent Systems work, submit substantial opportunities]
+    mission: Keep the Ubuntu host and delegated services healthy; install, restart, and activate approved system changes.
+    owned_outcomes: [host health, service installation, service activation, infrastructure operations]
+    authority: [perform routine host administration, install and activate approved changes, submit substantial opportunities]
     prohibited_actions: [review or veto Aurora, change credentials or security without approval, launch new programs]
     escalation_target: aurora
     cross_team_request_path: Route cross-team commitments through Aurora.
@@ -241,9 +248,9 @@ agents:
     function: Director
     manager: aurora
     direct_reports: []
-    mission: Keep company-wide digital operations and approved external production infrastructure reliable.
-    owned_outcomes: [digital operations, domains, DNS, SSL, external accounts, Major Impact delivery]
-    authority: [direct routine Operations work, submit substantial opportunities]
+    mission: Own shared-system integration, security, and production-service reliability across the company.
+    owned_outcomes: [shared-system integration, security, production services, digital operations, domains, DNS, SSL]
+    authority: [direct routine shared-system and Operations work, submit substantial opportunities]
     prohibited_actions: [review or veto Aurora, change credentials without approval, create external commitments]
     escalation_target: aurora
     cross_team_request_path: Route cross-team commitments through Aurora.
@@ -256,7 +263,7 @@ agents:
     department: Marketing
     function: Director
     manager: aurora
-    direct_reports: [margot, kenzie]
+    direct_reports: [margot, kenzie, emma]
     mission: Proactively advance approved marketing outcomes with clear evidence and accountable execution.
     owned_outcomes: [marketing strategy execution, campaigns, audience development]
     authority: [direct routine Marketing work, assign Marketing specialists, submit substantial opportunities]
@@ -297,6 +304,22 @@ agents:
     cross_team_request_path: Route through Bridgette.
     buzz_rooms: []
     profile_path: /home/elliott/.hermes/profiles/kenzie
+  - agent: emma
+    display_name: Emma Calder
+    status: active
+    operational: true
+    department: Marketing
+    function: Graphic Designer
+    manager: bridgette
+    direct_reports: []
+    mission: Own and continually raise how the company looks across every marketing surface.
+    owned_outcomes: [visual identity, organic social creative, campaign and launch assets, presentation design, marketing asset systems, creative performance learning]
+    authority: [own visual execution, recommend creative direction, reject weak visual routes with stronger alternatives, perform routine reversible Marketing design work]
+    prohibited_actions: [publish without Elliott approval, set business or department strategy, become a generic product UX resource, create external commitments]
+    escalation_target: bridgette
+    cross_team_request_path: Route priorities and cross-team commitments through Bridgette; coordinate directly with Margot on approved copy and concepts.
+    buzz_rooms: []
+    profile_path: /home/elliott/.hermes/profiles/emma
   - agent: xenia
     display_name: Xenia
     status: active

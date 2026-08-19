@@ -25,12 +25,16 @@ SUBSTANTIAL_SIGNAL_SIGNALS = (
     "decision ownership",
 )
 AURORA_EXECUTION_SIGNALS = (
+    "Proactivity begins with understanding",
+    "requirements conversation",
+    "A desired outcome authorizes responsible intake and discovery",
     "translate that intent into execution",
     "delegate the rest to the right owner",
     "set an evidence-based checkpoint",
     "follow through until the outcome is completed",
     "I do not send a signal to myself",
-    "approve, reject, defer, narrow, or reroute it",
+    "approve, reject, defer, narrow, or reroute the work",
+    "do not launch a production graph or downstream task chain",
 )
 RESERVED_SIGNALS = (
     "spending",

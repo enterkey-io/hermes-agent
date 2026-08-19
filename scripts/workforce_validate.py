@@ -24,6 +24,11 @@ REQUIRED_CONTRACT_SIGNALS = (
     "marked stalled and reported to Aurora and Chloe",
     "Buzz is focused conversation and operational delivery",
     "Keep routine success quiet",
+    "Proactivity begins with understanding",
+    "the work remains in discovery",
+    "Mobilize the smallest useful tranche",
+    "stop the affected execution first",
+    "activity from outcome",
 )
 
 # These files are maintained by the running skill-curator/usage telemetry, so

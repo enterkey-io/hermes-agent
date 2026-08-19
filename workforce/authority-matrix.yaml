@@ -1,0 +1,85 @@
+schema_version: 1
+contract_version: 2026-08-19.1
+retained_owner: elliott
+execution_owner: aurora
+rules:
+  discovery:
+    owner: aurora
+    required_evidence: [current_goal, current_work, material_unknowns]
+    may_create_execution: false
+    allowed_action: one bounded evidence-gathering step
+  plan:
+    owner: aurora
+    required_evidence:
+      - desired_outcome
+      - confirmed_scope
+      - acceptance_test
+      - current_state
+      - priority_rationale
+      - capacity_assessment
+      - deadline_dependencies
+      - displaced_work
+      - checkpoint
+      - unresolved_decisions
+      - defer_or_stop_condition
+    may_create_execution: false
+  materialize:
+    owner: aurora
+    preconditions:
+      - runtime apply mode
+      - kill switch off
+      - current-state evidence no older than 24 hours
+      - no unresolved decisions
+      - known approved goal
+      - no reserved-authority node
+      - at most 8 nodes
+  reconcile_propose:
+    owners: [aurora, grace, chloe, brenna, milena, department_director, specialist]
+    effect: durable proposal only
+  reconcile_apply:
+    owner: aurora
+    preconditions: [high confidence, fresh evidence, no retained approval]
+  activate_production:
+    owner: elliott
+    effect: separate explicit authorization required
+responsibilities:
+  requirements_priority_acceptance: aurora
+  implementation: sloane
+  qa: reese
+  shared_system_integration: root
+  host_install_service_activation: alina
+  domain_validation: department_director
+transitions:
+  already_complete:
+    evidence: acceptance evidence and passing verification
+    action: close after acceptance check
+    otherwise: quarantine
+  duplicate:
+    evidence: same semantic outcome and canonical target
+    action: link duplicate and archive source
+  superseded:
+    evidence: explicit replacement decision and target
+    action: link supersedes and archive source
+  failed_verification:
+    evidence: reproducible failed acceptance result and outcome target
+    action: reopen outcome and create one remediation
+  external_blocker:
+    evidence: typed needs_input or capability blocker with retained decision condition
+    action: retain blocked; never auto-unblock
+  broken_record:
+    evidence: inconsistent task, run, claim, or workspace state
+    action: quarantine for repair
+privacy:
+  relationship_private:
+    maximum_scope: profile
+    organizational_propagation: forbidden
+  personal_private:
+    maximum_scope: profile
+  organizational:
+    maximum_scope: system
+fail_safe:
+  default_mode: paused
+  default_kill_switch: true
+  model_cost_ceiling_usd: 0
+  max_actions_per_tick: 25
+  max_materialized_nodes: 8

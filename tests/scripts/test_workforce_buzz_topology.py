@@ -30,7 +30,13 @@ def test_topology_preserves_confirmed_admin_and_excludes_friends():
     assert set(executive_support["members"]) == {
         "elliott", "aurora", "chloe", "grace", "brenna", "milena"
     }
-    assert topology["profile_additional_rooms"] == {"chloe": ["general"]}
+    assert topology["profile_additional_rooms"] == {
+        "chloe": ["general"],
+        "emma": ["general"],
+    }
+    assert {room["name"] for room in topology["rooms"] if room["name"].startswith("staff-")} == {
+        "staff-marketing", "staff-product", "staff-trading"
+    }
 
 
 def test_compare_is_read_only_and_reports_membership_drift():
@@ -41,7 +47,8 @@ def test_compare_is_read_only_and_reports_membership_drift():
                 "status": "confirmed",
                 "members": ["elliott", "aurora", "chloe", "grace", "milena"],
             }
-        ]
+        ],
+        "member_aliases": {"chloe reinhart": "chloe"},
     }
     report = compare(
         topology,
@@ -50,6 +57,15 @@ def test_compare_is_read_only_and_reports_membership_drift():
     assert report["mutation_performed"] is False
     assert report["rooms"][0]["missing_members"] == ["chloe", "milena"]
     assert report["rooms"][0]["unexpected_members"] == ["stranger"]
+
+
+def test_compare_resolves_full_display_name_to_canonical_agent():
+    topology = {
+        "rooms": [{"name": "staff-marketing", "status": "candidate", "members": ["emma"]}],
+        "member_aliases": {"emma calder": "emma"},
+    }
+    report = compare(topology, [{"name": "staff-marketing", "members": ["emma calder"]}])
+    assert report["matching_rooms"] == 1
 
 
 def test_topology_rejects_friend_members(tmp_path):

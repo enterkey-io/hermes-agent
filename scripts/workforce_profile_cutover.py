@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Atomic whole-workforce AGENTS.md cutover and rollback.
+"""Atomic whole-workforce instruction/config cutover and rollback.
 
 The apply path fails closed on planned profiles, stale source/candidate hashes,
 or an invalid full backup. It creates and verifies the required byte-for-byte
-AGENTS-only archive immediately before writing any live profile.
+file archive immediately before writing any live profile.
 """
 
 from __future__ import annotations
@@ -43,18 +43,19 @@ def preflight(manifest_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]
         candidate = Path(str(row.get("candidate") or ""))
         if status != "active":
             gates.append(f"{agent}: status is {status}, not active")
-        if not target.is_file():
-            gates.append(f"{agent}: live AGENTS.md is absent")
+        create_if_missing = bool(row.get("create_if_missing"))
+        if not target.is_file() and not create_if_missing:
+            gates.append(f"{agent}: live target is absent")
             continue
-        if not source.is_file():
-            gates.append(f"{agent}: compiler source AGENTS.md is absent")
+        if not source.is_file() and not create_if_missing:
+            gates.append(f"{agent}: compiler source is absent")
             continue
         if not candidate.is_file():
             gates.append(f"{agent}: candidate AGENTS.md is absent")
             continue
-        source_bytes = source.read_bytes()
+        source_bytes = source.read_bytes() if source.is_file() else None
         candidate_bytes = candidate.read_bytes()
-        if _sha_bytes(source_bytes) != row.get("source_sha256"):
+        if source_bytes is not None and _sha_bytes(source_bytes) != row.get("source_sha256"):
             gates.append(f"{agent}: live source hash drifted")
         if _sha_bytes(candidate_bytes) != row.get("candidate_sha256"):
             gates.append(f"{agent}: candidate hash drifted")
@@ -66,9 +67,10 @@ def preflight(manifest_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]
                 "candidate": candidate,
                 "source_bytes": source_bytes,
                 "candidate_bytes": candidate_bytes,
-                "source_mode": target.stat().st_mode & 0o777,
-                "source_sha256": _sha_bytes(source_bytes),
+                "source_mode": target.stat().st_mode & 0o777 if target.is_file() else 0o600,
+                "source_sha256": _sha_bytes(source_bytes) if source_bytes is not None else None,
                 "candidate_sha256": _sha_bytes(candidate_bytes),
+                "absent_before": source_bytes is None,
             }
         )
     report = {
@@ -98,8 +100,9 @@ def create_immediate_backup(output: Path, prepared: list[dict[str, Any]]) -> dic
     with tarfile.open(archive_path, "w") as archive:
         for item in prepared:
             profile = item["target"].parent.name
-            arcname = f"profiles/{profile}/AGENTS.md"
-            archive.add(item["target"], arcname=arcname, recursive=False)
+            arcname = f"profiles/{profile}/{item['target'].name}"
+            if not item["absent_before"]:
+                archive.add(item["target"], arcname=arcname, recursive=False)
             records.append(
                 {
                     "agent": item["agent"],
@@ -107,6 +110,7 @@ def create_immediate_backup(output: Path, prepared: list[dict[str, Any]]) -> dic
                     "archive_member": arcname,
                     "sha256": item["source_sha256"],
                     "mode": item["source_mode"],
+                    "absent_before": item["absent_before"],
                 }
             )
     os.chmod(archive_path, 0o600)
@@ -125,6 +129,8 @@ def create_immediate_backup(output: Path, prepared: list[dict[str, Any]]) -> dic
     with tarfile.open(archive_path, "r") as archive:
         by_name = {member.name: member for member in archive.getmembers()}
         for record in records:
+            if record.get("absent_before"):
+                continue
             member = by_name.get(record["archive_member"])
             source = archive.extractfile(member) if member else None
             if source is None or _sha_bytes(source.read()) != record["sha256"]:
@@ -150,7 +156,10 @@ def apply_cutover(manifest_path: Path, verified_backup: Path, immediate_backup: 
                 raise ValueError(f"post-write hash mismatch: {item['agent']}")
     except Exception:
         for item in written:
-            _atomic_write(item["target"], item["source_bytes"], item["source_mode"])
+            if item["absent_before"]:
+                item["target"].unlink(missing_ok=True)
+            else:
+                _atomic_write(item["target"], item["source_bytes"], item["source_mode"])
         raise
     report["applied"] = True
     report["immediate_backup"] = backup_result
@@ -173,6 +182,9 @@ def rollback_cutover(immediate_backup: Path) -> dict[str, Any]:
         by_name = {member.name: member for member in archive.getmembers()}
         payloads = []
         for record in manifest["files"]:
+            if record.get("absent_before"):
+                payloads.append((record, None))
+                continue
             member = by_name.get(record["archive_member"])
             source = archive.extractfile(member) if member else None
             if source is None:
@@ -183,7 +195,10 @@ def rollback_cutover(immediate_backup: Path) -> dict[str, Any]:
             payloads.append((record, content))
         for record, content in payloads:
             target = Path(record["target"])
-            _atomic_write(target, content, int(record["mode"]))
+            if record.get("absent_before"):
+                target.unlink(missing_ok=True)
+            else:
+                _atomic_write(target, content, int(record["mode"]))
             restored.append({"agent": record["agent"], "target": str(target), "sha256": record["sha256"]})
     return {"valid": True, "applied": True, "restored": restored}
 

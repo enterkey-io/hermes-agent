@@ -63,6 +63,6 @@ def test_whole_workforce_validator_accepts_compiled_fixture(tmp_path):
         delivery_manifest=delivery,
     )
     assert report["valid"] is True
-    assert report["operational_profiles"] == 21
+    assert report["operational_profiles"] == 22
     assert report["role_boundaries"]["chloe_directed_observer_only"] is True
     assert report["live_cutover_authorized"] is False

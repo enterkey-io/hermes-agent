@@ -529,6 +529,20 @@ def _aurora_queue() -> dict[str, list[dict[str, Any]]]:
     return result
 
 
+def _workforce_control() -> dict[str, Any]:
+    try:
+        from hermes_cli import kanban_db
+        from plugins.workforce_control.store import dashboard_snapshot
+
+        with kanban_db.connect_closing() as conn:
+            return dashboard_snapshot(conn)
+    except Exception:
+        return {
+            "available": False, "runtime": None, "items": [], "plans": [],
+            "exceptions": [], "corrections": [],
+        }
+
+
 def _require_elliott_write(request: Request) -> str:
     session = getattr(request.state, "session", None)
     if session is None:
@@ -660,6 +674,7 @@ async def overview() -> dict[str, Any]:
         "legacy": legacy,
         "recent_runs": runs,
         "aurora_queue": _aurora_queue(),
+        "workforce_control": _workforce_control(),
     }
 
 

@@ -6,23 +6,25 @@ profile_home_rooms:
   milena: executive-support
   brenna: lift-accountability
   emily: director-product
-  sage: product-staff
-  iris: product-staff
-  sloane: product-staff
-  maya: product-staff
-  reese: product-staff
-  morgan: product-staff
+  sage: staff-product
+  iris: staff-product
+  sloane: staff-product
+  maya: staff-product
+  reese: staff-product
+  morgan: staff-product
   alina: director-agent-systems
   root: director-operations
   bridgette: director-marketing
-  margot: marketing-staff
-  kenzie: marketing-staff
+  margot: staff-marketing
+  kenzie: staff-marketing
+  emma: staff-marketing
   xenia: director-trading
-  oyku: trading-staff
+  oyku: staff-trading
   maggie: director-finance
   mel: director-vision
 profile_additional_rooms:
   chloe: [general]
+  emma: [general]
 rooms:
   - name: admin
     status: confirmed
@@ -64,17 +66,17 @@ rooms:
     visibility: private
     purpose: Vision alternatives, constraints, and Aurora disposition.
     members: [elliott, aurora, chloe, mel]
-  - name: product-staff
+  - name: staff-product
     status: candidate
     visibility: private
     purpose: Product assignments, blockers, coordination, and verified outcomes.
     members: [elliott, emily, sage, iris, sloane, maya, reese, morgan]
-  - name: marketing-staff
+  - name: staff-marketing
     status: candidate
     visibility: private
     purpose: Marketing assignments, blockers, coordination, and verified outcomes.
-    members: [elliott, bridgette, margot, kenzie]
-  - name: trading-staff
+    members: [elliott, bridgette, margot, kenzie, emma]
+  - name: staff-trading
     status: candidate
     visibility: private
     purpose: Trading research assignments, blockers, coordination, and verified outcomes.

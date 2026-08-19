@@ -110,6 +110,10 @@ def load_topology(path: Path, organization_path: Path) -> dict[str, Any]:
         "rooms": rooms,
         "profile_home_rooms": home_rooms,
         "profile_additional_rooms": additional_rooms,
+        "member_aliases": {
+            item.display_name.casefold(): item.agent
+            for item in org.agents.values()
+        },
     }
 
 
@@ -176,10 +180,14 @@ def compare(topology: dict[str, Any], live: list[dict[str, Any]]) -> dict[str, A
     live_by_name = {room["name"].casefold(): room for room in live}
     intended_names = {room["name"].casefold() for room in topology["rooms"]}
     drift: list[dict[str, Any]] = []
+    aliases = topology.get("member_aliases") or {}
     for intended in topology["rooms"]:
         actual = live_by_name.get(intended["name"].casefold())
         expected = set(intended["members"])
-        observed = set(actual["members"]) if actual else set()
+        observed = {
+            aliases.get(str(member).casefold(), str(member).casefold())
+            for member in (actual["members"] if actual else [])
+        }
         drift.append(
             {
                 "room": intended["name"],

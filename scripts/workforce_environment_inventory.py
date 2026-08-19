@@ -150,7 +150,7 @@ def build_inventory(
     runbooks = []
     seen: set[Path] = set()
     for root in runbook_roots:
-        for path in sorted(root.glob("*/RUNBOOK.md")) if root.is_dir() else []:
+        for path in sorted(root.rglob("RUNBOOK.md")) if root.is_dir() else []:
             resolved = path.resolve()
             if resolved in seen:
                 continue
