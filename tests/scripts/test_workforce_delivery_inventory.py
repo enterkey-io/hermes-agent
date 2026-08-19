@@ -236,3 +236,28 @@ def test_backup_only_paperclip_language_is_not_an_active_route(tmp_path):
     )
     assert report["summary"]["active_paperclip_routes"] == 0
     assert report["jobs"][0]["legacy_paperclip_disposition"].startswith("archive-only")
+
+
+def test_backup_marker_for_another_route_does_not_hide_active_paperclip(tmp_path):
+    _write_jobs(
+        tmp_path,
+        "main",
+        [{
+            "id": "job-1",
+            "name": "active Paperclip route",
+            "enabled": True,
+            "deliver": "origin",
+            "prompt": "Create the task in Paperclip; use email as backup only.",
+            "workflow_id": "wf-1",
+        }],
+    )
+    report = build_manifest(
+        tmp_path,
+        ROOT / "workforce" / "organization.yaml",
+        ROOT / "workforce" / "delivery-policy.yaml",
+        ROOT / "workforce" / "buzz-topology.yaml",
+    )
+    assert report["summary"]["active_paperclip_routes"] == 1
+    assert report["jobs"][0]["legacy_paperclip_disposition"] == (
+        "remove-active-paperclip-route"
+    )

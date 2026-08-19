@@ -25,17 +25,24 @@ LEGACY_PATTERNS = {
     ),
 }
 PAPERCLIP_PATTERN = re.compile(r"\bpaperclip\b", re.I)
-PAPERCLIP_ARCHIVE_MARKERS = (
-    "do not",
-    "never",
-    "retired",
-    "archive-only",
-    "archive only",
-    "backup-only",
-    "backup only",
-    "historical",
-    "provenance",
+PAPERCLIP_ARCHIVE_PATTERNS = (
+    re.compile(r"\b(?:do not|never)\b[^.;:\n]{0,80}\bpaperclip\b", re.I),
+    re.compile(
+        r"\bpaperclip\b[^.;:\n]{0,80}"
+        r"\b(?:retired|archive-only|archive only|backup-only|backup only|historical|provenance)\b",
+        re.I,
+    ),
+    re.compile(
+        r"\b(?:retired|archive-only|archive only|backup-only|backup only|historical|provenance)\b"
+        r"[^.;:\n]{0,80}\bpaperclip\b",
+        re.I,
+    ),
 )
+
+
+def _paperclip_is_archive_only(line: str) -> bool:
+    """Return true only when an archive marker qualifies Paperclip itself."""
+    return any(pattern.search(line) for pattern in PAPERCLIP_ARCHIVE_PATTERNS)
 
 
 def _strings(value: Any, prefix: str = "") -> Iterable[tuple[str, str]]:
@@ -98,8 +105,7 @@ def _paperclip_evidence(
         for line in value.splitlines():
             if not PAPERCLIP_PATTERN.search(line):
                 continue
-            normalized = line.casefold()
-            archive_only = any(marker in normalized for marker in PAPERCLIP_ARCHIVE_MARKERS)
+            archive_only = _paperclip_is_archive_only(line)
             mentions.add((field, archive_only))
     script_name = str(job.get("script") or "").strip()
     if script_name:
@@ -118,10 +124,7 @@ def _paperclip_evidence(
                 continue
             for line in lines:
                 if PAPERCLIP_PATTERN.search(line):
-                    normalized = line.casefold()
-                    archive_only = any(
-                        marker in normalized for marker in PAPERCLIP_ARCHIVE_MARKERS
-                    )
+                    archive_only = _paperclip_is_archive_only(line)
                     mentions.add(("script", archive_only))
     evidence = [
         {"source": source, "archive_only_context": archive_only}

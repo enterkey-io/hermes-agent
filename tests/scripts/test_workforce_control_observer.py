@@ -36,3 +36,12 @@ def test_recovery_observer_advances_shared_cursor_in_shadow(tmp_path, monkeypatc
             "SELECT last_event_id FROM wc_cursors WHERE observer='dispatch_tick'"
         ).fetchone()
         assert row["last_event_id"] == 0
+
+
+def test_systemd_observer_uses_the_installed_virtual_environment():
+    unit = (
+        Path(__file__).parents[2]
+        / "deploy/systemd/hermes-workforce-control-observer.service"
+    ).read_text(encoding="utf-8")
+    assert "%h/.hermes/hermes-agent/venv/bin/python" in unit
+    assert "%h/.hermes/hermes-agent/.venv/bin/python" not in unit
