@@ -7605,6 +7605,79 @@ def archive_task(conn: sqlite3.Connection, task_id: str) -> bool:
     return True
 
 
+def archive_stale_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    reason: str,
+    evidence_quote: str,
+    author: str,
+) -> tuple[bool, str]:
+    """Archive inactive work only when its own record contains direct evidence.
+
+    This is the narrow unattended-reconciliation path.  It refuses active,
+    review, and terminal work; requires the supplied evidence quote to occur in
+    the task body, result, or comments; and records both the evidence and the
+    disposition reason atomically with the status change.
+    """
+    reason = " ".join(str(reason or "").split())
+    evidence_quote = " ".join(str(evidence_quote or "").split())
+    author = str(author or "").strip()
+    if not reason:
+        raise ValueError("archive reason is required")
+    if not 8 <= len(evidence_quote) <= 500:
+        raise ValueError("evidence_quote must be between 8 and 500 characters")
+    if not author:
+        raise ValueError("archive author is required")
+
+    allowed_statuses = {"triage", "todo", "scheduled", "ready", "blocked"}
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT status, body, result FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if row is None:
+            return False, "unknown task"
+        status = str(row["status"])
+        if status not in allowed_statuses:
+            return False, f"status {status!r} is not eligible for stale archival"
+        comments = conn.execute(
+            "SELECT body FROM task_comments WHERE task_id = ?", (task_id,)
+        ).fetchall()
+        evidence_haystack = "\n".join(
+            " ".join(str(value or "").split())
+            for value in [row["body"], row["result"], *(item["body"] for item in comments)]
+        ).casefold()
+        if evidence_quote.casefold() not in evidence_haystack:
+            return False, "evidence_quote was not found in the task record"
+        now = int(time.time())
+        conn.execute(
+            "UPDATE tasks SET status = 'archived', claim_lock = NULL, "
+            "claim_expires = NULL, worker_pid = NULL, current_run_id = NULL "
+            "WHERE id = ?",
+            (task_id,),
+        )
+        comment = f"Archived as stale/cancelled: {reason} Evidence: {evidence_quote}"
+        conn.execute(
+            "INSERT INTO task_comments (task_id, author, body, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (task_id, author, comment, now),
+        )
+        _append_event(
+            conn,
+            task_id,
+            "archived",
+            {
+                "reason": reason,
+                "evidence_quote": evidence_quote,
+                "author": author,
+                "kind": "stale_reconciliation",
+            },
+        )
+    recompute_ready(conn)
+    _cleanup_workspace(conn, task_id)
+    return True, "archived"
+
+
 def delete_archived_task(conn: sqlite3.Connection, task_id: str) -> bool:
     """Permanently remove an already-archived task and its related rows.
 

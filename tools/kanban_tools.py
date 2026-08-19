@@ -1110,6 +1110,46 @@ def _handle_comment(args: dict, **kw) -> str:
             conn.close()
     except ValueError as e:
         return tool_error(f"kanban_comment: {e}")
+
+
+def _handle_archive_stale(args: dict, **kw) -> str:
+    """Archive inactive work when its own record proves it was stopped."""
+    guard = _require_orchestrator_tool("kanban_archive_stale")
+    if guard:
+        return guard
+    tid = str(args.get("task_id") or "").strip()
+    reason = redact_sensitive_text(str(args.get("reason") or ""), force=True).strip()
+    evidence_quote = redact_sensitive_text(
+        str(args.get("evidence_quote") or ""), force=True
+    ).strip()
+    if not tid:
+        return tool_error("task_id is required")
+    if not reason:
+        return tool_error("reason is required")
+    if not evidence_quote:
+        return tool_error("evidence_quote is required")
+    author = os.environ.get("HERMES_PROFILE") or "orchestrator"
+    board = args.get("board")
+    try:
+        kb, conn = _connect(board=board)
+        try:
+            ok, detail = kb.archive_stale_task(
+                conn,
+                tid,
+                reason=reason,
+                evidence_quote=evidence_quote,
+                author=author,
+            )
+            if not ok:
+                return tool_error(f"could not archive stale task {tid}: {detail}")
+            return _ok(task_id=tid, status="archived", evidence_verified=True)
+        finally:
+            conn.close()
+    except ValueError as e:
+        return tool_error(f"kanban_archive_stale: {e}")
+    except Exception as e:
+        logger.exception("kanban_archive_stale failed")
+        return tool_error(f"kanban_archive_stale: {e}")
     except Exception as e:
         logger.exception("kanban_comment failed")
         return tool_error(f"kanban_comment: {e}")
@@ -2055,6 +2095,38 @@ KANBAN_COMMENT_SCHEMA = {
     },
 }
 
+KANBAN_ARCHIVE_STALE_SCHEMA = {
+    "name": "kanban_archive_stale",
+    "description": (
+        "Archive an inactive triage/todo/scheduled/ready/blocked task only when "
+        "the task body, result, or comments contain direct evidence that it was "
+        "stopped, cancelled, or superseded. Orchestrator-only. The exact "
+        "evidence_quote must already occur in the task record; running, review, "
+        "done, and archived tasks are refused. Do not use for ambiguity or a "
+        "new strategic judgment."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "string"},
+            "reason": {
+                "type": "string",
+                "description": "Why this existing record is stale/cancelled.",
+            },
+            "evidence_quote": {
+                "type": "string",
+                "description": (
+                    "Exact 8-500 character quote already present in the task "
+                    "body, result, or comments."
+                ),
+            },
+            "board": _board_schema_prop(),
+        },
+        "required": ["task_id", "reason", "evidence_quote"],
+        "additionalProperties": False,
+    },
+}
+
 KANBAN_ATTACH_SCHEMA = {
     "name": "kanban_attach",
     "description": (
@@ -2445,6 +2517,15 @@ registry.register(
     handler=_handle_comment,
     check_fn=_check_kanban_mode,
     emoji="💬",
+)
+
+registry.register(
+    name="kanban_archive_stale",
+    toolset="kanban",
+    schema=KANBAN_ARCHIVE_STALE_SCHEMA,
+    handler=_handle_archive_stale,
+    check_fn=_check_kanban_orchestrator_mode,
+    emoji="🗄️",
 )
 
 registry.register(

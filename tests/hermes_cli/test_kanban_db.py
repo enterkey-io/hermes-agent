@@ -473,6 +473,56 @@ def test_delete_archived_task_removes_related_rows(kanban_home):
         assert conn.execute("SELECT COUNT(*) FROM kanban_notify_subs WHERE task_id = ?", (tid,)).fetchone()[0] == 0
 
 
+def test_archive_stale_task_requires_grounded_evidence_and_inactive_state(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="obsolete path", assignee="emily")
+        kb.add_comment(
+            conn,
+            tid,
+            "elliott",
+            "STOP per Elliott. Await a newly approved scope.",
+        )
+
+        ok, detail = kb.archive_stale_task(
+            conn,
+            tid,
+            reason="Explicitly stopped by Elliott",
+            evidence_quote="not present in the record",
+            author="emily",
+        )
+        assert ok is False
+        assert "not found" in detail
+        assert kb.get_task(conn, tid).status == "ready"
+
+        ok, detail = kb.archive_stale_task(
+            conn,
+            tid,
+            reason="Explicitly stopped by Elliott",
+            evidence_quote="STOP per Elliott. Await a newly approved scope.",
+            author="emily",
+        )
+        assert (ok, detail) == (True, "archived")
+        assert kb.get_task(conn, tid).status == "archived"
+        event = kb.list_events(conn, tid)[-1]
+        assert event.kind == "archived"
+        assert event.payload["kind"] == "stale_reconciliation"
+        assert event.payload["author"] == "emily"
+
+        running = kb.create_task(conn, title="active work", assignee="emily")
+        kb.add_comment(conn, running, "elliott", "Stop this active work now.")
+        assert kb.claim_task(conn, running) is not None
+        ok, detail = kb.archive_stale_task(
+            conn,
+            running,
+            reason="stop requested",
+            evidence_quote="Stop this active work now.",
+            author="emily",
+        )
+        assert ok is False
+        assert "not eligible" in detail
+        assert kb.get_task(conn, running).status == "running"
+
+
 def test_delete_task_removes_task_and_cascades(kanban_home):
     with kb.connect() as conn:
         t = kb.create_task(conn, title="to-delete", assignee="alice")

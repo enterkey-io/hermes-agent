@@ -111,6 +111,38 @@ def test_list_filters_tasks(monkeypatch, worker_env):
     assert tenant_ids == [c]
 
 
+def test_archive_stale_is_orchestrator_only_and_evidence_grounded(
+    monkeypatch, worker_env
+):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    conn = kb.connect()
+    try:
+        stale = kb.create_task(conn, title="cancelled candidate", assignee="emily")
+        kb.add_comment(conn, stale, "elliott", "STOP per Elliott. Do not continue.")
+    finally:
+        conn.close()
+
+    refused = json.loads(kt._handle_archive_stale({
+        "task_id": stale,
+        "reason": "explicit stop",
+        "evidence_quote": "STOP per Elliott. Do not continue.",
+    }))
+    assert "orchestrator-only" in refused["error"]
+
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    result = json.loads(kt._handle_archive_stale({
+        "task_id": stale,
+        "reason": "explicit stop",
+        "evidence_quote": "STOP per Elliott. Do not continue.",
+    }))
+    assert result["ok"] is True
+    assert result["status"] == "archived"
+    with kb.connect() as conn:
+        assert kb.get_task(conn, stale).status == "archived"
+
+
 def test_complete_happy_path(worker_env):
     from tools import kanban_tools as kt
     out = kt._handle_complete({

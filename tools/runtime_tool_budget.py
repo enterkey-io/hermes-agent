@@ -57,6 +57,7 @@ _WRITE_TOOLS = frozenset(
         "kanban_request_changes",
         "kanban_heartbeat",
         "kanban_comment",
+        "kanban_archive_stale",
         "kanban_attach",
         "kanban_attach_url",
         "kanban_create",
@@ -146,4 +147,3 @@ def enforce_runtime_tool_budget(name: str, args: dict[str, Any]) -> dict[str, An
             requested_limit = budget.max_list_items
         bounded_args["limit"] = min(max(requested_limit, 1), budget.max_list_items)
     return bounded_args
-
