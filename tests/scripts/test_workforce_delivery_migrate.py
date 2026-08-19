@@ -1,5 +1,7 @@
 import json
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -8,6 +10,18 @@ from scripts.workforce_delivery_migrate import migrate
 
 
 ROOT = Path(__file__).parents[2]
+
+
+def test_delivery_migration_script_runs_directly_outside_the_repo(tmp_path):
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/workforce_delivery_migrate.py"), "--help"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "--room-map" in result.stdout
 
 
 def test_delivery_migration_rewrites_team_route_without_touching_friend(tmp_path):
@@ -108,6 +122,36 @@ def test_delivery_migration_replaces_existing_managed_room_policy(tmp_path):
     assert "`executive-support`" in updated["prompt"]
     assert "`lift-accountability`" not in updated["prompt"]
     assert updated["prompt"].count("[WORKFORCE DELIVERY POLICY]") == 1
+
+
+def test_canonical_runbook_delivery_contract_is_already_compliant(tmp_path):
+    profiles = tmp_path / "profiles"
+    jobs = profiles / "main" / "cron" / "jobs.json"
+    jobs.parent.mkdir(parents=True)
+    prompt = (
+        "Run the canonical workflow. Use only the Cron-configured Buzz destination; "
+        "do not call a platform messaging tool or use a fallback."
+    )
+    jobs.write_text(json.dumps({"jobs": [{
+        "id": "main-job",
+        "name": "operations outcome review",
+        "enabled": True,
+        "deliver": "buzz:11111111-1111-1111-1111-111111111111",
+        "prompt": prompt,
+        "workflow_id": "wf-main-job",
+    }]}))
+    report = migrate(
+        profiles_root=profiles,
+        organization=ROOT / "workforce" / "organization.yaml",
+        policy=ROOT / "workforce" / "delivery-policy.yaml",
+        topology=ROOT / "workforce" / "buzz-topology.yaml",
+        room_map={
+            "director-operations": "11111111-1111-1111-1111-111111111111"
+        },
+        apply=False,
+    )
+    assert report["changed_jobs"] == 0
+    assert json.loads(jobs.read_text())["jobs"][0]["prompt"] == prompt
 
 
 def test_delivery_apply_validates_every_profile_before_first_write(tmp_path):

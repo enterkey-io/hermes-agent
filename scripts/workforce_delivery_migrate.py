@@ -13,10 +13,14 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 import tempfile
 from typing import Any
 
 import yaml
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.workforce_delivery_inventory import (
     _hidden_routes,
@@ -33,6 +37,11 @@ PLATFORM_REPLACEMENTS = (
 MANAGED_DELIVERY_BLOCK = re.compile(
     r"\n*\[WORKFORCE DELIVERY POLICY\]\n.*\Z",
     re.DOTALL,
+)
+RUNBOOK_MANAGED_DELIVERY = re.compile(
+    r"use only the cron-configured buzz destination;\s*"
+    r"do not call a platform messaging tool or use a fallback",
+    re.I,
 )
 
 
@@ -52,6 +61,10 @@ def _verified_backup(path: Path) -> None:
 
 
 def _rewrite_prompt(value: str, room: str, *, quiet_success: bool) -> str:
+    if RUNBOOK_MANAGED_DELIVERY.search(value) and not any(
+        pattern.search(value) for pattern, _replacement in PLATFORM_REPLACEMENTS
+    ):
+        return value
     rewritten = value
     for pattern, replacement in PLATFORM_REPLACEMENTS:
         rewritten = pattern.sub(replacement, rewritten)
