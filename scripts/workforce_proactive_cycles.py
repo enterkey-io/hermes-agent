@@ -16,6 +16,7 @@ from hermes_cli.runbook_schema import split_frontmatter
 
 
 ROOM_TOKEN = re.compile(r"<ROOM_UUID:([a-z0-9-]+)>")
+BOUNDED_TOOLSETS = ["kanban", "workforce", "runbook", "no_mcp"]
 
 
 def render(template: Path, room_map_path: Path) -> str:
@@ -77,6 +78,10 @@ def render(template: Path, room_map_path: Path) -> str:
             raise ValueError(f"schedule {schedule_id!r} has an invalid Buzz destination")
         if str(destination_uuid) != destination.split(":", 1)[1].casefold():
             raise ValueError(f"schedule {schedule_id!r} has an invalid Buzz destination")
+        if schedule.get("enabled_toolsets") != BOUNDED_TOOLSETS:
+            raise ValueError(
+                f"schedule {schedule_id!r} must use the bounded proactive toolsets"
+            )
         seen_ids.add(schedule_id)
         seen_names.add(name)
         seen_step_keys.add(step_key)

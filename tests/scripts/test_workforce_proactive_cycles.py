@@ -35,6 +35,12 @@ def test_rendered_proactive_cycles_are_complete_and_workforce_managed(tmp_path):
         "xenia", "maggie", "mel", "aurora",
     }
     assert all("<ROOM_UUID:" not in item["deliver"] for item in schedules)
+    assert all(
+        item["enabled_toolsets"] == ["kanban", "workforce", "runbook", "no_mcp"]
+        for item in schedules
+    )
+    assert "at most eight tool calls total" in parsed.body
+    assert "Never enumerate the whole board or workforce" in parsed.body
 
 
 def test_render_fails_closed_when_a_room_mapping_is_missing(tmp_path):
@@ -65,3 +71,16 @@ def test_render_validates_schedule_identity_instead_of_a_fixed_count(tmp_path):
     reduced.write_text(text[:start] + text[end:])
     parsed = split_frontmatter(render(reduced, _room_map(tmp_path)))
     assert len(parsed.metadata["schedules"]) == 9
+
+
+def test_render_rejects_an_unbounded_proactive_toolset(tmp_path):
+    unsafe = tmp_path / "RUNBOOK.md"
+    unsafe.write_text(
+        TEMPLATE.read_text().replace(
+            "enabled_toolsets: [kanban, workforce, runbook, no_mcp]",
+            "enabled_toolsets: [hermes-cli]",
+            1,
+        )
+    )
+    with pytest.raises(ValueError, match="bounded proactive toolsets"):
+        render(unsafe, _room_map(tmp_path))
