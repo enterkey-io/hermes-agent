@@ -1910,6 +1910,48 @@ def _validate_job_mode_invariants(
         )
 
 
+def _normalize_job_positive_int(value: Any, field: str) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{field} must be a positive integer")
+    if value > 10_000:
+        raise ValueError(f"{field} must be <= 10000")
+    return value
+
+
+def _normalize_runtime_tool_budget(value: Any) -> Optional[Dict[str, Any]]:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("runtime_tool_budget must be a mapping")
+    expected = {
+        "max_calls", "max_writes", "max_detail_reads", "max_list_items",
+        "allowed_tools",
+    }
+    unexpected = set(value) - expected
+    if unexpected:
+        raise ValueError(
+            "runtime_tool_budget has unsupported field(s): "
+            + ", ".join(sorted(unexpected))
+        )
+    normalized: Dict[str, Any] = {}
+    for key in ("max_calls", "max_writes", "max_detail_reads", "max_list_items"):
+        normalized[key] = _normalize_job_positive_int(value.get(key), f"runtime_tool_budget.{key}")
+        if normalized[key] is None:
+            raise ValueError(f"runtime_tool_budget.{key} is required")
+    allowed = value.get("allowed_tools")
+    if not isinstance(allowed, list) or not allowed:
+        raise ValueError("runtime_tool_budget.allowed_tools must be a non-empty list")
+    normalized_allowed = [str(item).strip() for item in allowed if str(item).strip()]
+    if len(normalized_allowed) != len(allowed) or len(set(normalized_allowed)) != len(allowed):
+        raise ValueError(
+            "runtime_tool_budget.allowed_tools must contain unique non-empty names"
+        )
+    normalized["allowed_tools"] = normalized_allowed
+    return normalized
+
+
 def create_job(
     prompt: Optional[str],
     schedule: str,
@@ -1925,6 +1967,8 @@ def create_job(
     script: Optional[str] = None,
     context_from: Optional[Union[str, List[str]]] = None,
     enabled_toolsets: Optional[List[str]] = None,
+    max_iterations: Optional[int] = None,
+    runtime_tool_budget: Optional[Dict[str, Any]] = None,
     workdir: Optional[str] = None,
     no_agent: bool = False,
     attach_to_session: Optional[bool] = None,
@@ -1970,6 +2014,8 @@ def create_job(
                           When set, only tools from these toolsets are loaded, reducing
                           token overhead. When omitted, all default tools are loaded.
                           Ignored when ``no_agent=True``.
+        max_iterations: Optional per-job agent iteration cap.
+        runtime_tool_budget: Optional host-enforced tool-call budget mapping.
         workdir: Optional absolute path.  When set, the job runs as if launched
                 from that directory: AGENTS.md / CLAUDE.md / .cursorrules from
                 that directory are injected into the system prompt, and the
@@ -2025,6 +2071,8 @@ def create_job(
     normalized_script = normalized_script or None
     normalized_toolsets = [str(t).strip() for t in enabled_toolsets if str(t).strip()] if enabled_toolsets else None
     normalized_toolsets = normalized_toolsets or None
+    normalized_max_iterations = _normalize_job_positive_int(max_iterations, "max_iterations")
+    normalized_runtime_tool_budget = _normalize_runtime_tool_budget(runtime_tool_budget)
     normalized_workdir = _normalize_workdir(workdir)
     normalized_no_agent = bool(no_agent)
     normalized_attach = attach_to_session if isinstance(attach_to_session, bool) else None
@@ -2131,6 +2179,8 @@ def create_job(
         "deliver": deliver,
         "origin": origin,  # Tracks where job was created for "origin" delivery
         "enabled_toolsets": normalized_toolsets,
+        "max_iterations": normalized_max_iterations,
+        "runtime_tool_budget": normalized_runtime_tool_budget,
         "workdir": normalized_workdir,
     }
     if normalized_workflow_id:
@@ -2236,6 +2286,14 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
         )
 
     updates = dict(updates or {})
+    if "max_iterations" in updates:
+        updates["max_iterations"] = _normalize_job_positive_int(
+            updates["max_iterations"], "max_iterations"
+        )
+    if "runtime_tool_budget" in updates:
+        updates["runtime_tool_budget"] = _normalize_runtime_tool_budget(
+            updates["runtime_tool_budget"]
+        )
     if "service_tier" in updates:
         if "speed" not in updates:
             updates["speed"] = updates["service_tier"]

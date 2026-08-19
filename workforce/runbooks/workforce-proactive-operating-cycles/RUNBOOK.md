@@ -8,6 +8,27 @@ status: active
 runtime:
   kind: hermes
   ref: workforce-control
+  max_iterations: 12
+  tool_budget:
+    max_calls: 8
+    max_writes: 1
+    max_detail_reads: 3
+    max_list_items: 20
+    allowed_tools:
+    - kanban_list
+    - kanban_show
+    - kanban_complete
+    - kanban_block
+    - kanban_request_review
+    - kanban_request_changes
+    - kanban_comment
+    - kanban_attachments
+    - workforce_signal
+    - runbook_list
+    - runbook_search
+    - runbook_get
+    - runbook_validate
+    - runbook_runs
 schedules:
 - id: chloe-factual-reconciliation
   name: workforce-chloe-factual-reconciliation
@@ -177,6 +198,7 @@ This is a bounded proactive operating cycle, not permission to manufacture work.
 Every firing is an internal control-plane reconciliation, not a general research or systems-audit session.
 
 - Use only the per-job `kanban`, `workforce`, and `runbook` tools. MCP servers, terminal, files, code execution, browser/web research, delegation, and platform messaging are intentionally unavailable.
+- The host runtime also denies task creation, dependency linking, unblocking, workforce handoff, attachments, and runbook mutation during these cycles; the prompt cannot enlarge that allowlist.
 - Make at most eight tool calls total, including at most one write and at most three individual task/workflow detail reads. Prefer one filtered list or dashboard snapshot over repeated item-by-item discovery.
 - Review at most twenty candidate records, limited to the executing role's department or explicit reporting scope and changed, failed, blocked, review, or qualified-signal state. Never enumerate the whole board or workforce.
 - Do not inspect host services, processes, networks, system configuration, credentials, raw databases, conversation archives, unrelated departments, or underlying implementation files.

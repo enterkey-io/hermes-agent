@@ -27,6 +27,10 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from hermes_constants import hermes_home_key
+from tools.runtime_tool_budget import (
+    RuntimeToolBudgetError,
+    enforce_runtime_tool_budget,
+)
 
 logger = logging.getLogger(__name__)
 _INBOUND_JSON_ISSUER = object()
@@ -1495,6 +1499,14 @@ class ToolRegistry:
                     error_type="execution_capability_unavailable",
                     tool=name,
                 )
+        try:
+            args = enforce_runtime_tool_budget(name, args)
+        except RuntimeToolBudgetError as exc:
+            return tool_error(
+                str(exc),
+                error_type="runtime_tool_budget_exceeded",
+                tool=name,
+            )
         result = None
         error = None
         try:

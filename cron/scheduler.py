@@ -5388,7 +5388,12 @@ def _run_job_after_admission(
                     prefill_messages = None
 
         # Max iterations
-        max_iterations = _cfg.get("agent", {}).get("max_turns") or _cfg.get("max_turns") or 500
+        max_iterations = (
+            job.get("max_iterations")
+            or _cfg.get("agent", {}).get("max_turns")
+            or _cfg.get("max_turns")
+            or 500
+        )
 
         # Provider routing
         pr = _cfg.get("provider_routing") or {}
@@ -5804,7 +5809,18 @@ def _run_job_after_admission(
         # Preserve scheduler-scoped ContextVar state (for example skill-declared
         # env passthrough registrations) when the cron run hops into the worker
         # thread used for inactivity timeout monitoring.
-        _cron_context = contextvars.copy_context()
+        from tools.runtime_tool_budget import (
+            activate_runtime_tool_budget,
+            reset_runtime_tool_budget,
+        )
+
+        _budget_token, _runtime_budget_state = activate_runtime_tool_budget(
+            job.get("runtime_tool_budget")
+        )
+        try:
+            _cron_context = contextvars.copy_context()
+        finally:
+            reset_runtime_tool_budget(_budget_token)
         # Tag this fire and time the run_conversation call for the usage_audit.jsonl entry.
         _audit_fire_id = uuid.uuid4().hex
         _audit_t_start = time.monotonic()
@@ -6005,6 +6021,10 @@ def _run_job_after_admission(
             "deliver_target": job.get("deliver"),
             "model": model or None,
             "duration_ms": _audit_duration_ms,
+            "runtime_tool_budget": (
+                _runtime_budget_state.snapshot()
+                if _runtime_budget_state is not None else None
+            ),
             "error": None,
         })
         return True, output, final_response, None
@@ -6041,6 +6061,11 @@ def _run_job_after_admission(
                 "deliver_target": job.get("deliver"),
                 "model": model or None,
                 "duration_ms": _audit_duration_ms,
+                "runtime_tool_budget": (
+                    _runtime_budget_state.snapshot()
+                    if "_runtime_budget_state" in locals()
+                    and _runtime_budget_state is not None else None
+                ),
                 "error": error_msg,
             })
         

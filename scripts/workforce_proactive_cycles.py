@@ -17,6 +17,19 @@ from hermes_cli.runbook_schema import split_frontmatter
 
 ROOM_TOKEN = re.compile(r"<ROOM_UUID:([a-z0-9-]+)>")
 BOUNDED_TOOLSETS = ["kanban", "workforce", "runbook", "no_mcp"]
+BOUNDED_MAX_ITERATIONS = 12
+BOUNDED_TOOL_BUDGET = {
+    "max_calls": 8,
+    "max_writes": 1,
+    "max_detail_reads": 3,
+    "max_list_items": 20,
+    "allowed_tools": [
+        "kanban_list", "kanban_show", "kanban_complete", "kanban_block",
+        "kanban_request_review", "kanban_request_changes", "kanban_comment",
+        "kanban_attachments", "workforce_signal", "runbook_list",
+        "runbook_search", "runbook_get", "runbook_validate", "runbook_runs",
+    ],
+}
 
 
 def render(template: Path, room_map_path: Path) -> str:
@@ -40,6 +53,11 @@ def render(template: Path, room_map_path: Path) -> str:
     rendered = ROOM_TOKEN.sub(replace, text)
     parsed = split_frontmatter(rendered)
     schedules = parsed.metadata["schedules"]
+    runtime = parsed.metadata["runtime"]
+    if runtime.get("max_iterations") != BOUNDED_MAX_ITERATIONS:
+        raise ValueError("proactive cycle runtime must enforce max_iterations=12")
+    if runtime.get("tool_budget") != BOUNDED_TOOL_BUDGET:
+        raise ValueError("proactive cycle runtime must use the bounded tool budget")
     steps = {
         str(step["step_key"]): step
         for step in parsed.metadata["steps"]
