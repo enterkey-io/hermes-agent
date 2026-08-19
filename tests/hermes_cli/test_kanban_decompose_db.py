@@ -5,6 +5,7 @@ from the triage column. LLM-free by design.
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
 import pytest
 
@@ -68,6 +69,34 @@ def test_decompose_creates_children_and_promotes_root(kanban_home):
     assert c1.assignee == "engineer"
 
 
+def test_nonexecuting_signal_cannot_be_specified_or_decomposed(kanban_home):
+    with kb.connect() as conn:
+        tid = _create_triage(
+            conn,
+            title="signal only",
+            body=json.dumps({"kind": "workforce_signal", "launch_authorized": False}),
+            assignee="aurora",
+        )
+        specified = kb.specify_triage_task(
+            conn, tid, title="attempted promotion", author="auto-decomposer"
+        )
+        children = kb.decompose_triage_task(
+            conn,
+            tid,
+            root_assignee="aurora",
+            children=[{"title": "must not exist", "assignee": "main"}],
+            author="auto-decomposer",
+        )
+        root = kb.get_task(conn, tid)
+        child_count = conn.execute(
+            "SELECT COUNT(*) FROM task_links WHERE parent_id = ?", (tid,)
+        ).fetchone()[0]
+    assert specified is False
+    assert children is None
+    assert root.status == "triage"
+    assert child_count == 0
+
+
 def test_decompose_records_audit_comment_and_event(kanban_home):
     with kb.connect() as conn:
         tid = _create_triage(conn)
@@ -86,7 +115,5 @@ def test_decompose_records_audit_comment_and_event(kanban_home):
 
     assert any("Decomposed into" in (c.body or "") for c in comments)
     assert any(ev.kind == "decomposed" for ev in events)
-
-
 
 

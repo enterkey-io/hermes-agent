@@ -23,7 +23,7 @@ def _payload():
     }
 
 
-def test_signal_is_fixed_triage_record_for_aurora(tmp_path, monkeypatch):
+def test_signal_is_fixed_nonexecuting_record_for_aurora(tmp_path, monkeypatch):
     profiles = tmp_path / "profiles"
     (profiles / "emily").mkdir(parents=True)
     monkeypatch.setenv("HERMES_HOME", str(profiles / "emily"))
@@ -33,11 +33,12 @@ def test_signal_is_fixed_triage_record_for_aurora(tmp_path, monkeypatch):
     result = json.loads(signal._handle(_payload()))
     assert result["success"] is True
     assert result["assignee"] == "aurora"
-    assert result["status"] == "triage"
+    assert result["status"] == "blocked"
     assert result["launch_authorized"] is False
     with kanban_db.connect_closing(db_path) as conn:
         task = kanban_db.get_task(conn, result["signal_id"])
         packet = json.loads(task.body)
+    assert task.status == "blocked"
     assert packet["decision_owner"] == "aurora"
     assert packet["source_agent"] == "emily"
     assert packet["launch_authorized"] is False

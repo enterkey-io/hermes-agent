@@ -292,7 +292,8 @@ def record_signal(
         task_id = kanban_db.create_task(
             conn, title=f"Signal: {expected_outcome[:120]}", body=json.dumps(body, indent=2, sort_keys=True),
             assignee="aurora", created_by=source_agent, workspace_kind="scratch",
-            triage=True, idempotency_key=f"workforce-signal:{stable_key}",
+            triage=False, initial_status="blocked",
+            idempotency_key=f"workforce-signal:{stable_key}",
         )
         conn.execute(
             "INSERT INTO wc_items(task_id,item_kind,stable_key,goal_ref,desired_outcome,action_class,target_ref,evidence_json,provenance_json,verification_state,current_state,created_at,updated_at) "
@@ -300,7 +301,7 @@ def record_signal(
             (task_id, "signal", stable_key, goal_ref or "unknown", expected_outcome,
              action_class, target_ref or None, _json(evidence_references), _json([provenance]), now, now),
         )
-    return {"task_id": task_id, "status": "triage", "assignee": "aurora", "stable_key": stable_key, "created": True}
+    return {"task_id": task_id, "status": "blocked", "assignee": "aurora", "stable_key": stable_key, "created": True}
 
 
 def _parse_time(value: str | int | None) -> int | None:

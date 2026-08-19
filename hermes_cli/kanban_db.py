@@ -102,6 +102,17 @@ _log = logging.getLogger(__name__)
 VALID_STATUSES = {"triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"}
 VALID_INITIAL_STATUSES = {"running", "blocked"}
 
+
+def _task_body_forbids_launch(body: Optional[str]) -> bool:
+    """Recognize a structured, explicit non-execution invariant."""
+    if not isinstance(body, str) or not body.strip():
+        return False
+    try:
+        payload = json.loads(body)
+    except (TypeError, ValueError):
+        return False
+    return isinstance(payload, dict) and payload.get("launch_authorized") is False
+
 # Typed block reasons. Distinguishes the two fundamentally different things a
 # worker (or human) means by "blocked", so each can be routed differently
 # instead of all landing in one undifferentiated ``blocked`` bucket that a cron
@@ -7234,6 +7245,8 @@ def specify_triage_task(
         ).fetchone()
         if existing is None:
             return False
+        if _task_body_forbids_launch(existing["body"]):
+            return False
         sets: list[str] = ["status = 'todo'"]
         params: list[Any] = []
         changed_fields: list[str] = []
@@ -7383,13 +7396,15 @@ def decompose_triage_task(
     child_ids: list[str] = []
     with write_txn(conn):
         root_row = conn.execute(
-            "SELECT id, status, tenant, workspace_kind, workspace_path "
+            "SELECT id, status, tenant, workspace_kind, workspace_path, body "
             "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
         if root_row is None:
             return None
         if root_row["status"] != "triage":
+            return None
+        if _task_body_forbids_launch(root_row["body"]):
             return None
         tenant = root_row["tenant"]
         # Children inherit the root's workspace by default so a fan-out
