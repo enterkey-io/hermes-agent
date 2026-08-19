@@ -4,6 +4,7 @@ from pathlib import Path
 
 from scripts.workforce_compile import compile_profiles
 from scripts.workforce_validate import validate
+from tests.workforce_test_helpers import materialize_test_organization
 
 
 ROOT = Path(__file__).parents[2]
@@ -11,8 +12,11 @@ ROOT = Path(__file__).parents[2]
 
 def test_whole_workforce_validator_accepts_compiled_fixture(tmp_path):
     staging = tmp_path / "staging"
+    organization = materialize_test_organization(
+        ROOT / "workforce" / "organization.yaml", tmp_path
+    )
     compile_profiles(
-        ROOT / "workforce" / "organization.yaml",
+        organization,
         ROOT / "workforce" / "templates" / "workforce-contract.md",
         staging,
     )
@@ -56,7 +60,7 @@ def test_whole_workforce_validator_accepts_compiled_fixture(tmp_path):
         "summary": {"unclassified": 0},
     }))
     report = validate(
-        organization=ROOT / "workforce" / "organization.yaml",
+        organization=organization,
         staging_root=staging,
         profiles_root=profiles,
         backup_manifest=backup,

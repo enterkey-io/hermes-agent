@@ -15,7 +15,7 @@ SOURCE = Path(__file__).parents[2] / "workforce" / "organization.yaml"
 
 def test_canonical_organization_is_reciprocal_and_excludes_friends():
     org = load_organization(SOURCE)
-    assert len(org.operational_agents()) == 21
+    assert len(org.operational_agents()) == 22
     assert org.get("root").profile_path.endswith("/profiles/main")
     assert org.resolve_profile("main").agent == "root"
     assert org.validate_execution_profile("main").agent == "root"

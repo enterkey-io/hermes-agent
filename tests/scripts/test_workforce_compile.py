@@ -3,6 +3,8 @@ from pathlib import Path
 
 import yaml
 
+from tests.workforce_test_helpers import materialize_test_organization
+
 
 ROOT = Path(__file__).parents[2]
 SPEC = importlib.util.spec_from_file_location(
@@ -27,8 +29,11 @@ def test_insert_is_idempotent_and_preserves_unmanaged_content():
 
 
 def test_canonical_compile_includes_active_chloe_and_emma(tmp_path):
+    organization = materialize_test_organization(
+        ROOT / "workforce" / "organization.yaml", tmp_path
+    )
     manifest = module.compile_profiles(
-        ROOT / "workforce" / "organization.yaml",
+        organization,
         ROOT / "workforce" / "templates" / "workforce-contract.md",
         tmp_path,
     )
@@ -38,8 +43,9 @@ def test_canonical_compile_includes_active_chloe_and_emma(tmp_path):
     chloe = next(item for item in manifest["profiles"] if item["agent"] == "chloe")
     assert chloe["status"] == "active"
     assert chloe["source_kind"] == "live-profile"
-    assert chloe["source"] == "/home/elliott/.hermes/profiles/chloe/AGENTS.md"
-    assert chloe["target"] == "/home/elliott/.hermes/profiles/chloe/AGENTS.md"
+    expected_chloe = tmp_path / "workforce-profiles" / "chloe" / "AGENTS.md"
+    assert chloe["source"] == str(expected_chloe)
+    assert chloe["target"] == str(expected_chloe)
     text = (tmp_path / "chloe" / "AGENTS.md").read_text()
     assert "may not interpret, rank, recommend" in text
     assert module.BEGIN in text
@@ -59,8 +65,11 @@ def test_canonical_compile_includes_active_chloe_and_emma(tmp_path):
 
 
 def test_planned_profile_can_use_owner_only_private_source(tmp_path):
+    organization_fixture = materialize_test_organization(
+        ROOT / "workforce" / "organization.yaml", tmp_path
+    )
     organization = yaml.safe_load(
-        (ROOT / "workforce" / "organization.yaml").read_text(encoding="utf-8")
+        organization_fixture.read_text(encoding="utf-8")
     )
     chloe = next(item for item in organization["agents"] if item["agent"] == "chloe")
     chloe["status"] = "planned"

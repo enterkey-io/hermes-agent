@@ -196,7 +196,9 @@ def compile_profiles(
             "candidate": str(candidate_path), "candidate_sha256": sha(candidate_path),
             "operation": operation,
             "original_instruction_preserved_as_exact_suffix": (
-                BLOCK_RE.sub("", candidate) == BLOCK_RE.sub("", original)
+                candidate.endswith(original)
+                if operation == "insert"
+                else BLOCK_RE.sub("", candidate) == BLOCK_RE.sub("", original)
             ),
             "protected_tree": protected,
         })

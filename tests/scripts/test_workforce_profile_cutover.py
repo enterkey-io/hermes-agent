@@ -5,6 +5,7 @@ from pathlib import Path
 from scripts.workforce_backup import create_backup, verify_backup
 from scripts.workforce_compile import compile_profiles
 from scripts.workforce_profile_cutover import apply_cutover, preflight, rollback_cutover
+from tests.workforce_test_helpers import materialize_test_organization
 
 
 ROOT = Path(__file__).parents[2]
@@ -16,8 +17,11 @@ def digest(path: Path) -> str:
 
 def test_current_manifest_is_ready_after_emma_onboarding(tmp_path: Path):
     staging = tmp_path / "staging"
+    organization = materialize_test_organization(
+        ROOT / "workforce/organization.yaml", tmp_path
+    )
     compile_profiles(
-        ROOT / "workforce/organization.yaml",
+        organization,
         ROOT / "workforce/templates/workforce-contract.md",
         staging,
     )

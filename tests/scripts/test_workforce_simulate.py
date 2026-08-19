@@ -2,6 +2,7 @@ from pathlib import Path
 
 from scripts.workforce_compile import compile_profiles
 from scripts.workforce_simulate import simulate
+from tests.workforce_test_helpers import materialize_test_organization
 
 
 ROOT = Path(__file__).parents[2]
@@ -9,13 +10,16 @@ ROOT = Path(__file__).parents[2]
 
 def test_staged_whole_workforce_passes_proactive_authority_simulation(tmp_path: Path):
     staging = tmp_path / "staging"
+    organization = materialize_test_organization(
+        ROOT / "workforce/organization.yaml", tmp_path
+    )
     compile_profiles(
-        ROOT / "workforce/organization.yaml",
+        organization,
         ROOT / "workforce/templates/workforce-contract.md",
         staging,
     )
     result = simulate(
-        ROOT / "workforce/organization.yaml",
+        organization,
         staging,
     )
     assert result["valid"] is True
