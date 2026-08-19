@@ -40,3 +40,28 @@ def test_rendered_proactive_cycles_are_complete_and_workforce_managed(tmp_path):
 def test_render_fails_closed_when_a_room_mapping_is_missing(tmp_path):
     with pytest.raises(ValueError, match="director-trading"):
         render(TEMPLATE, _room_map(tmp_path, omit="director-trading"))
+
+
+def test_render_rejects_a_malformed_room_uuid(tmp_path):
+    room_map = _room_map(tmp_path)
+    room_map.write_text(
+        room_map.read_text().replace(
+            "00000001-1111-1111-1111-111111111111",
+            "------------------------------------",
+        )
+    )
+    with pytest.raises(ValueError, match="invalid room UUID"):
+        render(TEMPLATE, room_map)
+
+
+def test_render_validates_schedule_identity_instead_of_a_fixed_count(tmp_path):
+    reduced = tmp_path / "RUNBOOK.md"
+    text = TEMPLATE.read_text()
+    start = text.index("- id: milena-executive-follow-through")
+    end = text.index("- id: product-outcome-review")
+    text = text[:start] + text[end:]
+    start = text.index("- step_key: milena_reconcile")
+    end = text.index("- step_key: director_product")
+    reduced.write_text(text[:start] + text[end:])
+    parsed = split_frontmatter(render(reduced, _room_map(tmp_path)))
+    assert len(parsed.metadata["schedules"]) == 9

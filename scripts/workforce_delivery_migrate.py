@@ -18,7 +18,11 @@ from typing import Any
 
 import yaml
 
-from scripts.workforce_delivery_inventory import build_manifest, _hidden_routes
+from scripts.workforce_delivery_inventory import (
+    _hidden_routes,
+    build_manifest,
+    load_room_map,
+)
 
 
 PLATFORM_REPLACEMENTS = (
@@ -33,14 +37,7 @@ MANAGED_DELIVERY_BLOCK = re.compile(
 
 
 def _load_room_map(path: Path) -> dict[str, str]:
-    raw = yaml.safe_load(path.read_text(encoding="utf-8-sig")) or {}
-    if not isinstance(raw, dict):
-        raise ValueError("room map must be a mapping of room names to UUIDs")
-    result = {str(key): str(value) for key, value in raw.items()}
-    for name, value in result.items():
-        if not re.fullmatch(r"[0-9a-fA-F-]{36}", value):
-            raise ValueError(f"{name}: room id is not a UUID")
-    return result
+    return load_room_map(path)
 
 
 def _verified_backup(path: Path) -> None:
@@ -118,7 +115,9 @@ def migrate(
     room_map: dict[str, str],
     apply: bool,
 ) -> dict[str, Any]:
-    manifest = build_manifest(profiles_root, organization, policy, topology)
+    manifest = build_manifest(
+        profiles_root, organization, policy, topology, room_map=room_map
+    )
     if not manifest["valid"]:
         raise ValueError("delivery manifest is not valid")
     if apply and manifest["summary"].get("registry_cron_mismatches"):

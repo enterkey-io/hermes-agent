@@ -7,9 +7,11 @@ import argparse
 import json
 from pathlib import Path
 import re
+from uuid import UUID
 
 import yaml
 
+from cron.jobs import parse_schedule
 from hermes_cli.runbook_schema import split_frontmatter
 
 
@@ -25,15 +27,59 @@ def render(template: Path, room_map_path: Path) -> str:
     def replace(match: re.Match[str]) -> str:
         room = match.group(1)
         value = str(room_map.get(room) or "")
-        if not re.fullmatch(r"[0-9a-fA-F-]{36}", value):
+        try:
+            parsed_uuid = UUID(value)
+        except (ValueError, AttributeError):
             raise ValueError(f"missing or invalid room UUID for {room}")
-        return value
+        canonical = str(parsed_uuid)
+        if value.casefold() != canonical:
+            raise ValueError(f"missing or invalid room UUID for {room}")
+        return canonical
 
     rendered = ROOM_TOKEN.sub(replace, text)
     parsed = split_frontmatter(rendered)
     schedules = parsed.metadata["schedules"]
-    if len(schedules) != 10:
-        raise ValueError("proactive cycle runbook must define exactly ten schedules")
+    steps = {
+        str(step["step_key"]): step
+        for step in parsed.metadata["steps"]
+        if isinstance(step, dict) and step.get("step_key")
+    }
+    if not schedules:
+        raise ValueError("proactive cycle runbook must define at least one schedule")
+    seen_ids: set[str] = set()
+    seen_names: set[str] = set()
+    seen_step_keys: set[str] = set()
+    for schedule in schedules:
+        schedule_id = str(schedule.get("id") or "").strip()
+        name = str(schedule.get("name") or "").strip()
+        profile = str(schedule.get("profile") or "").strip()
+        step_key = str(schedule.get("step_key") or "").strip()
+        if not schedule_id or schedule_id in seen_ids:
+            raise ValueError(f"missing or duplicate schedule id: {schedule_id!r}")
+        if not name or name in seen_names:
+            raise ValueError(f"missing or duplicate schedule name: {name!r}")
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", profile):
+            raise ValueError(f"invalid schedule profile: {profile!r}")
+        if step_key not in steps or step_key in seen_step_keys:
+            raise ValueError(f"missing or duplicate schedule step: {step_key!r}")
+        executor = str(steps[step_key].get("executor_profile") or "").strip()
+        if executor and executor != profile:
+            raise ValueError(
+                f"schedule {schedule_id!r} profile does not match step executor"
+            )
+        parse_schedule(str(schedule.get("schedule") or ""))
+        destination = str(schedule.get("deliver") or "")
+        if not destination.startswith("buzz:"):
+            raise ValueError(f"schedule {schedule_id!r} must deliver through Buzz")
+        try:
+            destination_uuid = UUID(destination.split(":", 1)[1])
+        except (ValueError, AttributeError):
+            raise ValueError(f"schedule {schedule_id!r} has an invalid Buzz destination")
+        if str(destination_uuid) != destination.split(":", 1)[1].casefold():
+            raise ValueError(f"schedule {schedule_id!r} has an invalid Buzz destination")
+        seen_ids.add(schedule_id)
+        seen_names.add(name)
+        seen_step_keys.add(step_key)
     return rendered
 
 

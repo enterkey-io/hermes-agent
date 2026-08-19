@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import re
 from typing import Any, Iterable
+from uuid import UUID
 
 import yaml
 
@@ -63,6 +64,25 @@ def _redact_destination(value: Any) -> str:
     if platform in {"telegram", "matrix", "photon", "buzz"} and ":" in text:
         return f"{platform}:<redacted-target>"
     return text
+
+
+def load_room_map(path: Path) -> dict[str, str]:
+    raw = yaml.safe_load(path.read_text(encoding="utf-8-sig")) or {}
+    if not isinstance(raw, dict):
+        raise ValueError("room map must be a mapping of room names to UUIDs")
+    result: dict[str, str] = {}
+    for key, raw_value in raw.items():
+        name = str(key)
+        value = str(raw_value)
+        try:
+            parsed = UUID(value)
+        except (ValueError, AttributeError):
+            raise ValueError(f"{name}: room id is not a UUID")
+        canonical = str(parsed)
+        if canonical != value.casefold():
+            raise ValueError(f"{name}: room id is not a canonical UUID")
+        result[name] = canonical
+    return result
 
 
 def _hidden_routes(job: dict[str, Any], profile_home: Path) -> list[dict[str, str]]:
@@ -151,6 +171,7 @@ def build_manifest(
     organization_path: Path,
     policy_path: Path,
     topology_path: Path,
+    room_map: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     org = load_organization(organization_path)
     policy = yaml.safe_load(policy_path.read_text(encoding="utf-8-sig")) or {}
@@ -194,10 +215,12 @@ def build_manifest(
             current_platform = current_raw.split(":", 1)[0].casefold()
             if mode == "team":
                 intended = f"buzz:<ROOM_UUID:{room}>"
-                staged = (
-                    None
-                    if current_platform == "buzz"
-                    else _command(profiles_root / profile, job_id, intended)
+                mapped_room = room_map.get(str(room)) if room_map is not None else None
+                expected_raw = f"buzz:{mapped_room}" if mapped_room else None
+                destination_verified = expected_raw is not None
+                destination_matches = destination_verified and current_raw == expected_raw
+                staged = None if destination_matches else _command(
+                    profiles_root / profile, job_id, intended
                 )
             elif mode == "local-only":
                 intended = "local"
@@ -217,6 +240,8 @@ def build_manifest(
             disallowed = mode == "team" and (
                 current_platform in {"telegram", "matrix", "photon", "origin", "missing"}
                 or bool(hidden)
+                or not destination_verified
+                or not destination_matches
             )
             jobs.append(
                 {
@@ -230,9 +255,17 @@ def build_manifest(
                     "workflow_slug": job.get("workflow_slug") or job.get("runbook_slug"),
                     "current_destination": _redact_destination(current_raw),
                     "destination_verification": (
-                        "compare the redacted Buzz target with the approved room map"
-                        if mode == "team" and current_platform == "buzz"
-                        else None
+                        (
+                            "verified against the approved room map"
+                            if destination_matches
+                            else "destination does not match the approved room map"
+                        )
+                        if mode == "team" and destination_verified
+                        else (
+                            "blocked pending comparison with an approved room map"
+                            if mode == "team"
+                            else None
+                        )
                     ),
                     "classification": mode,
                     "privacy": "private-personal" if mode == "private-personal" else "operational",
@@ -305,11 +338,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--organization", type=Path, required=True)
     parser.add_argument("--policy", type=Path, required=True)
     parser.add_argument("--topology", type=Path, required=True)
+    parser.add_argument("--room-map", type=Path)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
     try:
         report = build_manifest(
-            args.profiles_root, args.organization, args.policy, args.topology
+            args.profiles_root,
+            args.organization,
+            args.policy,
+            args.topology,
+            load_room_map(args.room_map) if args.room_map else None,
         )
     except (OSError, ValueError, json.JSONDecodeError, yaml.YAMLError) as exc:
         report = {"valid": False, "mutation_performed": False, "error": str(exc)}
