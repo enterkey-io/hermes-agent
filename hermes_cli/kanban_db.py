@@ -4568,12 +4568,25 @@ def recompute_ready(
     promoted = 0
     with write_txn(conn):
         todo_rows = conn.execute(
-            "SELECT id, status, consecutive_failures, max_retries "
+            "SELECT id, status, body, consecutive_failures, max_retries "
             "FROM tasks WHERE status IN ('todo', 'blocked')"
         ).fetchall()
         for row in todo_rows:
             task_id = row["id"]
             cur_status = row["status"]
+            if _task_body_forbids_launch(row["body"]):
+                if cur_status != "blocked":
+                    conn.execute(
+                        "UPDATE tasks SET status = 'blocked' WHERE id = ?",
+                        (task_id,),
+                    )
+                    _append_event(
+                        conn,
+                        task_id,
+                        "blocked",
+                        {"reason": "launch_not_authorized", "kind": "needs_input"},
+                    )
+                continue
             if cur_status == "blocked" and _has_sticky_block(conn, task_id):
                 # Worker / operator asked for explicit human intervention — do not
                 # silently auto-recover.  ``unblock_task`` is the only
@@ -4654,6 +4667,31 @@ def claim_task(
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
     with write_txn(conn):
+        guarded = conn.execute(
+            "SELECT status, body FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if (
+            guarded is not None
+            and guarded["status"] == "ready"
+            and _task_body_forbids_launch(guarded["body"])
+        ):
+            conn.execute(
+                "UPDATE tasks SET status = 'blocked' WHERE id = ? AND status = 'ready'",
+                (task_id,),
+            )
+            _append_event(
+                conn,
+                task_id,
+                "claim_rejected",
+                {"reason": "launch_not_authorized"},
+            )
+            _append_event(
+                conn,
+                task_id,
+                "blocked",
+                {"reason": "launch_not_authorized", "kind": "needs_input"},
+            )
+            return None
         # Structural invariant: never transition ready -> running while any
         # parent is not yet 'done'. This is the single enforcement point
         # regardless of which writer (create_task, link_tasks, unblock_task,

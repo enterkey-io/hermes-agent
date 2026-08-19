@@ -295,6 +295,15 @@ def record_signal(
             triage=False, initial_status="blocked",
             idempotency_key=f"workforce-signal:{stable_key}",
         )
+        kanban_db._append_event(
+            conn,
+            task_id,
+            "blocked",
+            {
+                "reason": "non-executing workforce signal awaiting Aurora decision",
+                "kind": "needs_input",
+            },
+        )
         conn.execute(
             "INSERT INTO wc_items(task_id,item_kind,stable_key,goal_ref,desired_outcome,action_class,target_ref,evidence_json,provenance_json,verification_state,current_state,created_at,updated_at) "
             "VALUES(?,?,?,?,?,?,?,?,?,'not_required','open',?,?)",

@@ -100,6 +100,13 @@ def test_semantic_signal_identity_deduplicates_new_evidence(board):
     )
     assert first["created"] is True
     assert first["status"] == "blocked"
+    assert board.execute(
+        "SELECT status FROM tasks WHERE id = ?", (first["task_id"],)
+    ).fetchone()[0] == "blocked"
+    assert kanban_db.recompute_ready(board) == 0
+    assert board.execute(
+        "SELECT status FROM tasks WHERE id = ?", (first["task_id"],)
+    ).fetchone()[0] == "blocked"
     assert second["created"] is False
     assert first["task_id"] == second["task_id"]
     assert board.execute("SELECT COUNT(*) FROM wc_items WHERE item_kind='signal'").fetchone()[0] == 1

@@ -97,6 +97,27 @@ def test_nonexecuting_signal_cannot_be_specified_or_decomposed(kanban_home):
     assert child_count == 0
 
 
+def test_nonexecuting_signal_cannot_be_claimed_even_if_promoted(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="signal only",
+            body=json.dumps({"kind": "workforce_signal", "launch_authorized": False}),
+            assignee="aurora",
+        )
+        assert kb.get_task(conn, tid).status == "ready"
+        claimed = kb.claim_task(conn, tid)
+        task = kb.get_task(conn, tid)
+        events = kb.list_events(conn, tid)
+    assert claimed is None
+    assert task.status == "blocked"
+    assert any(
+        event.kind == "claim_rejected"
+        and (event.payload or {}).get("reason") == "launch_not_authorized"
+        for event in events
+    )
+
+
 def test_decompose_records_audit_comment_and_event(kanban_home):
     with kb.connect() as conn:
         tid = _create_triage(conn)
@@ -115,5 +136,3 @@ def test_decompose_records_audit_comment_and_event(kanban_home):
 
     assert any("Decomposed into" in (c.body or "") for c in comments)
     assert any(ev.kind == "decomposed" for ev in events)
-
-
