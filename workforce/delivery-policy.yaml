@@ -1,6 +1,7 @@
 schema_version: 1
 profile_defaults:
   aurora: {mode: team, room: admin, audience: executive}
+  chloe: {mode: team, room: admin, audience: executive}
   brenna: {mode: team, room: executive-support, audience: executive-support}
   milena: {mode: team, room: executive-support, audience: executive-support}
   emily: {mode: team, room: director-product, audience: product-leadership}
