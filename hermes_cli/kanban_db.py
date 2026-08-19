@@ -102,6 +102,17 @@ _log = logging.getLogger(__name__)
 VALID_STATUSES = {"triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"}
 VALID_INITIAL_STATUSES = {"running", "blocked"}
 
+
+def _task_body_forbids_launch(body: Optional[str]) -> bool:
+    """Recognize a structured, explicit non-execution invariant."""
+    if not isinstance(body, str) or not body.strip():
+        return False
+    try:
+        payload = json.loads(body)
+    except (TypeError, ValueError):
+        return False
+    return isinstance(payload, dict) and payload.get("launch_authorized") is False
+
 # Typed block reasons. Distinguishes the two fundamentally different things a
 # worker (or human) means by "blocked", so each can be routed differently
 # instead of all landing in one undifferentiated ``blocked`` bucket that a cron
@@ -4557,12 +4568,25 @@ def recompute_ready(
     promoted = 0
     with write_txn(conn):
         todo_rows = conn.execute(
-            "SELECT id, status, consecutive_failures, max_retries "
+            "SELECT id, status, body, consecutive_failures, max_retries "
             "FROM tasks WHERE status IN ('todo', 'blocked')"
         ).fetchall()
         for row in todo_rows:
             task_id = row["id"]
             cur_status = row["status"]
+            if _task_body_forbids_launch(row["body"]):
+                if cur_status != "blocked":
+                    conn.execute(
+                        "UPDATE tasks SET status = 'blocked' WHERE id = ?",
+                        (task_id,),
+                    )
+                    _append_event(
+                        conn,
+                        task_id,
+                        "blocked",
+                        {"reason": "launch_not_authorized", "kind": "needs_input"},
+                    )
+                continue
             if cur_status == "blocked" and _has_sticky_block(conn, task_id):
                 # Worker / operator asked for explicit human intervention — do not
                 # silently auto-recover.  ``unblock_task`` is the only
@@ -4643,6 +4667,31 @@ def claim_task(
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
     with write_txn(conn):
+        guarded = conn.execute(
+            "SELECT status, body FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if (
+            guarded is not None
+            and guarded["status"] == "ready"
+            and _task_body_forbids_launch(guarded["body"])
+        ):
+            conn.execute(
+                "UPDATE tasks SET status = 'blocked' WHERE id = ? AND status = 'ready'",
+                (task_id,),
+            )
+            _append_event(
+                conn,
+                task_id,
+                "claim_rejected",
+                {"reason": "launch_not_authorized"},
+            )
+            _append_event(
+                conn,
+                task_id,
+                "blocked",
+                {"reason": "launch_not_authorized", "kind": "needs_input"},
+            )
+            return None
         # Structural invariant: never transition ready -> running while any
         # parent is not yet 'done'. This is the single enforcement point
         # regardless of which writer (create_task, link_tasks, unblock_task,
@@ -7234,6 +7283,8 @@ def specify_triage_task(
         ).fetchone()
         if existing is None:
             return False
+        if _task_body_forbids_launch(existing["body"]):
+            return False
         sets: list[str] = ["status = 'todo'"]
         params: list[Any] = []
         changed_fields: list[str] = []
@@ -7383,13 +7434,15 @@ def decompose_triage_task(
     child_ids: list[str] = []
     with write_txn(conn):
         root_row = conn.execute(
-            "SELECT id, status, tenant, workspace_kind, workspace_path "
+            "SELECT id, status, tenant, workspace_kind, workspace_path, body "
             "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
         if root_row is None:
             return None
         if root_row["status"] != "triage":
+            return None
+        if _task_body_forbids_launch(root_row["body"]):
             return None
         tenant = root_row["tenant"]
         # Children inherit the root's workspace by default so a fan-out

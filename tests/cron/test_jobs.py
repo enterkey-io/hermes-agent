@@ -870,6 +870,32 @@ class TestEnabledToolsets:
         job = create_job(prompt="monitor", schedule="every 1h", enabled_toolsets=["web", "terminal"])
         assert job["enabled_toolsets"] == ["web", "terminal"]
 
+    def test_runtime_budgets_stored_and_validated(self, tmp_cron_dir):
+        budget = {
+            "max_calls": 8,
+            "max_writes": 1,
+            "max_detail_reads": 3,
+            "max_list_items": 20,
+            "allowed_tools": ["kanban_list", "workforce_signal"],
+        }
+        job = create_job(
+            prompt="bounded",
+            schedule="every 1h",
+            max_iterations=12,
+            runtime_tool_budget=budget,
+        )
+        assert job["max_iterations"] == 12
+        assert job["runtime_tool_budget"] == budget
+
+        with pytest.raises(ValueError, match="max_iterations"):
+            create_job(prompt="bad", schedule="every 1h", max_iterations=0)
+        with pytest.raises(ValueError, match="allowed_tools"):
+            create_job(
+                prompt="bad",
+                schedule="every 1h",
+                runtime_tool_budget={**budget, "allowed_tools": []},
+            )
+
 
 class TestMarkJobRunConcurrency:
     """Regression tests for concurrent parallel job state writes.

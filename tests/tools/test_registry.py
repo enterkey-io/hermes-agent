@@ -14,6 +14,10 @@ from tools.registry import (
     discover_builtin_tools,
     tool_error,
 )
+from tools.runtime_tool_budget import (
+    activate_runtime_tool_budget,
+    reset_runtime_tool_budget,
+)
 
 
 def _dummy_handler(args, **kwargs):
@@ -39,6 +43,54 @@ class TestRegisterAndDispatch:
         )
         result = json.loads(reg.dispatch("alpha", {}))
         assert result == {"ok": True}
+
+    def test_runtime_budget_enforces_allowlist_counts_and_list_clamp(self):
+        reg = ToolRegistry()
+        captured = []
+
+        def handler(args, **kwargs):
+            captured.append(args)
+            return json.dumps({"ok": True})
+
+        for name in ("kanban_list", "kanban_show", "workforce_signal", "kanban_create"):
+            reg.register(
+                name=name,
+                toolset="bounded",
+                schema=_make_schema(name),
+                handler=handler,
+            )
+        token, state = activate_runtime_tool_budget({
+            "max_calls": 4,
+            "max_writes": 1,
+            "max_detail_reads": 1,
+            "max_list_items": 20,
+            "allowed_tools": ["kanban_list", "kanban_show", "workforce_signal"],
+        })
+        try:
+            assert json.loads(reg.dispatch("kanban_list", {"limit": 100}))["ok"] is True
+            assert captured[-1]["limit"] == 20
+            assert json.loads(reg.dispatch("kanban_show", {"task_id": "t1"}))["ok"] is True
+            detail_denial = json.loads(reg.dispatch("kanban_show", {"task_id": "t2"}))
+            assert detail_denial["error_type"] == "runtime_tool_budget_exceeded"
+            assert json.loads(reg.dispatch("workforce_signal", {}))["ok"] is True
+            write_denial = json.loads(reg.dispatch("workforce_signal", {}))
+            assert write_denial["error_type"] == "runtime_tool_budget_exceeded"
+            allowlist_denial = json.loads(reg.dispatch("kanban_create", {}))
+            assert allowlist_denial["error_type"] == "runtime_tool_budget_exceeded"
+        finally:
+            reset_runtime_tool_budget(token)
+
+        assert state.snapshot() == {
+            "calls": 3,
+            "writes": 1,
+            "detail_reads": 1,
+            "denied": 3,
+            "max_calls": 4,
+            "max_writes": 1,
+            "max_detail_reads": 1,
+            "max_list_items": 20,
+        }
+        assert json.loads(reg.dispatch("kanban_create", {}))["ok"] is True
 
 
     def test_cross_mcp_toolsets_do_not_overwrite_atomically(self, caplog):

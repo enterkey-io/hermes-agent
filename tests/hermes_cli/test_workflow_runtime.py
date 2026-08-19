@@ -137,6 +137,29 @@ def test_sync_runbook_cron_jobs_updates_existing_job() -> None:
     assert "Collect updated context" in second["prompt"]
 
 
+def test_sync_runbook_cron_jobs_persists_runtime_budgets() -> None:
+    _save_runbook()
+    metadata = _metadata()
+    metadata["runtime"]["max_iterations"] = 12
+    metadata["runtime"]["tool_budget"] = {
+        "max_calls": 8,
+        "max_writes": 1,
+        "max_detail_reads": 3,
+        "max_list_items": 20,
+        "allowed_tools": ["kanban_list", "workforce_signal"],
+    }
+    runbook_store.save_runbook(
+        metadata,
+        "# Daily Brief\n\n## Procedure\n\n1. Collect context.\n",
+        approved_by="dashboard",
+    )
+
+    job = sync_runbook_cron_jobs("daily-brief")[0]
+
+    assert job["max_iterations"] == 12
+    assert job["runtime_tool_budget"] == metadata["runtime"]["tool_budget"]
+
+
 def test_link_existing_cron_job_only_adds_registry_identity() -> None:
     _save_runbook()
     from cron import jobs as cron_jobs

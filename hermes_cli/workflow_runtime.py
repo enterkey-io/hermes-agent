@@ -222,6 +222,7 @@ def _sync_one_schedule(
     job_name = str(schedule.get("name") or metadata["title"])
     deliver = schedule.get("deliver")
     enabled = bool(schedule.get("enabled", True))
+    runtime = metadata.get("runtime") if isinstance(metadata.get("runtime"), dict) else {}
     payload = {
         "prompt": prompt,
         "schedule": schedule_text,
@@ -234,6 +235,10 @@ def _sync_one_schedule(
         "runbook_slug": metadata["slug"],
         "track_workflow_status": True,
         "enabled_toolsets": schedule.get("enabled_toolsets"),
+        "max_iterations": schedule.get("max_iterations", runtime.get("max_iterations")),
+        "runtime_tool_budget": schedule.get(
+            "runtime_tool_budget", runtime.get("tool_budget")
+        ),
         "workdir": schedule.get("workdir"),
         "provider": schedule.get("provider"),
         "model": schedule.get("model"),
