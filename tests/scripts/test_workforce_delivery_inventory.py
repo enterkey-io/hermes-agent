@@ -108,6 +108,85 @@ def test_lift_and_meeting_prep_route_to_executive_support(tmp_path):
     assert by_profile["grace"]["quiet_success"] is True
 
 
+def test_existing_buzz_delivery_is_not_reported_as_an_unapplied_migration(tmp_path):
+    _write_jobs(
+        tmp_path,
+        "main",
+        [{
+            "id": "job-1",
+            "name": "Operations report",
+            "enabled": True,
+            "deliver": "buzz:11111111-1111-1111-1111-111111111111",
+            "workflow_id": "wf-1",
+        }],
+    )
+    report = build_manifest(
+        tmp_path,
+        ROOT / "workforce" / "organization.yaml",
+        ROOT / "workforce" / "delivery-policy.yaml",
+        ROOT / "workforce" / "buzz-topology.yaml",
+        room_map={
+            "director-operations": "11111111-1111-1111-1111-111111111111"
+        },
+    )
+    job = report["jobs"][0]
+    assert job["migration_required"] is False
+    assert job["staged_change_not_executed"] is None
+    assert job["destination_verification"]
+    assert report["summary"]["migration_required"] == 0
+
+
+def test_existing_buzz_delivery_stays_pending_without_a_room_map(tmp_path):
+    _write_jobs(
+        tmp_path,
+        "main",
+        [{
+            "id": "job-1",
+            "name": "Operations report",
+            "enabled": True,
+            "deliver": "buzz:11111111-1111-1111-1111-111111111111",
+            "workflow_id": "wf-1",
+        }],
+    )
+    report = build_manifest(
+        tmp_path,
+        ROOT / "workforce" / "organization.yaml",
+        ROOT / "workforce" / "delivery-policy.yaml",
+        ROOT / "workforce" / "buzz-topology.yaml",
+    )
+    job = report["jobs"][0]
+    assert job["migration_required"] is True
+    assert job["validation_blocked_until_migrated"] is True
+    assert "blocked pending" in job["destination_verification"]
+
+
+def test_wrong_buzz_room_is_migration_pending_with_an_approved_map(tmp_path):
+    _write_jobs(
+        tmp_path,
+        "main",
+        [{
+            "id": "job-1",
+            "name": "Operations report",
+            "enabled": True,
+            "deliver": "buzz:99999999-9999-9999-9999-999999999999",
+            "workflow_id": "wf-1",
+        }],
+    )
+    report = build_manifest(
+        tmp_path,
+        ROOT / "workforce" / "organization.yaml",
+        ROOT / "workforce" / "delivery-policy.yaml",
+        ROOT / "workforce" / "buzz-topology.yaml",
+        room_map={
+            "director-operations": "11111111-1111-1111-1111-111111111111"
+        },
+    )
+    job = report["jobs"][0]
+    assert job["migration_required"] is True
+    assert job["validation_blocked_until_migrated"] is True
+    assert "does not match" in job["destination_verification"]
+
+
 def test_weekday_one_thing_routes_to_exec_support_but_personal_checkin_stays_private(tmp_path):
     _write_jobs(tmp_path, "grace", [
         {"id": "019c9f963374", "name": "LIFT One Thing", "enabled": True, "deliver": "buzz:old", "workflow_id": "wf-morning"},
@@ -185,3 +264,54 @@ def test_archive_only_paperclip_prohibition_is_not_an_active_route(tmp_path):
     job = report["jobs"][0]
     assert job["legacy_paperclip_disposition"].startswith("archive-only")
     assert report["summary"]["active_paperclip_routes"] == 0
+
+
+def test_backup_only_paperclip_language_is_not_an_active_route(tmp_path):
+    _write_jobs(
+        tmp_path,
+        "alina",
+        [{
+            "id": "job-1",
+            "name": "archive inventory",
+            "enabled": True,
+            "deliver": "buzz:11111111-1111-1111-1111-111111111111",
+            "prompt": (
+                "Paperclip is read-only inventory/archive only. "
+                "Paperclip is backup-only archive."
+            ),
+            "workflow_id": "wf-1",
+        }],
+    )
+    report = build_manifest(
+        tmp_path,
+        ROOT / "workforce" / "organization.yaml",
+        ROOT / "workforce" / "delivery-policy.yaml",
+        ROOT / "workforce" / "buzz-topology.yaml",
+    )
+    assert report["summary"]["active_paperclip_routes"] == 0
+    assert report["jobs"][0]["legacy_paperclip_disposition"].startswith("archive-only")
+
+
+def test_backup_marker_for_another_route_does_not_hide_active_paperclip(tmp_path):
+    _write_jobs(
+        tmp_path,
+        "main",
+        [{
+            "id": "job-1",
+            "name": "active Paperclip route",
+            "enabled": True,
+            "deliver": "origin",
+            "prompt": "Create the task in Paperclip; use email as backup only.",
+            "workflow_id": "wf-1",
+        }],
+    )
+    report = build_manifest(
+        tmp_path,
+        ROOT / "workforce" / "organization.yaml",
+        ROOT / "workforce" / "delivery-policy.yaml",
+        ROOT / "workforce" / "buzz-topology.yaml",
+    )
+    assert report["summary"]["active_paperclip_routes"] == 1
+    assert report["jobs"][0]["legacy_paperclip_disposition"] == (
+        "remove-active-paperclip-route"
+    )

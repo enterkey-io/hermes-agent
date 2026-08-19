@@ -1,0 +1,11 @@
+[Unit]
+Description=Recover Workforce Control events missed between dispatcher ticks
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Unit=hermes-workforce-control-observer.service
+
+[Install]
+WantedBy=timers.target
