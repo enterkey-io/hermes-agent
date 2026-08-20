@@ -111,8 +111,8 @@ def test_list_filters_tasks(monkeypatch, worker_env):
     assert tenant_ids == [c]
 
 
-def test_list_workforce_reporting_line_is_host_scoped(monkeypatch, worker_env):
-    """A director cannot drift into another leader's lane during a bounded cycle."""
+def test_list_workforce_outcomes_use_explicit_root_ownership(monkeypatch, worker_env):
+    """Assignments and cross-department execution are not outcome ownership."""
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     from types import SimpleNamespace
     from hermes_cli import kanban_db as kb
@@ -134,35 +134,90 @@ def test_list_workforce_reporting_line_is_host_scoped(monkeypatch, worker_env):
 
     conn = kb.connect()
     try:
-        own = kb.create_task(conn, title="director", assignee="director", priority=2)
-        report = kb.create_task(conn, title="worker", assignee="worker", priority=3)
+        ordinary = kb.create_task(conn, title="ordinary", assignee="director", priority=8)
+        cross_team = kb.create_task(conn, title="cross-team", assignee="worker", priority=9)
+        own = kb.create_task(
+            conn, title="director outcome", assignee="director", priority=2, triage=True,
+        )
+        report = kb.create_task(
+            conn, title="report outcome", assignee="worker", priority=3, triage=True,
+        )
+        assert kb.decompose_triage_task(
+            conn,
+            own,
+            root_assignee="orchestrator",
+            children=[{"title": "own execution", "assignee": "worker", "parents": []}],
+            author="test",
+            auto_promote=False,
+        )
+        assert kb.decompose_triage_task(
+            conn,
+            report,
+            root_assignee="orchestrator",
+            children=[{"title": "report execution", "assignee": "other", "parents": []}],
+            author="test",
+            auto_promote=False,
+        )
         outside = kb.create_task(conn, title="outside", assignee="other", priority=9)
     finally:
         conn.close()
 
     result = json.loads(kt._handle_list({
-        "workforce_scope": "reporting_line", "status": "ready", "limit": 12,
+        "workforce_scope": "portfolio_outcomes", "status": "todo", "limit": 12,
     }))
     ids = [task["id"] for task in result["tasks"]]
     assert ids == [report, own]
     assert outside not in ids
+    assert ordinary not in ids
+    assert cross_team not in ids
     assert result["scope_profiles"] == ["director", "worker"]
 
     error = json.loads(kt._handle_list({
-        "workforce_scope": "reporting_line", "assignee": "other",
+        "workforce_scope": "portfolio_outcomes", "assignee": "other",
     }))
     assert "mutually exclusive" in error["error"]
 
     self_result = json.loads(kt._handle_list({
-        "workforce_scope": "self", "status": "ready", "limit": 12,
+        "workforce_scope": "owned_outcomes", "status": "todo", "limit": 12,
     }))
     assert [task["id"] for task in self_result["tasks"]] == [own]
     assert self_result["scope_profiles"] == ["director"]
 
     list_properties = kt.KANBAN_LIST_SCHEMA["parameters"]["properties"]
     show_properties = kt.KANBAN_SHOW_SCHEMA["parameters"]["properties"]
-    assert list_properties["workforce_scope"]["enum"] == ["self", "reporting_line"]
+    assert list_properties["workforce_scope"]["enum"] == [
+        "owned_outcomes", "portfolio_outcomes",
+    ]
     assert "workforce_scope" not in show_properties
+
+
+def test_owned_outcomes_fail_closed_for_legacy_decomposition(monkeypatch, worker_env):
+    """A legacy root without owner evidence is never guessed from children."""
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    from types import SimpleNamespace
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    actor = SimpleNamespace(
+        agent="director", profile_path="/profiles/director", direct_reports=()
+    )
+    monkeypatch.setattr(
+        "hermes_cli.workforce_org.active_workforce_agent", lambda: actor
+    )
+    monkeypatch.setattr(
+        "hermes_cli.workforce_org.load_organization",
+        lambda: SimpleNamespace(get=lambda _agent_id: actor),
+    )
+    conn = kb.connect()
+    try:
+        root = kb.create_task(conn, title="legacy root", assignee="orchestrator")
+        kb._append_event(conn, root, "decomposed", {"child_ids": ["legacy-child"]})
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = json.loads(kt._handle_list({"workforce_scope": "owned_outcomes"}))
+    assert result["tasks"] == []
 
 
 def test_archive_stale_is_orchestrator_only_and_evidence_grounded(

@@ -3723,6 +3723,59 @@ def list_tasks(
     return [Task.from_row(r) for r in rows]
 
 
+def list_owned_outcome_tasks(
+    conn: sqlite3.Connection,
+    *,
+    owner_profiles: Iterable[str],
+    status: Optional[str] = None,
+    tenant: Optional[str] = None,
+    include_archived: bool = False,
+    limit: int = 100,
+) -> list[Task]:
+    """List canonical decomposed roots by explicit outcome ownership.
+
+    Assignment is execution routing, not outcome ownership. The decomposer
+    records the root's pre-fan-out assignee in its durable ``decomposed``
+    event before handing orchestration to the configured root profile.
+    Legacy events without owner evidence are excluded rather than guessed
+    from child assignees, which could be temporary cross-department workers.
+    """
+    owners = sorted({
+        canonical
+        for value in owner_profiles
+        if (canonical := _canonical_assignee(value))
+    })
+    if not owners:
+        return []
+    if status is not None and status not in VALID_STATUSES:
+        raise ValueError(f"status must be one of {sorted(VALID_STATUSES)}")
+    clauses = [
+        "e.kind = 'decomposed'",
+        "json_extract(CASE WHEN json_valid(e.payload) THEN e.payload ELSE '{}' END, "
+        "'$.outcome_owner_profile') IN ("
+        + ",".join("?" for _ in owners)
+        + ")",
+    ]
+    params: list[Any] = list(owners)
+    if status is not None:
+        clauses.append("t.status = ?")
+        params.append(status)
+    if tenant is not None:
+        clauses.append("t.tenant = ?")
+        params.append(tenant)
+    if not include_archived and status != "archived":
+        clauses.append("t.status != 'archived'")
+    params.append(int(limit))
+    rows = conn.execute(
+        "SELECT DISTINCT t.* FROM tasks t "
+        "JOIN task_events e ON e.task_id = t.id "
+        f"WHERE {' AND '.join(clauses)} "
+        "ORDER BY t.priority DESC, t.created_at ASC, t.id ASC LIMIT ?",
+        tuple(params),
+    ).fetchall()
+    return [Task.from_row(row) for row in rows]
+
+
 def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) -> bool:
     """Assign or reassign a task.  Returns True on success.
 
@@ -7434,7 +7487,7 @@ def decompose_triage_task(
     child_ids: list[str] = []
     with write_txn(conn):
         root_row = conn.execute(
-            "SELECT id, status, tenant, workspace_kind, workspace_path, body "
+            "SELECT id, status, tenant, workspace_kind, workspace_path, body, assignee "
             "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
@@ -7451,6 +7504,10 @@ def decompose_triage_task(
         # override with its own 'workspace_kind' / 'workspace_path'.
         root_ws_kind = root_row["workspace_kind"] or "scratch"
         root_ws_path = root_row["workspace_path"]
+        # Preserve the explicitly assigned accountable owner before the root
+        # is handed to a central orchestrator. Child assignments are execution
+        # routing and must never be used to infer department ownership.
+        outcome_owner_profile = _canonical_assignee(root_row["assignee"])
 
         # Create children. Status is 'todo' regardless of parents — we
         # link them under the root AFTER creation so the dispatcher
@@ -7563,6 +7620,7 @@ def decompose_triage_task(
             {
                 "child_ids": child_ids,
                 "root_assignee": root_assignee,
+                "outcome_owner_profile": outcome_owner_profile,
             },
         )
 
