@@ -1,5 +1,5 @@
 schema_version: 1
-contract_version: 2026-08-20.1
+contract_version: 2026-08-20.2
 retained_owner: elliott
 execution_owner: aurora
 rules:
@@ -41,7 +41,17 @@ rules:
     preconditions: [high confidence, fresh evidence, no retained approval]
   activate_production:
     owner: elliott
-    effect: separate explicit authorization required
+    effect: separate explicit authorization required for a new production launch or a protected action category
+  activate_routine_internal_repair:
+    reviewer: aurora
+    operator: alina
+    preconditions:
+      - an already-authorized outcome
+      - exact reviewed proposal bytes
+      - independent QA evidence
+      - routine_internal_repair or reversible_internal_workflow_schedule_control policy class
+      - no protected action category
+      - audited signed reviewer attestation
 responsibilities:
   requirements_priority_acceptance: aurora
   implementation: sloane

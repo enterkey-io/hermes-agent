@@ -42,7 +42,9 @@ generated contract candidates together.
 - Root: shared-system, security, and production integration.
 - Alina: host install, service operation, and approved activation.
 - Department directors: domain validation.
-- Elliott: retained approvals and production activation.
+- Elliott: retained approvals for protected actions and new production launches.
+  Exact, reviewed routine internal repairs may instead follow Aurora's signed
+  internal-review path and Alina's bounded activation procedure.
 
 Direct contact never changes these lines. A specialist can report a material
 fact, blocker, contradiction, or unsafe condition upward, but cannot convert

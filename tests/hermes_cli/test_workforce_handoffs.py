@@ -45,6 +45,27 @@ def test_cross_director_handoff_requires_aurora(conn):
         )
 
 
+@pytest.mark.parametrize(
+    ("source", "target"),
+    [("milena", "grace"), ("emily", "aurora"), ("sage", "emily"), ("grace", "aurora")],
+)
+def test_reporting_line_and_executive_peer_handoffs_route_internally(conn, source, target):
+    now = int(time.time())
+    created = create_handoff(
+        conn,
+        source_agent=source,
+        target_agent=target,
+        expected_outcome="Resolve one internal dependency",
+        acceptance_test="The accountable manager records a disposition",
+        evidence_references=["kanban:t_source"],
+        acknowledgment_deadline=_iso(now + 60),
+        checkpoint_at=_iso(now + 120),
+        organization=ORG,
+    )
+    assert created["source_agent"] == source
+    assert created["target_agent"] == target
+
+
 def test_receiver_must_acknowledge_and_stalled_checkpoint_notifies_aurora_chloe(conn):
     now = int(time.time())
     created = create_handoff(

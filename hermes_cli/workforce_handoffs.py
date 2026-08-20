@@ -39,7 +39,12 @@ def _body(task) -> dict[str, Any]:
 def _authorized_route(org: WorkforceOrganization, source: str, target: str) -> None:
     sender = org.validate_execution_profile(source)
     receiver = org.validate_execution_profile(target)
-    if sender.agent == "aurora" or receiver.manager == sender.agent:
+    if (
+        sender.agent == "aurora"
+        or receiver.manager == sender.agent
+        or sender.manager == receiver.agent
+        or {sender.agent, receiver.agent} == {"aurora", "grace"}
+    ):
         return
     raise ValueError("cross-team handoffs and non-report assignments must route through Aurora")
 
