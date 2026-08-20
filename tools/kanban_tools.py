@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from pathlib import Path
 from typing import Any, Optional
 
 from agent.redact import redact_sensitive_text
@@ -597,6 +598,11 @@ def _handle_list(args: dict, **kw) -> str:
     if guard:
         return guard
     assignee = args.get("assignee")
+    workforce_scope = args.get("workforce_scope")
+    if workforce_scope not in (None, "reporting_line"):
+        return tool_error("workforce_scope must be reporting_line")
+    if workforce_scope and assignee:
+        return tool_error("assignee and workforce_scope are mutually exclusive")
     status = args.get("status")
     tenant = args.get("tenant")
     include_archived, bool_error = _parse_bool_arg(args, "include_archived")
@@ -622,17 +628,47 @@ def _handle_list(args: dict, **kw) -> str:
             promoted = kb.recompute_ready(conn)
             # Fetch one extra row so model-facing output can report that
             # a bounded listing was truncated without dumping the board.
-            rows = kb.list_tasks(
-                conn,
-                assignee=assignee,
-                status=status,
-                tenant=tenant,
-                include_archived=include_archived,
-                limit=limit + 1,
-            )
+            scope_profiles = None
+            if workforce_scope == "reporting_line":
+                from hermes_cli.workforce_org import active_workforce_agent, load_organization
+
+                org = load_organization()
+                actor = active_workforce_agent()
+                pending = [actor.agent]
+                seen: set[str] = set()
+                scope_profiles = []
+                while pending:
+                    agent_id = pending.pop(0)
+                    if agent_id in seen:
+                        continue
+                    seen.add(agent_id)
+                    agent = org.get(agent_id)
+                    if agent.profile_path:
+                        scope_profiles.append(Path(agent.profile_path).name)
+                    pending.extend(agent.direct_reports)
+                rows = []
+                for profile in scope_profiles:
+                    rows.extend(kb.list_tasks(
+                        conn,
+                        assignee=profile,
+                        status=status,
+                        tenant=tenant,
+                        include_archived=include_archived,
+                        limit=limit + 1,
+                    ))
+                rows.sort(key=lambda task: (-task.priority, task.created_at, task.id))
+            else:
+                rows = kb.list_tasks(
+                    conn,
+                    assignee=assignee,
+                    status=status,
+                    tenant=tenant,
+                    include_archived=include_archived,
+                    limit=limit + 1,
+                )
             truncated = len(rows) > limit
             tasks = rows[:limit]
-            return json.dumps({
+            result = {
                 "tasks": [_task_summary_dict(kb, conn, t) for t in tasks],
                 "count": len(tasks),
                 "limit": limit,
@@ -642,7 +678,11 @@ def _handle_list(args: dict, **kw) -> str:
                     if truncated and limit < KANBAN_LIST_MAX_LIMIT else None
                 ),
                 "promoted": promoted,
-            })
+            }
+            if scope_profiles is not None:
+                result["workforce_scope"] = "reporting_line"
+                result["scope_profiles"] = scope_profiles
+            return json.dumps(result)
         finally:
             conn.close()
     except ValueError as e:
@@ -1818,6 +1858,14 @@ KANBAN_LIST_SCHEMA = {
                 "description": "Optional maximum rows to return (default 50, max 200).",
             },
             "board": _board_schema_prop(),
+            "workforce_scope": {
+                "type": "string",
+                "enum": ["reporting_line"],
+                "description": (
+                    "Host-resolved current workforce profile plus every direct and "
+                    "indirect report. Mutually exclusive with assignee."
+                ),
+            },
         },
         "required": [],
     },

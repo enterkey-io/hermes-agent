@@ -111,6 +111,54 @@ def test_list_filters_tasks(monkeypatch, worker_env):
     assert tenant_ids == [c]
 
 
+def test_list_workforce_reporting_line_is_host_scoped(monkeypatch, worker_env):
+    """A director cannot drift into another leader's lane during a bounded cycle."""
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    from types import SimpleNamespace
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    agents = {
+        "director": SimpleNamespace(
+            agent="director", profile_path="/profiles/director", direct_reports=("worker",)
+        ),
+        "worker": SimpleNamespace(
+            agent="worker", profile_path="/profiles/worker", direct_reports=()
+        ),
+    }
+    org = SimpleNamespace(get=lambda agent_id: agents[agent_id])
+    monkeypatch.setattr(
+        "hermes_cli.workforce_org.active_workforce_agent", lambda: agents["director"]
+    )
+    monkeypatch.setattr("hermes_cli.workforce_org.load_organization", lambda: org)
+
+    conn = kb.connect()
+    try:
+        own = kb.create_task(conn, title="director", assignee="director", priority=2)
+        report = kb.create_task(conn, title="worker", assignee="worker", priority=3)
+        outside = kb.create_task(conn, title="outside", assignee="other", priority=9)
+    finally:
+        conn.close()
+
+    result = json.loads(kt._handle_list({
+        "workforce_scope": "reporting_line", "status": "ready", "limit": 12,
+    }))
+    ids = [task["id"] for task in result["tasks"]]
+    assert ids == [report, own]
+    assert outside not in ids
+    assert result["scope_profiles"] == ["director", "worker"]
+
+    error = json.loads(kt._handle_list({
+        "workforce_scope": "reporting_line", "assignee": "other",
+    }))
+    assert "mutually exclusive" in error["error"]
+
+    list_properties = kt.KANBAN_LIST_SCHEMA["parameters"]["properties"]
+    show_properties = kt.KANBAN_SHOW_SCHEMA["parameters"]["properties"]
+    assert list_properties["workforce_scope"]["enum"] == ["reporting_line"]
+    assert "workforce_scope" not in show_properties
+
+
 def test_archive_stale_is_orchestrator_only_and_evidence_grounded(
     monkeypatch, worker_env
 ):
