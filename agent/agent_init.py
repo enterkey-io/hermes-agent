@@ -504,6 +504,7 @@ def init_agent(
     max_iterations: int = 90,  # Default tool-calling iterations (shared with subagents)
     enabled_toolsets: List[str] = None,
     disabled_toolsets: List[str] = None,
+    eager_tool_names: set[str] | frozenset[str] | None = None,
     save_trajectories: bool = False,
     verbose_logging: bool = False,
     quiet_mode: bool = False,
@@ -1505,6 +1506,7 @@ def init_agent(
     agent.tools = _ra().get_tool_definitions(
         enabled_toolsets=enabled_toolsets,
         disabled_toolsets=disabled_toolsets,
+        eager_tool_names=eager_tool_names,
         quiet_mode=agent.quiet_mode,
         execution_context=agent.execution_context,
         execution_owner=agent,

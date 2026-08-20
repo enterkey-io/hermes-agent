@@ -191,6 +191,23 @@ class TestAssembly:
         assert not result.activated
         assert {t["function"]["name"] for t in result.tool_defs} == {"terminal", "read_file"}
 
+    def test_selected_deferred_schema_can_be_forced_eager(self):
+        from tools.registry import registry
+        from tools.tool_search import assemble_tool_defs, ToolSearchConfig
+
+        name = "mcp_bounded_eager_probe"
+        self._register_mcp(name)
+        definitions = [_td("terminal", "Run shell"), *registry.get_definitions({name})]
+        result = assemble_tool_defs(
+            definitions,
+            context_length=200_000,
+            config=ToolSearchConfig.from_raw({"enabled": "on"}),
+            eager_tool_names={name},
+        )
+        names = {tool["function"]["name"] for tool in result.tool_defs}
+        assert name in names
+        assert "tool_describe" not in names
+
     @staticmethod
     def _register_mcp(name):
         from tools.registry import registry

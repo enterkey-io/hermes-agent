@@ -16,7 +16,7 @@ from hermes_cli.runbook_schema import split_frontmatter
 
 
 ROOM_TOKEN = re.compile(r"<ROOM_UUID:([a-z0-9-]+)>")
-BOUNDED_TOOLSETS = ["kanban", "workforce", "runbook", "no_mcp"]
+BOUNDED_TOOLSETS = ["kanban", "workforce", "no_mcp"]
 BOUNDED_MAX_ITERATIONS = 8
 BOUNDED_TOOL_BUDGET = {
     "max_calls": 6,
@@ -27,8 +27,7 @@ BOUNDED_TOOL_BUDGET = {
         "kanban_list", "kanban_show", "kanban_complete", "kanban_block",
         "kanban_request_review", "kanban_request_changes", "kanban_comment",
         "kanban_archive_stale", "kanban_attachments", "workforce_signal",
-        "workforce_handoff", "runbook_list",
-        "runbook_search", "runbook_get", "runbook_validate", "runbook_runs",
+        "workforce_handoff",
         "workforce_goals", "workforce_vision", "workforce_observe_buzz",
     ],
 }

@@ -554,6 +554,26 @@ class TestRunJobSessionPersistence:
             "memory toolset should be disabled in cron to match skip_memory=True"
         )
 
+    def test_runtime_budget_tools_are_exposed_eagerly(self, tmp_path):
+        job = {
+            "id": "bounded-tools-job",
+            "name": "bounded tools",
+            "prompt": "hello",
+            "runtime_tool_budget": {
+                "max_calls": 2,
+                "max_writes": 1,
+                "max_detail_reads": 1,
+                "max_list_items": 5,
+                "allowed_tools": ["workforce_goals", "kanban_list"],
+            },
+        }
+        with self._run_job_patches(tmp_path) as (_fake_db, mock_agent_cls):
+            run_job(job)
+
+        assert mock_agent_cls.call_args.kwargs["eager_tool_names"] == frozenset(
+            {"workforce_goals", "kanban_list"}
+        )
+
     def test_run_job_disables_memory_even_when_per_job_enables_it(self, tmp_path):
         """Cron runs pass skip_memory=True, so memory must not be exposed.
 
