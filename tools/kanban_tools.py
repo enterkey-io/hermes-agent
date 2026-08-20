@@ -599,8 +599,10 @@ def _handle_list(args: dict, **kw) -> str:
         return guard
     assignee = args.get("assignee")
     workforce_scope = args.get("workforce_scope")
-    if workforce_scope not in (None, "reporting_line"):
-        return tool_error("workforce_scope must be reporting_line")
+    if workforce_scope not in (None, "owned_outcomes", "portfolio_outcomes"):
+        return tool_error(
+            "workforce_scope must be owned_outcomes or portfolio_outcomes"
+        )
     if workforce_scope and assignee:
         return tool_error("assignee and workforce_scope are mutually exclusive")
     status = args.get("status")
@@ -629,7 +631,7 @@ def _handle_list(args: dict, **kw) -> str:
             # Fetch one extra row so model-facing output can report that
             # a bounded listing was truncated without dumping the board.
             scope_profiles = None
-            if workforce_scope == "reporting_line":
+            if workforce_scope in {"owned_outcomes", "portfolio_outcomes"}:
                 from hermes_cli.workforce_org import active_workforce_agent, load_organization
 
                 org = load_organization()
@@ -645,18 +647,16 @@ def _handle_list(args: dict, **kw) -> str:
                     agent = org.get(agent_id)
                     if agent.profile_path:
                         scope_profiles.append(Path(agent.profile_path).name)
-                    pending.extend(agent.direct_reports)
-                rows = []
-                for profile in scope_profiles:
-                    rows.extend(kb.list_tasks(
-                        conn,
-                        assignee=profile,
-                        status=status,
-                        tenant=tenant,
-                        include_archived=include_archived,
-                        limit=limit + 1,
-                    ))
-                rows.sort(key=lambda task: (-task.priority, task.created_at, task.id))
+                    if workforce_scope == "portfolio_outcomes":
+                        pending.extend(agent.direct_reports)
+                rows = kb.list_owned_outcome_tasks(
+                    conn,
+                    owner_profiles=scope_profiles,
+                    status=status,
+                    tenant=tenant,
+                    include_archived=include_archived,
+                    limit=limit + 1,
+                )
             else:
                 rows = kb.list_tasks(
                     conn,
@@ -680,7 +680,7 @@ def _handle_list(args: dict, **kw) -> str:
                 "promoted": promoted,
             }
             if scope_profiles is not None:
-                result["workforce_scope"] = "reporting_line"
+                result["workforce_scope"] = workforce_scope
                 result["scope_profiles"] = scope_profiles
             return json.dumps(result)
         finally:
@@ -1860,10 +1860,12 @@ KANBAN_LIST_SCHEMA = {
             "board": _board_schema_prop(),
             "workforce_scope": {
                 "type": "string",
-                "enum": ["reporting_line"],
+                "enum": ["owned_outcomes", "portfolio_outcomes"],
                 "description": (
-                    "Host-resolved current workforce profile plus every direct and "
-                    "indirect report. Mutually exclusive with assignee."
+                    "Canonical decomposed root outcomes explicitly owned by the current "
+                    "workforce profile (`owned_outcomes`) or by that profile and every "
+                    "direct and indirect report (`portfolio_outcomes`). Ordinary task "
+                    "assignment is not ownership. Mutually exclusive with assignee."
                 ),
             },
         },
