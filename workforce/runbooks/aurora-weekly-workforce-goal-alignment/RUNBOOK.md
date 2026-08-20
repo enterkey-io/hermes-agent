@@ -13,7 +13,6 @@ schedules:
   name: aurora-weekday-workforce-goal-projection
   profile: aurora
   schedule: 35 7 * * 1-5
-  timezone: America/Chicago
   enabled: true
   deliver: buzz:<ROOM_UUID:admin>
   step_key: publish
@@ -26,7 +25,6 @@ schedules:
   name: aurora-weekly-workforce-goal-alignment
   profile: aurora
   schedule: 30 16 * * 5
-  timezone: America/Chicago
   enabled: true
   deliver: buzz:<ROOM_UUID:admin>
   step_key: review
@@ -86,7 +84,8 @@ related:
 
 Elliott's Evernote note remains the only canonical goals source. The Workforce
 Control snapshot is a small, privacy-safe operational projection, never another
-goals document.
+goals document. Both Cron expressions use Aurora's configured Hermes timezone,
+which is `America/Chicago`; Hermes Cron does not support a per-job timezone.
 
 Canonical source: Evernote note `Canonical Goals & Objectives: Elliott +
 Workforce`, GUID `f75d19af-3119-45b6-a72f-9103797d7569`, in notebook `0

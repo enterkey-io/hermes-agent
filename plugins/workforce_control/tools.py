@@ -161,15 +161,17 @@ def _vision(args: dict[str, Any], **_kwargs: Any) -> str:
         return tool_error(str(exc))
 
 
-def _buzz_events(*, lookback_minutes: int, per_room_limit: int) -> dict[str, Any]:
+def _buzz_events(
+    *, lookback_minutes: int, per_room_limit: int, max_events: int
+) -> dict[str, Any]:
     """Read a small, metadata-safe window from the active profile's watched rooms."""
     from hermes_cli.config import load_config_readonly
-    from plugins.platforms.buzz.adapter import _resolve_private_key
+    from plugins.platforms.buzz.adapter import _configured_channels, _resolve_private_key
 
     config = load_config_readonly()
     buzz = (((config.get("gateway") or {}).get("platforms") or {}).get("buzz") or {})
     extra = buzz.get("extra") or {}
-    channel_ids = [value.strip() for value in str(extra.get("channels") or "").split(",") if value.strip()]
+    channel_ids = _configured_channels(extra)
     if not channel_ids:
         raise RuntimeError("the active profile has no watched Buzz rooms")
     cli = str(extra.get("cli_path") or "/home/elliott/.local/bin/buzz")
@@ -240,7 +242,13 @@ def _buzz_events(*, lookback_minutes: int, per_room_limit: int) -> dict[str, Any
                 "content": content[:600],
             })
     events.sort(key=lambda value: (value["created_at"], value["room_id"]))
-    return {"since": since, "rooms_checked": len(channel_ids), "events": events[-40:], "errors": errors}
+    bounded_max = max(1, min(int(max_events), 20))
+    return {
+        "since": since,
+        "rooms_checked": len(channel_ids),
+        "events": events[-bounded_max:],
+        "errors": errors,
+    }
 
 
 def _observe_buzz(args: dict[str, Any], **_kwargs: Any) -> str:
@@ -253,6 +261,7 @@ def _observe_buzz(args: dict[str, Any], **_kwargs: Any) -> str:
         result = _buzz_events(
             lookback_minutes=int(args.get("lookback_minutes") or 180),
             per_room_limit=int(args.get("per_room_limit") or 6),
+            max_events=int(args.get("limit") or 20),
         )
         return tool_result(success=True, **result)
     except Exception as exc:
@@ -340,6 +349,7 @@ BUZZ_OBSERVE_SCHEMA = {
     "parameters": {"type": "object", "properties": {
         "lookback_minutes": {"type": "integer", "minimum": 15, "maximum": 360},
         "per_room_limit": {"type": "integer", "minimum": 1, "maximum": 10},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 20},
     }, "additionalProperties": False},
 }
 

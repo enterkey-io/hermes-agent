@@ -143,7 +143,7 @@ def enforce_runtime_tool_budget(name: str, args: dict[str, Any]) -> dict[str, An
             budget.detail_reads += 1
 
     bounded_args = dict(args)
-    if name in {"kanban_list", "workforce_vision"}:
+    if name in {"kanban_list", "workforce_vision", "workforce_observe_buzz"}:
         requested = bounded_args.get("limit")
         try:
             requested_limit = int(requested) if requested is not None else budget.max_list_items

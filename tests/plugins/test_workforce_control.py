@@ -153,6 +153,12 @@ def test_goal_projection_is_aurora_owned_bounded_and_reports_freshness(board):
     )
     assert published_again["snapshot_id"] == published["snapshot_id"]
     assert current_goal_snapshot(board)["captured_at"] >= first_capture
+    with pytest.raises(ValueError, match="older than"):
+        publish_goal_snapshot(
+            board, actor="aurora", source_guid="guid", source_title="Goals",
+            source_updated_at="2026-08-19T09:00:00-05:00",
+            goals=[{"goal_id": "old", "title": "Old", "desired_outcome": "Old state"}],
+        )
 
 
 def test_vision_end_layer_requires_aurora_request_and_mel_response(board):
@@ -202,7 +208,9 @@ def test_buzz_observer_is_bounded_and_role_restricted(monkeypatch):
     )
     result = json.loads(workforce_tools._observe_buzz({"lookback_minutes": 90, "per_room_limit": 4}))
     assert result["success"] is True
-    assert result["requested"] == {"lookback_minutes": 90, "per_room_limit": 4}
+    assert result["requested"] == {
+        "lookback_minutes": 90, "per_room_limit": 4, "max_events": 20,
+    }
     monkeypatch.setattr(workforce_tools, "_actor", lambda: "milena")
     assert json.loads(workforce_tools._observe_buzz({}))["success"] is True
     monkeypatch.setattr(workforce_tools, "_actor", lambda: "emily")

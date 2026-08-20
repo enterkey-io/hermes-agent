@@ -413,6 +413,20 @@ def publish_goal_snapshot(
     captured_at = _now()
     ensure_schema(conn)
     with write_txn(conn):
+        latest = conn.execute(
+            "SELECT source_updated_at,content_hash FROM wc_goal_snapshots "
+            "ORDER BY source_updated_at DESC,captured_at DESC LIMIT 1"
+        ).fetchone()
+        if latest and source_ts < int(latest["source_updated_at"]):
+            raise ValueError("goal source is older than the current verified snapshot")
+        if (
+            latest
+            and source_ts == int(latest["source_updated_at"])
+            and content_hash != str(latest["content_hash"])
+        ):
+            raise ValueError(
+                "goal source timestamp matches the current snapshot but content differs"
+            )
         conn.execute(
             "INSERT INTO wc_goal_snapshots(snapshot_id,source_guid,source_title,source_updated_at,captured_at,content_hash,goals_json,recorded_by) "
             "VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(snapshot_id) DO UPDATE SET "
@@ -432,7 +446,8 @@ def publish_goal_snapshot(
 def current_goal_snapshot(conn: sqlite3.Connection, *, max_age_hours: int = 36) -> dict[str, Any] | None:
     ensure_schema(conn)
     row = conn.execute(
-        "SELECT * FROM wc_goal_snapshots ORDER BY captured_at DESC LIMIT 1"
+        "SELECT * FROM wc_goal_snapshots "
+        "ORDER BY source_updated_at DESC,captured_at DESC LIMIT 1"
     ).fetchone()
     if row is None:
         return None

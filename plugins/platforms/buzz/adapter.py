@@ -351,6 +351,20 @@ def _parse_json_list(stdout: str) -> List[dict]:
     return [item for item in data if isinstance(item, dict)]
 
 
+def _configured_channels(extra: Optional[dict] = None) -> List[str]:
+    """Normalize the adapter's supported env, YAML-list, and YAML-CSV forms."""
+    raw_channels = os.getenv("BUZZ_CHANNELS") or (extra or {}).get("channels", [])
+    if isinstance(raw_channels, str):
+        raw_channels = raw_channels.split(",")
+    if not isinstance(raw_channels, (list, tuple)):
+        return []
+    return [
+        channel.strip()
+        for channel in raw_channels
+        if isinstance(channel, str) and channel.strip()
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Buzz Adapter
 # ---------------------------------------------------------------------------
@@ -375,10 +389,7 @@ class BuzzAdapter(BasePlatformAdapter):
         )
 
         # Channels to watch: env csv > extra list/csv; empty = all joined channels
-        raw_channels = os.getenv("BUZZ_CHANNELS") or extra.get("channels", [])
-        if isinstance(raw_channels, str):
-            raw_channels = raw_channels.split(",")
-        self.channels: List[str] = [c.strip() for c in raw_channels if isinstance(c, str) and c.strip()]
+        self.channels = _configured_channels(extra)
 
         self.home_channel = (os.getenv("BUZZ_HOME_CHANNEL") or str(extra.get("home_channel", "") or "")).strip()
 

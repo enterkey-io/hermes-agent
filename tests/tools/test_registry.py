@@ -94,23 +94,34 @@ class TestRegisterAndDispatch:
 
     def test_runtime_budget_counts_only_mutating_workforce_actions_as_writes(self):
         reg = ToolRegistry()
-        for name in ("workforce_goals", "workforce_vision"):
+        captured = []
+
+        def handler(args, **kwargs):
+            captured.append(args)
+            return json.dumps({"ok": True})
+
+        for name in ("workforce_goals", "workforce_vision", "workforce_observe_buzz"):
             reg.register(
                 name=name,
                 toolset="bounded",
                 schema=_make_schema(name),
-                handler=_dummy_handler,
+                handler=handler,
             )
         token, state = activate_runtime_tool_budget({
-            "max_calls": 4,
+            "max_calls": 5,
             "max_writes": 1,
             "max_detail_reads": 1,
             "max_list_items": 2,
-            "allowed_tools": ["workforce_goals", "workforce_vision"],
+            "allowed_tools": [
+                "workforce_goals", "workforce_vision", "workforce_observe_buzz",
+            ],
         })
         try:
             assert json.loads(reg.dispatch("workforce_goals", {"action": "read"}))["ok"] is True
             assert json.loads(reg.dispatch("workforce_vision", {"action": "list", "limit": 9}))["ok"] is True
+            assert captured[-1]["limit"] == 2
+            assert json.loads(reg.dispatch("workforce_observe_buzz", {"limit": 12}))["ok"] is True
+            assert captured[-1]["limit"] == 2
             assert json.loads(reg.dispatch("workforce_vision", {"action": "request"}))["ok"] is True
             denied = json.loads(reg.dispatch("workforce_vision", {"action": "respond"}))
             assert denied["error_type"] == "runtime_tool_budget_exceeded"
