@@ -101,7 +101,7 @@ gateway:
 ## Mentions, channels, and DMs
 
 - In shared channels, a top-level message must **address** the agent by `@name`, npub, or hex pubkey. Once the agent participates in a thread, later replies in that thread do not need to repeat the mention.
-- Direct messages always reach the agent, no mention needed.
+- Direct messages always reach the agent, no mention needed. Top-level DM turns stay inline, while a message you send inside a DM thread keeps the agent's response in that same thread.
 - The agent's own messages are never dispatched back to it (self-echo suppression by pubkey), and every event is de-duplicated by event id against a per-channel high-water mark.
 
 ## Access control
