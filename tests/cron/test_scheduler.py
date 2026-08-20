@@ -573,6 +573,9 @@ class TestRunJobSessionPersistence:
         assert mock_agent_cls.call_args.kwargs["eager_tool_names"] == frozenset(
             {"workforce_goals", "kanban_list"}
         )
+        assert mock_agent_cls.call_args.kwargs["allowed_tool_names"] == frozenset(
+            {"workforce_goals", "kanban_list"}
+        )
 
     def test_run_job_disables_memory_even_when_per_job_enables_it(self, tmp_path):
         """Cron runs pass skip_memory=True, so memory must not be exposed.
