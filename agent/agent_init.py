@@ -897,6 +897,16 @@ def init_agent(
     # Store toolset filtering options
     agent.enabled_toolsets = enabled_toolsets
     agent.disabled_toolsets = disabled_toolsets
+    # A late MCP/plugin registry refresh must rebuild the same bounded schema
+    # the agent received at construction.  Without retaining these filters,
+    # refresh_agent_mcp_tools() falls back to the whole enabled toolset and can
+    # reintroduce discovery bridges or disallowed sibling tools mid-session.
+    agent._eager_tool_names = (
+        frozenset(eager_tool_names) if eager_tool_names is not None else None
+    )
+    agent._allowed_tool_names = (
+        frozenset(allowed_tool_names) if allowed_tool_names is not None else None
+    )
     
     # Model response configuration
     agent.max_tokens = max_tokens  # None = use model default

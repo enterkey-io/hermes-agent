@@ -7742,6 +7742,8 @@ def refresh_agent_mcp_tools(
         get_tool_definitions(
             enabled_toolsets=enabled,
             disabled_toolsets=disabled,
+            eager_tool_names=getattr(agent, "_eager_tool_names", None),
+            allowed_tool_names=getattr(agent, "_allowed_tool_names", None),
             quiet_mode=quiet_mode,
             execution_context=getattr(agent, "execution_context", None),
             execution_owner=agent,
