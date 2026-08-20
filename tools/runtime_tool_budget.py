@@ -64,6 +64,9 @@ _WRITE_TOOLS = frozenset(
         "kanban_unblock",
         "kanban_link",
         "workforce_signal",
+        "workforce_goals:publish",
+        "workforce_vision:request",
+        "workforce_vision:respond",
         "workforce_handoff",
         "runbook_propose_create",
         "runbook_propose_edit",
@@ -120,7 +123,8 @@ def enforce_runtime_tool_budget(name: str, args: dict[str, Any]) -> dict[str, An
             raise RuntimeToolBudgetError(
                 f"tool-call budget exhausted ({budget.max_calls} calls)"
             )
-        is_write = name in _WRITE_TOOLS
+        action_name = f"{name}:{str(args.get('action') or '').strip()}"
+        is_write = name in _WRITE_TOOLS or action_name in _WRITE_TOOLS
         is_detail = name in _DETAIL_READ_TOOLS
         if is_write and budget.writes >= budget.max_writes:
             budget.denied += 1
@@ -139,7 +143,7 @@ def enforce_runtime_tool_budget(name: str, args: dict[str, Any]) -> dict[str, An
             budget.detail_reads += 1
 
     bounded_args = dict(args)
-    if name == "kanban_list":
+    if name in {"kanban_list", "workforce_vision"}:
         requested = bounded_args.get("limit")
         try:
             requested_limit = int(requested) if requested is not None else budget.max_list_items

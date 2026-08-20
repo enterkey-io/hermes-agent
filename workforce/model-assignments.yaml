@@ -1,5 +1,5 @@
-schema_version: 1
-effective_date: 2026-08-18
+schema_version: 2
+effective_date: 2026-08-20
 status: trial
 approved_by: elliott
 
@@ -45,6 +45,31 @@ route_policy:
   cron:
     source: per_job_pin
     note: Scheduled jobs do not inherit this roster and require a separate reviewed migration.
+
+delegation_policy:
+  purpose: Preserve expensive parent judgment while moving bounded support work into isolated lower-cost contexts.
+  eligible_parents: [aurora, grace, emily, alina, main, bridgette, xenia, maggie, mel]
+  child_preset: luna-xhigh
+  max_iterations: 16
+  max_concurrent_children: 2
+  max_spawn_depth: 1
+  child_timeout_seconds: 600
+  subagent_auto_approve: false
+  suitable_work:
+    - bounded source extraction and comparison
+    - inventory and current-state reconciliation
+    - first-pass research or drafting that the parent will verify
+    - independent review of a specific artifact or evidence packet
+  parent_retains:
+    - user-facing conversation and clarification
+    - strategy, priority, taste, risk, and authority judgments
+    - final synthesis and verification of any child claim
+    - durable delegation through the named workforce owner and Hermes Kanban
+  prohibited_patterns:
+    - delegating a single tool call or mechanical command sequence
+    - recursive or speculative fanout
+    - treating a subagent self-report as verified evidence
+    - using an ephemeral child as the owner of durable work
 
 assignments:
   aurora: {profile: aurora, preset: sol-medium}

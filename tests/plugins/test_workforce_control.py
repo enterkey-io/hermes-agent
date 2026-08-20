@@ -4,6 +4,7 @@ from pathlib import Path
 import time
 
 import pytest
+import json
 
 from hermes_cli import kanban_db
 from hermes_cli.workforce_org import load_organization
@@ -18,7 +19,13 @@ from plugins.workforce_control.store import (
     record_signal,
     runtime_state,
     set_runtime_mode,
+    complete_vision_review,
+    current_goal_snapshot,
+    list_vision_reviews,
+    publish_goal_snapshot,
+    request_vision_review,
 )
+from plugins.workforce_control import tools as workforce_tools
 
 
 ROOT = Path(__file__).parents[2]
@@ -101,8 +108,8 @@ def test_semantic_signal_identity_deduplicates_new_evidence(board):
     assert first["created"] is True
     assert first["status"] == "blocked"
     assert board.execute(
-        "SELECT status FROM tasks WHERE id = ?", (first["task_id"],)
-    ).fetchone()[0] == "blocked"
+        "SELECT status,block_kind,block_recurrences FROM tasks WHERE id = ?", (first["task_id"],)
+    ).fetchone()[:] == ("blocked", "needs_input", 1)
     assert kanban_db.recompute_ready(board) == 0
     assert board.execute(
         "SELECT status FROM tasks WHERE id = ?", (first["task_id"],)
@@ -110,6 +117,98 @@ def test_semantic_signal_identity_deduplicates_new_evidence(board):
     assert second["created"] is False
     assert first["task_id"] == second["task_id"]
     assert board.execute("SELECT COUNT(*) FROM wc_items WHERE item_kind='signal'").fetchone()[0] == 1
+
+
+def test_goal_projection_is_aurora_owned_bounded_and_reports_freshness(board):
+    with pytest.raises(PermissionError, match="only Aurora"):
+        publish_goal_snapshot(
+            board, actor="emily", source_guid="guid", source_title="Goals",
+            source_updated_at="2026-08-20T09:00:00-05:00",
+            goals=[{"goal_id": "g1", "title": "Return time", "desired_outcome": "Less supervision"}],
+        )
+    published = publish_goal_snapshot(
+        board, actor="aurora", source_guid="guid", source_title="Goals",
+        source_updated_at="2026-08-20T09:00:00-05:00",
+        goals=[{
+            "goal_id": "g1", "title": "Return time to Elliott",
+            "desired_outcome": "The workforce handles routine work without supervision",
+            "priority": "highest", "status": "active", "departments": ["Operations", "Product"],
+        }],
+    )
+    snapshot = current_goal_snapshot(board, max_age_hours=36)
+    assert snapshot is not None
+    assert snapshot["snapshot_id"] == published["snapshot_id"]
+    assert snapshot["stale"] is False
+    assert snapshot["goals"][0]["goal_id"] == "g1"
+    assert "private_notes" not in snapshot["goals"][0]
+    first_capture = snapshot["captured_at"]
+    published_again = publish_goal_snapshot(
+        board, actor="aurora", source_guid="guid", source_title="Goals",
+        source_updated_at="2026-08-20T09:00:00-05:00",
+        goals=[{
+            "goal_id": "g1", "title": "Return time to Elliott",
+            "desired_outcome": "The workforce handles routine work without supervision",
+            "priority": "highest", "status": "active", "departments": ["Product", "Operations"],
+        }],
+    )
+    assert published_again["snapshot_id"] == published["snapshot_id"]
+    assert current_goal_snapshot(board)["captured_at"] >= first_capture
+
+
+def test_vision_end_layer_requires_aurora_request_and_mel_response(board):
+    with pytest.raises(PermissionError, match="only Aurora"):
+        request_vision_review(
+            board, actor="chloe", source_ref="task:t1", goal_ref="g1",
+            brief="Challenge this outcome", evidence_references=[],
+        )
+    requested = request_vision_review(
+        board, actor="aurora", source_ref="task:t1", goal_ref="g1",
+        brief="Ask how this could create ten times more value", evidence_references=["kanban:t1"],
+    )
+    duplicate = request_vision_review(
+        board, actor="aurora", source_ref="task:t1", goal_ref="g1",
+        brief="Ask how this could create ten times more value", evidence_references=["kanban:t1"],
+    )
+    assert requested["created"] is True
+    assert duplicate == {"review_id": requested["review_id"], "status": "pending", "created": False}
+    assert list_vision_reviews(board)[0]["review_id"] == requested["review_id"]
+    response = {
+        "reframe": "Treat the output as a reusable system",
+        "ten_x_option": "Build the factory behind the recurring result",
+        "assumptions": ["The need recurs"],
+        "value_case": "Future cycles become faster and more reliable",
+        "risks": ["Premature abstraction"],
+        "smallest_test": "Reuse one primitive in the next two cycles",
+    }
+    with pytest.raises(PermissionError, match="only Mel"):
+        complete_vision_review(board, actor="aurora", review_id=requested["review_id"], response=response)
+    completed = complete_vision_review(
+        board, actor="mel", review_id=requested["review_id"], response=response
+    )
+    assert completed["status"] == "completed"
+    assert list_vision_reviews(board, status="completed")[0]["response"]["ten_x_option"].startswith("Build")
+
+
+def test_buzz_observer_is_bounded_and_role_restricted(monkeypatch):
+    monkeypatch.setattr(workforce_tools, "_actor", lambda: "chloe")
+    monkeypatch.setattr(
+        workforce_tools,
+        "_buzz_events",
+        lambda **kwargs: {
+            "since": 1, "rooms_checked": 2,
+            "events": [{"room": "admin", "content": "A commitment changed"}],
+            "errors": [], "requested": kwargs,
+        },
+    )
+    result = json.loads(workforce_tools._observe_buzz({"lookback_minutes": 90, "per_room_limit": 4}))
+    assert result["success"] is True
+    assert result["requested"] == {"lookback_minutes": 90, "per_room_limit": 4}
+    monkeypatch.setattr(workforce_tools, "_actor", lambda: "milena")
+    assert json.loads(workforce_tools._observe_buzz({}))["success"] is True
+    monkeypatch.setattr(workforce_tools, "_actor", lambda: "emily")
+    denied = json.loads(workforce_tools._observe_buzz({}))
+    assert "success" not in denied
+    assert "restricted" in denied["error"]
 
 
 def test_only_aurora_can_plan_and_draft_creates_no_execution(board, organization):

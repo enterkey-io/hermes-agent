@@ -92,6 +92,32 @@ class TestRegisterAndDispatch:
         }
         assert json.loads(reg.dispatch("kanban_create", {}))["ok"] is True
 
+    def test_runtime_budget_counts_only_mutating_workforce_actions_as_writes(self):
+        reg = ToolRegistry()
+        for name in ("workforce_goals", "workforce_vision"):
+            reg.register(
+                name=name,
+                toolset="bounded",
+                schema=_make_schema(name),
+                handler=_dummy_handler,
+            )
+        token, state = activate_runtime_tool_budget({
+            "max_calls": 4,
+            "max_writes": 1,
+            "max_detail_reads": 1,
+            "max_list_items": 2,
+            "allowed_tools": ["workforce_goals", "workforce_vision"],
+        })
+        try:
+            assert json.loads(reg.dispatch("workforce_goals", {"action": "read"}))["ok"] is True
+            assert json.loads(reg.dispatch("workforce_vision", {"action": "list", "limit": 9}))["ok"] is True
+            assert json.loads(reg.dispatch("workforce_vision", {"action": "request"}))["ok"] is True
+            denied = json.loads(reg.dispatch("workforce_vision", {"action": "respond"}))
+            assert denied["error_type"] == "runtime_tool_budget_exceeded"
+        finally:
+            reset_runtime_tool_budget(token)
+        assert state.writes == 1
+
 
     def test_cross_mcp_toolsets_do_not_overwrite_atomically(self, caplog):
         """Parallel MCP registrations with one name leave exactly one owner."""
