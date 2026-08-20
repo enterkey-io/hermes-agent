@@ -19,7 +19,7 @@ ROOM_TOKEN = re.compile(r"<ROOM_UUID:([a-z0-9-]+)>")
 BOUNDED_TOOLSETS = ["kanban", "workforce", "runbook", "no_mcp"]
 BOUNDED_MAX_ITERATIONS = 12
 BOUNDED_TOOL_BUDGET = {
-    "max_calls": 8,
+    "max_calls": 10,
     "max_writes": 1,
     "max_detail_reads": 3,
     "max_list_items": 20,
@@ -28,11 +28,12 @@ BOUNDED_TOOL_BUDGET = {
         "kanban_request_review", "kanban_request_changes", "kanban_comment",
         "kanban_archive_stale", "kanban_attachments", "workforce_signal", "runbook_list",
         "runbook_search", "runbook_get", "runbook_validate", "runbook_runs",
+        "workforce_goals", "workforce_vision", "workforce_observe_buzz",
     ],
 }
 
 
-def render(template: Path, room_map_path: Path) -> str:
+def render_room_tokens(template: Path, room_map_path: Path) -> str:
     room_map = yaml.safe_load(room_map_path.read_text(encoding="utf-8-sig")) or {}
     if not isinstance(room_map, dict):
         raise ValueError("room map must be a mapping")
@@ -51,6 +52,13 @@ def render(template: Path, room_map_path: Path) -> str:
         return canonical
 
     rendered = ROOM_TOKEN.sub(replace, text)
+    if ROOM_TOKEN.search(rendered):
+        raise ValueError("unresolved room UUID token")
+    return rendered
+
+
+def render(template: Path, room_map_path: Path) -> str:
+    rendered = render_room_tokens(template, room_map_path)
     parsed = split_frontmatter(rendered)
     schedules = parsed.metadata["schedules"]
     runtime = parsed.metadata["runtime"]
@@ -111,8 +119,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--template", type=Path, required=True)
     parser.add_argument("--room-map", type=Path, required=True)
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--rooms-only", action="store_true",
+        help="render and validate room tokens without proactive-cycle-specific checks",
+    )
     args = parser.parse_args(argv)
-    rendered = render(args.template, args.room_map)
+    rendered = (
+        render_room_tokens(args.template, args.room_map)
+        if args.rooms_only
+        else render(args.template, args.room_map)
+    )
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(rendered, encoding="utf-8")
@@ -124,6 +140,7 @@ def main(argv: list[str] | None = None) -> int:
         "slug": parsed.metadata["slug"],
         "schedules": len(parsed.metadata["schedules"]),
         "profiles": [item["profile"] for item in parsed.metadata["schedules"]],
+        "rooms_only": bool(args.rooms_only),
     }, indent=2, sort_keys=True))
     return 0
 

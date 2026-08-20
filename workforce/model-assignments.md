@@ -18,6 +18,31 @@ that file first whenever Elliott changes the roster.
 - Cron jobs remain independently pinned in each profile's `cron/jobs.json`.
   Do not infer or change a Cron model from this table.
 
+## Cost-aware subagents
+
+Aurora, Grace, and the seven operational directors retain their approved main
+models for judgment, conversation, and final synthesis. Their ephemeral
+`delegate_task` children are pinned to `openai-codex/gpt-5.6-luna` at xhigh
+effort. Children are leaf workers with a 16-iteration budget, at most two may
+run concurrently, each has a ten-minute timeout, and summaries are capped at
+8,000 characters. Nested orchestration and automatic MCP inheritance are off.
+
+Use these children for bounded extraction, comparison, inventory, first-pass
+research or drafting, and independent artifact review. The parent supplies a
+complete evidence packet, continues useful work while the child runs, and
+verifies the returned claims. Do not delegate a single tool call, a mechanical
+command sequence, a user interaction, or a decision about strategy, priority,
+taste, authority, spending, publication, credentials, or real-money risk.
+Durable work still belongs to the named workforce owner in Hermes Kanban; an
+ephemeral subagent is never the accountable owner.
+
+The same nine leadership profiles route Hermes' automatic post-turn memory and
+skill review to Luna xhigh. Because the auxiliary model differs from their
+Sol/Terra parent, Hermes replays a compact digest instead of the full leadership
+conversation. This directly removes a major source of repeated Sol input-token
+spend without changing the agent's main conversation model or disabling memory
+review.
+
 ## Current roster
 
 | Agent | Runtime profile | Main, Telegram, Buzz, API | Matrix |
@@ -63,3 +88,7 @@ pay the director-level reasoning cost.
 5. Restart only affected gateways and verify the effective configuration.
 6. Review Cron model pins separately because changing a profile default does
    not change an existing scheduled job.
+7. Apply and validate `delegation_policy` separately for every eligible parent;
+   verify one read-only child canary before relying on the route.
+8. Apply and validate `auxiliary_policy.background_review` separately; verify
+   the resolved review runtime reports Luna and routed compact-digest mode.

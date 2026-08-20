@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from hermes_cli.runbook_schema import split_frontmatter
-from scripts.workforce_proactive_cycles import render
+from scripts.workforce_proactive_cycles import render, render_room_tokens
 
 
 ROOT = Path(__file__).parents[2]
@@ -30,10 +30,10 @@ def test_rendered_proactive_cycles_are_complete_and_workforce_managed(tmp_path):
     assert parsed.metadata["related"]["workforce_managed"] is True
     schedules = parsed.metadata["schedules"]
     assert parsed.metadata["runtime"]["max_iterations"] == 12
-    assert parsed.metadata["runtime"]["tool_budget"]["max_calls"] == 8
+    assert parsed.metadata["runtime"]["tool_budget"]["max_calls"] == 10
     assert "kanban_create" not in parsed.metadata["runtime"]["tool_budget"]["allowed_tools"]
     assert "kanban_archive_stale" in parsed.metadata["runtime"]["tool_budget"]["allowed_tools"]
-    assert len(schedules) == 10
+    assert len(schedules) == 11
     assert {item["profile"] for item in schedules} == {
         "chloe", "milena", "emily", "alina", "main", "bridgette",
         "xenia", "maggie", "mel", "aurora",
@@ -43,7 +43,7 @@ def test_rendered_proactive_cycles_are_complete_and_workforce_managed(tmp_path):
         item["enabled_toolsets"] == ["kanban", "workforce", "runbook", "no_mcp"]
         for item in schedules
     )
-    assert "at most eight tool calls total" in parsed.body
+    assert "at most ten tool calls total" in parsed.body
     assert "Never enumerate the whole board or workforce" in parsed.body
 
 
@@ -74,7 +74,7 @@ def test_render_validates_schedule_identity_instead_of_a_fixed_count(tmp_path):
     end = text.index("- step_key: director_product")
     reduced.write_text(text[:start] + text[end:])
     parsed = split_frontmatter(render(reduced, _room_map(tmp_path)))
-    assert len(parsed.metadata["schedules"]) == 9
+    assert len(parsed.metadata["schedules"]) == 10
 
 
 def test_render_rejects_an_unbounded_proactive_toolset(tmp_path):
@@ -88,3 +88,12 @@ def test_render_rejects_an_unbounded_proactive_toolset(tmp_path):
     )
     with pytest.raises(ValueError, match="bounded proactive toolsets"):
         render(unsafe, _room_map(tmp_path))
+
+
+def test_room_only_render_supports_other_managed_runbooks(tmp_path):
+    template = ROOT / "workforce/runbooks/aurora-weekly-workforce-goal-alignment/RUNBOOK.md"
+    rendered = render_room_tokens(template, _room_map(tmp_path))
+    parsed = split_frontmatter(rendered)
+    assert parsed.metadata["slug"] == "aurora-weekly-workforce-goal-alignment"
+    assert parsed.metadata["schedules"][0]["deliver"].startswith("buzz:")
+    assert "<ROOM_UUID:" not in rendered

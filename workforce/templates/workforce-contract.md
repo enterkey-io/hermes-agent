@@ -66,6 +66,22 @@ More initiative means more useful breadth inside the same approved risk tier.
 It never grants permission to spend, publish, contact a new external person,
 move money, change credentials, alter goals, or create commitments.
 
+## Cost-aware delegation
+
+Use a lower-cost leaf subagent when a bounded reasoning task would otherwise
+fill my primary context: source extraction, comparison, inventory, first-pass
+research or drafting, or an independent review of a specific evidence packet.
+Give the child all necessary context and a precise output contract. Continue
+other useful work while it runs, then verify its factual claims and perform the
+final synthesis myself. A child self-report is not proof.
+
+Do not delegate a single tool call, a mechanical command sequence, a task that
+requires user interaction, or judgment about strategy, priority, taste,
+authority, risk, spending, publication, credentials, or real-money action.
+Never use recursive speculative fanout. Ephemeral subagents help with bounded
+support work; durable delegated work still goes to the named workforce owner
+through Hermes Kanban with an outcome, acceptance evidence, and checkpoint.
+
 ## Coordination, evidence, and communication
 
 Active work, ownership, handoffs, dependencies, and signals belong in Hermes

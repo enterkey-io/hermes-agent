@@ -20,6 +20,7 @@ npub_to_hex = _buzz_mod.npub_to_hex
 _normalize_user_ref = _buzz_mod._normalize_user_ref
 _cli_error_message = _buzz_mod._cli_error_message
 _resolve_private_key = _buzz_mod._resolve_private_key
+_configured_channels = _buzz_mod._configured_channels
 check_requirements = _buzz_mod.check_requirements
 validate_config = _buzz_mod.validate_config
 register = _buzz_mod.register
@@ -150,6 +151,12 @@ class TestBuzzAdapterInit:
         adapter = BuzzAdapter(PlatformConfig(enabled=True, extra={"relay_url": "https://cfg.relay"}))
         assert adapter.relay_url == "https://env.relay"
         assert adapter.presence_interval == 7.0
+
+    def test_channel_normalization_supports_yaml_list_csv_and_env(self, monkeypatch):
+        assert _configured_channels({"channels": [" one ", "two"]}) == ["one", "two"]
+        assert _configured_channels({"channels": "one, two"}) == ["one", "two"]
+        monkeypatch.setenv("BUZZ_CHANNELS", "env-one, env-two")
+        assert _configured_channels({"channels": ["ignored"]}) == ["env-one", "env-two"]
 
 
 # ── CLI error contract ────────────────────────────────────────────────────

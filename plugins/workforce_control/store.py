@@ -22,7 +22,7 @@ from hermes_cli.workforce_org import WorkforceOrganization, load_organization
 write_txn = kanban_db.write_txn
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 ITEM_KINDS = {"signal", "outcome", "execution", "verification"}
 RELATION_KINDS = {"duplicate", "supersedes", "discovered_from", "verifies", "remediates"}
 PLAN_STATES = {"draft", "materialized", "rejected", "deferred", "stopped"}
@@ -141,9 +141,35 @@ CREATE TABLE IF NOT EXISTS wc_cursors (
     last_event_id INTEGER NOT NULL DEFAULT 0,
     updated_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS wc_goal_snapshots (
+    snapshot_id TEXT PRIMARY KEY,
+    source_guid TEXT NOT NULL,
+    source_title TEXT NOT NULL,
+    source_updated_at INTEGER NOT NULL,
+    captured_at INTEGER NOT NULL,
+    content_hash TEXT NOT NULL,
+    goals_json TEXT NOT NULL,
+    recorded_by TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS wc_vision_reviews (
+    review_id TEXT PRIMARY KEY,
+    stable_key TEXT NOT NULL UNIQUE,
+    source_ref TEXT NOT NULL,
+    goal_ref TEXT NOT NULL,
+    brief TEXT NOT NULL,
+    evidence_json TEXT NOT NULL DEFAULT '[]',
+    requested_by TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending','completed','cancelled')),
+    response_json TEXT,
+    responded_by TEXT,
+    requested_at INTEGER NOT NULL,
+    responded_at INTEGER
+);
 CREATE INDEX IF NOT EXISTS idx_wc_items_kind_state ON wc_items(item_kind, current_state);
 CREATE INDEX IF NOT EXISTS idx_wc_actions_state ON wc_reconcile_actions(state, created_at);
 CREATE INDEX IF NOT EXISTS idx_wc_corrections_status ON wc_corrections(status, scope);
+CREATE INDEX IF NOT EXISTS idx_wc_goals_captured ON wc_goal_snapshots(captured_at DESC);
+CREATE INDEX IF NOT EXISTS idx_wc_vision_status ON wc_vision_reviews(status, requested_at);
 """
 
 
@@ -198,6 +224,16 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             "INSERT OR IGNORE INTO wc_runtime(singleton,mode,kill_switch,pause_reason,updated_at) "
             "VALUES(1,'paused',1,'requires explicit Elliott cutover authorization',?)",
             (_now(),),
+        )
+        # Schema v1 signals were created blocked, but their typed blocker
+        # fields were left empty. Repair only plugin-owned signal rows so the
+        # ordinary Kanban blocker view is accurate without touching unrelated
+        # historical tasks.
+        conn.execute(
+            "UPDATE tasks SET block_kind='needs_input',block_recurrences="
+            "CASE WHEN block_recurrences < 1 THEN 1 ELSE block_recurrences END "
+            "WHERE status='blocked' AND (block_kind IS NULL OR block_kind='') "
+            "AND id IN (SELECT task_id FROM wc_items WHERE item_kind='signal')"
         )
 
 
@@ -305,12 +341,203 @@ def record_signal(
             },
         )
         conn.execute(
+            "UPDATE tasks SET block_kind='needs_input',block_recurrences=1 WHERE id=?",
+            (task_id,),
+        )
+        conn.execute(
             "INSERT INTO wc_items(task_id,item_kind,stable_key,goal_ref,desired_outcome,action_class,target_ref,evidence_json,provenance_json,verification_state,current_state,created_at,updated_at) "
             "VALUES(?,?,?,?,?,?,?,?,?,'not_required','open',?,?)",
             (task_id, "signal", stable_key, goal_ref or "unknown", expected_outcome,
              action_class, target_ref or None, _json(evidence_references), _json([provenance]), now, now),
         )
     return {"task_id": task_id, "status": "blocked", "assignee": "aurora", "stable_key": stable_key, "created": True}
+
+
+def publish_goal_snapshot(
+    conn: sqlite3.Connection,
+    *,
+    actor: str,
+    source_guid: str,
+    source_title: str,
+    source_updated_at: str | int,
+    goals: list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Publish a workforce-safe projection of Aurora's verified goals note.
+
+    The Evernote note remains canonical.  This projection deliberately carries
+    only the bounded fields operational agents need for alignment; private note
+    text is never copied into the Kanban database.
+    """
+    if actor != "aurora":
+        raise PermissionError("only Aurora may publish the workforce goals projection")
+    guid = source_guid.strip()
+    title = source_title.strip()
+    if not guid or not title:
+        raise ValueError("source_guid and source_title are required")
+    source_ts = _parse_time(source_updated_at)
+    if source_ts is None:
+        raise ValueError("source_updated_at is required")
+    if not goals or len(goals) > 24:
+        raise ValueError("goals must contain between 1 and 24 entries")
+
+    allowed = {"goal_id", "title", "desired_outcome", "priority", "status", "departments"}
+    normalized: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, raw in enumerate(goals):
+        if not isinstance(raw, Mapping):
+            raise ValueError(f"goal {index} must be an object")
+        extra = set(raw) - allowed
+        if extra:
+            raise ValueError(f"goal {index} contains unsupported fields: {sorted(extra)}")
+        goal_id = str(raw.get("goal_id") or "").strip()
+        goal_title = str(raw.get("title") or "").strip()
+        desired = str(raw.get("desired_outcome") or "").strip()
+        if not goal_id or not goal_title or not desired:
+            raise ValueError(f"goal {index} requires goal_id, title, and desired_outcome")
+        if goal_id in seen:
+            raise ValueError(f"duplicate goal_id: {goal_id}")
+        seen.add(goal_id)
+        departments = sorted({str(v).strip() for v in raw.get("departments") or [] if str(v).strip()})
+        normalized.append({
+            "goal_id": goal_id,
+            "title": goal_title,
+            "desired_outcome": desired,
+            "priority": str(raw.get("priority") or "").strip() or "unspecified",
+            "status": str(raw.get("status") or "active").strip() or "active",
+            "departments": departments,
+        })
+
+    payload = _json(normalized)
+    content_hash = hashlib.sha256(payload.encode()).hexdigest()
+    snapshot_id = _id("goals", f"{guid}:{source_ts}:{content_hash}")
+    captured_at = _now()
+    ensure_schema(conn)
+    with write_txn(conn):
+        latest = conn.execute(
+            "SELECT source_updated_at,content_hash FROM wc_goal_snapshots "
+            "ORDER BY source_updated_at DESC,captured_at DESC LIMIT 1"
+        ).fetchone()
+        if latest and source_ts < int(latest["source_updated_at"]):
+            raise ValueError("goal source is older than the current verified snapshot")
+        if (
+            latest
+            and source_ts == int(latest["source_updated_at"])
+            and content_hash != str(latest["content_hash"])
+        ):
+            raise ValueError(
+                "goal source timestamp matches the current snapshot but content differs"
+            )
+        conn.execute(
+            "INSERT INTO wc_goal_snapshots(snapshot_id,source_guid,source_title,source_updated_at,captured_at,content_hash,goals_json,recorded_by) "
+            "VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(snapshot_id) DO UPDATE SET "
+            "captured_at=excluded.captured_at,recorded_by=excluded.recorded_by",
+            (snapshot_id, guid, title, source_ts, captured_at, content_hash, payload, actor),
+        )
+    return {
+        "snapshot_id": snapshot_id,
+        "source_guid": guid,
+        "source_updated_at": source_ts,
+        "captured_at": captured_at,
+        "content_hash": content_hash,
+        "goal_count": len(normalized),
+    }
+
+
+def current_goal_snapshot(conn: sqlite3.Connection, *, max_age_hours: int = 36) -> dict[str, Any] | None:
+    ensure_schema(conn)
+    row = conn.execute(
+        "SELECT * FROM wc_goal_snapshots "
+        "ORDER BY source_updated_at DESC,captured_at DESC LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return None
+    result = dict(row)
+    result["goals"] = _loads(result.pop("goals_json"), [])
+    result["age_seconds"] = max(0, _now() - int(result["captured_at"]))
+    result["stale"] = result["age_seconds"] > max(1, int(max_age_hours)) * 3600
+    return result
+
+
+def request_vision_review(
+    conn: sqlite3.Connection,
+    *,
+    actor: str,
+    source_ref: str,
+    goal_ref: str,
+    brief: str,
+    evidence_references: list[str],
+) -> dict[str, Any]:
+    if actor != "aurora":
+        raise PermissionError("only Aurora may request a Vision review")
+    source = source_ref.strip()
+    goal = goal_ref.strip()
+    request_brief = brief.strip()
+    if not source or not goal or not request_brief:
+        raise ValueError("source_ref, goal_ref, and brief are required")
+    stable_key = hashlib.sha256(f"{source}\0{goal}\0{_normalized(request_brief)}".encode()).hexdigest()
+    ensure_schema(conn)
+    existing = conn.execute(
+        "SELECT review_id,status FROM wc_vision_reviews WHERE stable_key=?", (stable_key,)
+    ).fetchone()
+    if existing:
+        return {"review_id": existing["review_id"], "status": existing["status"], "created": False}
+    review_id = _id("vision", stable_key)
+    with write_txn(conn):
+        conn.execute(
+            "INSERT INTO wc_vision_reviews(review_id,stable_key,source_ref,goal_ref,brief,evidence_json,requested_by,status,requested_at) "
+            "VALUES(?,?,?,?,?,?,?,'pending',?)",
+            (review_id, stable_key, source, goal, request_brief, _json(evidence_references), actor, _now()),
+        )
+    return {"review_id": review_id, "status": "pending", "created": True}
+
+
+def list_vision_reviews(conn: sqlite3.Connection, *, status: str = "pending", limit: int = 10) -> list[dict[str, Any]]:
+    ensure_schema(conn)
+    if status not in {"pending", "completed", "cancelled"}:
+        raise ValueError("invalid Vision review status")
+    rows = conn.execute(
+        "SELECT * FROM wc_vision_reviews WHERE status=? ORDER BY requested_at LIMIT ?",
+        (status, max(1, min(int(limit), 20))),
+    ).fetchall()
+    results = []
+    for row in rows:
+        item = dict(row)
+        item["evidence_references"] = _loads(item.pop("evidence_json"), [])
+        item["response"] = _loads(item.pop("response_json"), None)
+        results.append(item)
+    return results
+
+
+def complete_vision_review(
+    conn: sqlite3.Connection,
+    *,
+    actor: str,
+    review_id: str,
+    response: Mapping[str, Any],
+) -> dict[str, Any]:
+    if actor != "mel":
+        raise PermissionError("only Mel may complete the formal Vision review")
+    required = {"reframe", "ten_x_option", "assumptions", "value_case", "risks", "smallest_test"}
+    if set(response) != required:
+        raise ValueError(f"Vision response must contain exactly {sorted(required)}")
+    for key in required:
+        value = response[key]
+        if isinstance(value, list):
+            if not value or not all(str(v).strip() for v in value):
+                raise ValueError(f"{key} must not be empty")
+        elif not str(value or "").strip():
+            raise ValueError(f"{key} must not be empty")
+    ensure_schema(conn)
+    now = _now()
+    with write_txn(conn):
+        cur = conn.execute(
+            "UPDATE wc_vision_reviews SET status='completed',response_json=?,responded_by=?,responded_at=? "
+            "WHERE review_id=? AND status='pending'",
+            (_json(dict(response)), actor, now, review_id.strip()),
+        )
+        if cur.rowcount != 1:
+            raise ValueError("Vision review is missing or no longer pending")
+    return {"review_id": review_id.strip(), "status": "completed", "responded_at": now}
 
 
 def _parse_time(value: str | int | None) -> int | None:
@@ -713,6 +940,20 @@ def dashboard_snapshot(conn: sqlite3.Connection) -> dict[str, Any]:
     runtime = conn.execute(
         "SELECT * FROM wc_runtime WHERE singleton = 1"
     ).fetchone()
+    table_names = {
+        str(row["name"])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'wc_%'"
+        ).fetchall()
+    }
+    latest_goals = (
+        conn.execute(
+            "SELECT snapshot_id,source_title,source_updated_at,captured_at,content_hash "
+            "FROM wc_goal_snapshots ORDER BY captured_at DESC LIMIT 1"
+        ).fetchone()
+        if "wc_goal_snapshots" in table_names
+        else None
+    )
     return {
         "available": True,
         # Dashboard reads must not run migrations or update schema timestamps.
@@ -721,6 +962,15 @@ def dashboard_snapshot(conn: sqlite3.Connection) -> dict[str, Any]:
         "plans": grouped("SELECT state,COUNT(*) count FROM wc_plans GROUP BY state ORDER BY state"),
         "exceptions": grouped("SELECT state,classification,COUNT(*) count FROM wc_reconcile_actions WHERE state!='applied' GROUP BY state,classification ORDER BY state,classification"),
         "corrections": grouped("SELECT status,scope,COUNT(*) count FROM wc_corrections GROUP BY status,scope ORDER BY status,scope"),
+        "goals": dict(latest_goals) if latest_goals is not None else None,
+        "vision": (
+            grouped(
+                "SELECT status,COUNT(*) count FROM wc_vision_reviews "
+                "GROUP BY status ORDER BY status"
+            )
+            if "wc_vision_reviews" in table_names
+            else []
+        ),
     }
 
 

@@ -8,4 +8,6 @@ provides_tools:
   - workforce_materialize
   - workforce_reconcile
   - workforce_correct
-
+  - workforce_goals
+  - workforce_vision
+  - workforce_observe_buzz
