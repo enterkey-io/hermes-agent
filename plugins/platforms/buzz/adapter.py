@@ -1446,8 +1446,16 @@ class BuzzAdapter(BasePlatformAdapter):
         # Optional leading '@', one of the identity forms, optional trailing
         # ':' or ',' and surrounding whitespace.
         pattern = rf"^@?(?:{'|'.join(candidates)})[\s:,]*"
-        stripped = re.sub(pattern, "", text, count=1, flags=re.IGNORECASE)
-        return stripped.strip()
+        stripped = re.sub(pattern, "", text, count=1, flags=re.IGNORECASE).strip()
+        # The routing mention is still semantic context for ordinary prose.
+        # Removing ``Chloe`` from ``Chloe you still here?`` turns a direct
+        # question into an ambiguous group utterance and can make a correctly
+        # mention-gated agent choose intentional silence.  The original reason
+        # for stripping is command recognition, so limit stripping to that
+        # case and preserve natural-language addressees for the model.
+        if stripped.startswith("/"):
+            return stripped
+        return text
 
     async def _resolve_user_name(self, pubkey: str) -> str:
         """Resolve a pubkey to a display name (cached; falls back to npub prefix).

@@ -260,6 +260,22 @@ class TestMentionGating:
         assert len(adapter._dispatched) == 1
 
     @pytest.mark.asyncio
+    async def test_leading_natural_language_addressee_is_preserved(self, adapter):
+        await self._poll_with(
+            adapter,
+            _event("e1", content="Chip you still here?", created_at=10),
+        )
+        assert adapter._dispatched[0]["text"] == "Chip you still here?"
+
+    @pytest.mark.asyncio
+    async def test_leading_mention_is_stripped_for_slash_command(self, adapter):
+        await self._poll_with(
+            adapter,
+            _event("e1", content="@Chip /whoami", created_at=10),
+        )
+        assert adapter._dispatched[0]["text"] == "/whoami"
+
+    @pytest.mark.asyncio
     async def test_followup_in_participated_thread_needs_no_repeat_mention(self, adapter):
         await self._poll_with(
             adapter,
