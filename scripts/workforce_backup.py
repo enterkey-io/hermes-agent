@@ -35,6 +35,11 @@ SAFE_CONFIG_PATHS = {
     "gateway.platforms.buzz.enabled", "gateway.platforms.buzz.extra.channels",
     "gateway.platforms.buzz.extra.home_channel",
     "gateway.platforms.buzz.extra.require_mention",
+    "delegation.model", "delegation.provider", "delegation.reasoning_effort",
+    "delegation.max_iterations", "delegation.max_concurrent_children",
+    "delegation.max_spawn_depth", "delegation.child_timeout_seconds",
+    "delegation.subagent_auto_approve", "delegation.orchestrator_enabled",
+    "delegation.default_toolsets", "delegation.inherit_mcp_toolsets",
 }
 
 
