@@ -337,6 +337,7 @@ def get_tool_definitions(
     disabled_toolsets: Optional[List[str]] = None,
     quiet_mode: bool = False,
     skip_tool_search_assembly: bool = False,
+    eager_tool_names: Optional[set[str] | frozenset[str]] = None,
     execution_context=None,
     execution_owner=None,
 ) -> List[Dict[str, Any]]:
@@ -385,6 +386,7 @@ def get_tool_definitions(
                 cfg_fp,
                 bool(os.environ.get("HERMES_KANBAN_TASK")),
                 bool(skip_tool_search_assembly),
+                frozenset(eager_tool_names or ()),
                 _is_delegated_child_context(),
                 _is_dispatcher_owned_worker(),
                 profile_scope,
@@ -406,6 +408,7 @@ def get_tool_definitions(
         disabled_toolsets,
         quiet_mode,
         skip_tool_search_assembly=skip_tool_search_assembly,
+        eager_tool_names=eager_tool_names,
         execution_context=execution_context,
         execution_owner=execution_owner,
     )
@@ -440,6 +443,7 @@ def _compute_tool_definitions(
     disabled_toolsets: Optional[List[str]] = None,
     quiet_mode: bool = False,
     skip_tool_search_assembly: bool = False,
+    eager_tool_names: Optional[set[str] | frozenset[str]] = None,
     execution_context=None,
     execution_owner=None,
 ) -> List[Dict[str, Any]]:
@@ -661,6 +665,7 @@ def _compute_tool_definitions(
                 filtered_tools,
                 context_length=context_length,
                 config=ts_cfg,
+                eager_tool_names=eager_tool_names,
             )
             if assembly.activated and not quiet_mode:
                 _forms = {"full": "catalog listing embedded",

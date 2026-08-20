@@ -776,13 +776,16 @@ def assemble_tool_defs(
     *,
     context_length: Optional[int] = None,
     config: Optional[ToolSearchConfig] = None,
+    eager_tool_names: Optional[set[str] | frozenset[str]] = None,
 ) -> AssemblyResult:
     """Return the tool-defs list the model should actually see.
 
     When tool search is inactive (off, no deferrable tools, or below
     threshold), this is a passthrough. When active, MCP and plugin tools
     are stripped from the visible list and replaced with the three bridge
-    tools. Core tools are *never* deferred regardless of config.
+    tools. Core tools are *never* deferred regardless of config. Names in
+    ``eager_tool_names`` also retain their full schemas; bounded runtimes use
+    this to expose exactly the tools their host policy permits.
 
     Idempotent: calling with bridge tools already in the input is a no-op
     (they classify as non-core/non-deferrable but their names are reserved,
@@ -797,8 +800,18 @@ def assemble_tool_defs(
                 if (td.get("function") or {}).get("name") not in BRIDGE_TOOL_NAMES]
 
     visible, deferrable = classify_tools(incoming)
+    eager = frozenset(eager_tool_names or ())
+    if eager:
+        forced = [
+            tool for tool in deferrable
+            if (tool.get("function") or {}).get("name") in eager
+        ]
+        if forced:
+            visible.extend(forced)
+            forced_ids = {id(tool) for tool in forced}
+            deferrable = [tool for tool in deferrable if id(tool) not in forced_ids]
     if not deferrable:
-        return AssemblyResult(tool_defs=incoming, activated=False)
+        return AssemblyResult(tool_defs=visible, activated=False)
 
     deferrable_tokens = estimate_tokens_from_schemas(deferrable)
     if not should_activate(config, deferrable_tokens, context_length):

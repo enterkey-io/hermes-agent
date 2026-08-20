@@ -5738,6 +5738,11 @@ def _run_job_after_admission(
             openrouter_min_coding_score=(_cfg.get("openrouter") or {}).get("min_coding_score"),
             enabled_toolsets=_resolve_cron_enabled_toolsets(job, _cfg),
             disabled_toolsets=_resolve_cron_disabled_toolsets(_cfg),
+            # Exact host-permitted schemas must remain visible. Otherwise a
+            # bounded run spends its execution budget rediscovering them.
+            eager_tool_names=frozenset(
+                (job.get("runtime_tool_budget") or {}).get("allowed_tools") or ()
+            ),
             quiet_mode=True,
             # Cron jobs should always inherit the user's SOUL.md identity from
             # HERMES_HOME. When a workdir is configured, also inject project

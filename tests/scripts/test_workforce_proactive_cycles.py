@@ -41,10 +41,12 @@ def test_rendered_proactive_cycles_are_complete_and_workforce_managed(tmp_path):
     }
     assert all(item["deliver"] == "local" for item in schedules)
     assert all(
-        item["enabled_toolsets"] == ["kanban", "workforce", "runbook", "no_mcp"]
+        item["enabled_toolsets"] == ["kanban", "workforce", "no_mcp"]
         for item in schedules
     )
     assert "at most six tool calls total" in parsed.body
+    assert "Do not call `tool_search`" in parsed.body
+    assert "Never call `workforce_reconcile`" in parsed.body
     assert "Never enumerate the whole board or workforce" in parsed.body
     assert "always deliver locally" in parsed.body
 
@@ -84,7 +86,7 @@ def test_render_rejects_an_unbounded_proactive_toolset(tmp_path):
     unsafe = tmp_path / "RUNBOOK.md"
     unsafe.write_text(
         TEMPLATE.read_text().replace(
-            "enabled_toolsets: [kanban, workforce, runbook, no_mcp]",
+            "enabled_toolsets: [kanban, workforce, no_mcp]",
             "enabled_toolsets: [hermes-cli]",
             1,
         )

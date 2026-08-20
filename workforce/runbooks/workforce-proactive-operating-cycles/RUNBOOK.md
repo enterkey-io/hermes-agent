@@ -26,11 +26,6 @@ runtime:
     - kanban_attachments
     - workforce_signal
     - workforce_handoff
-    - runbook_list
-    - runbook_search
-    - runbook_get
-    - runbook_validate
-    - runbook_runs
     - workforce_goals
     - workforce_vision
     - workforce_observe_buzz
@@ -42,7 +37,7 @@ schedules:
   enabled: false
   deliver: local
   step_key: chloe_observe
-  enabled_toolsets: [kanban, workforce, runbook, no_mcp]
+  enabled_toolsets: [kanban, workforce, no_mcp]
   provider: openai-codex
   model: gpt-5.6-luna
   reasoning_effort: xhigh
@@ -53,7 +48,7 @@ schedules:
   enabled: false
   deliver: local
   step_key: milena_reconcile
-  enabled_toolsets: [kanban, workforce, runbook, no_mcp]
+  enabled_toolsets: [kanban, workforce, no_mcp]
   provider: openai-codex
   model: gpt-5.6-luna
   reasoning_effort: xhigh
@@ -64,7 +59,7 @@ schedules:
   enabled: false
   deliver: local
   step_key: director_product
-  enabled_toolsets: [kanban, workforce, runbook, no_mcp]
+  enabled_toolsets: [kanban, workforce, no_mcp]
   provider: openai-codex
   model: gpt-5.6-luna
   reasoning_effort: xhigh
@@ -75,7 +70,7 @@ schedules:
   enabled: false
   deliver: local
   step_key: director_agent_systems
-  enabled_toolsets: [kanban, workforce, runbook, no_mcp]
+  enabled_toolsets: [kanban, workforce, no_mcp]
   provider: openai-codex
   model: gpt-5.6-luna
   reasoning_effort: xhigh
@@ -86,7 +81,7 @@ schedules:
   enabled: false
   deliver: local
   step_key: director_operations
-  enabled_toolsets: [kanban, workforce, runbook, no_mcp]
+  enabled_toolsets: [kanban, workforce, no_mcp]
   provider: openai-codex
   model: gpt-5.6-luna
   reasoning_effort: xhigh
@@ -97,7 +92,7 @@ schedules:
   enabled: false
   deliver: local
   step_key: director_marketing
-  enabled_toolsets: [kanban, workforce, runbook, no_mcp]
+  enabled_toolsets: [kanban, workforce, no_mcp]
   provider: openai-codex
   model: gpt-5.6-luna
   reasoning_effort: xhigh
@@ -108,7 +103,7 @@ schedules:
   enabled: false
   deliver: local
   step_key: director_trading
-  enabled_toolsets: [kanban, workforce, runbook, no_mcp]
+  enabled_toolsets: [kanban, workforce, no_mcp]
   provider: openai-codex
   model: gpt-5.6-luna
   reasoning_effort: xhigh
@@ -119,7 +114,7 @@ schedules:
   enabled: false
   deliver: local
   step_key: director_finance
-  enabled_toolsets: [kanban, workforce, runbook, no_mcp]
+  enabled_toolsets: [kanban, workforce, no_mcp]
   provider: openai-codex
   model: gpt-5.6-luna
   reasoning_effort: xhigh
@@ -130,7 +125,7 @@ schedules:
   enabled: false
   deliver: local
   step_key: director_vision
-  enabled_toolsets: [kanban, workforce, runbook, no_mcp]
+  enabled_toolsets: [kanban, workforce, no_mcp]
   provider: openai-codex
   model: gpt-5.6-terra
   reasoning_effort: high
@@ -141,7 +136,7 @@ schedules:
   enabled: false
   deliver: local
   step_key: aurora_portfolio
-  enabled_toolsets: [kanban, workforce, runbook, no_mcp]
+  enabled_toolsets: [kanban, workforce, no_mcp]
   provider: openai-codex
   model: gpt-5.6-luna
   reasoning_effort: xhigh
@@ -152,7 +147,7 @@ schedules:
   enabled: false
   deliver: local
   step_key: aurora_leverage
-  enabled_toolsets: [kanban, workforce, runbook, no_mcp]
+  enabled_toolsets: [kanban, workforce, no_mcp]
   provider: openai-codex
   model: gpt-5.6-terra
   reasoning_effort: high
@@ -248,7 +243,8 @@ This is a bounded proactive operating cycle, not permission to manufacture work.
 
 Every firing is an internal control-plane reconciliation, not a general research or systems-audit session.
 
-- Use only the per-job `kanban`, `workforce`, and `runbook` tools. MCP servers, terminal, files, code execution, browser/web research, delegation, and platform messaging are intentionally unavailable.
+- The complete canonical runbook and selected step are already present in this prompt. Do not call `tool_search`, `tool_describe`, or any `runbook_*` tool. Never call `workforce_reconcile`; it is not part of this bounded cycle. Use the named tools below directly, without spending calls rediscovering their schemas.
+- Use only the per-job `kanban` and `workforce` tools. MCP servers, terminal, files, code execution, browser/web research, delegation, platform messaging, and runbook lookup tools are intentionally unavailable.
 - The host runtime denies ordinary task creation, dependency linking, arbitrary unblocking, attachments, and runbook mutation during these cycles; the prompt cannot enlarge that allowlist. It permits one organization-authorized `workforce_handoff` when a real internal owner lacks a durable routed request, and stale archival only through `kanban_archive_stale`, which requires an exact cancellation/stop/supersession quote already stored on an inactive task.
 - Make at most six tool calls total, including at most one write and at most two individual task/workflow detail reads. Prefer one filtered list or dashboard snapshot over repeated item-by-item discovery.
 - Review at most twelve candidate records, limited to the executing role's department or explicit reporting scope and changed, failed, blocked, review, or qualified-signal state. Never enumerate the whole board or workforce.
@@ -257,6 +253,7 @@ Every firing is an internal control-plane reconciliation, not a general research
 - If the bounded evidence is insufficient, contradictory, or would require a broader search, do not broaden the run. Record at most one non-executing signal when the issue is material; otherwise return quiet success.
 
 1. Read the selected step, managed workforce contract, role, authority, and reporting line. Stay inside that exact scope.
+   - Make `workforce_goals` the first tool call. Chloe and Milena then call `workforce_observe_buzz`; Mel then calls `workforce_vision`; every other role then calls one filtered `kanban_list`. Use `kanban_show` only for a record returned by that list. This order is mandatory so tool discovery cannot consume the evidence budget.
 2. Establish the current state before planning or reporting using the bounded internal sources above. Inspect the canonical task record, recent execution evidence, and relevant Workflow Registry state. Include directly linked completed or archived work so finished work is not presented as pending, but never scan either archive broadly. If the accountable owner, next checkpoint, blocker, and evidence are unchanged since the prior run, stop immediately with quiet success. Restating an existing blocked record is not progress or a meaningful exception.
 3. Read the workforce-safe goal projection with `workforce_goals`. It is derived from Elliott's canonical Evernote note and is context, not a replacement source of truth. If it is missing or stale, use only an explicit current goal reference already present in the work or director assignment and signal a material alignment risk; never infer strategy.
 4. Identify at most one highest-value issue or safe next action after considering priority, capacity, dependencies, deadlines, and what it would displace. An agent-authored suggestion for a sprint, interview, test, or further discovery is not a decision Elliott must make. Route it to the accountable manager as a recommendation.
