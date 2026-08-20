@@ -1593,9 +1593,10 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
     explicit ``kanban_notify-subscribe`` or to polling.
 
     Gated by ``kanban.auto_subscribe_on_create`` in config.yaml (default
-    True). Disable to mirror pre-feature behaviour, e.g. when the
-    originating user/chat opted out via the per-platform notification
-    toggle (see ``hermes dashboard``).
+    False). Enable only when an operator intentionally wants every task
+    created by the model in a persistent session to subscribe that session.
+    Explicit user subscriptions, including gateway ``/kanban create``, use a
+    separate path and are unaffected.
 
     Subscription paths:
 
@@ -1623,12 +1624,12 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
     """
     try:
         cfg = load_config()
-        if not cfg_get(cfg, "kanban", "auto_subscribe_on_create", default=True):
+        if not cfg_get(cfg, "kanban", "auto_subscribe_on_create", default=False):
             return False
     except Exception:
-        # If config can't load we still default to True — this is the
-        # user-friendly behaviour that mirrors the pre-gate implementation.
-        pass
+        # Configuration failure must fail closed. Auto-subscription is an
+        # optional delivery side effect; task creation itself still succeeds.
+        return False
 
     platform = ""
     chat_id = ""
