@@ -14,6 +14,41 @@ from model_tools import (
 )
 
 
+def test_exact_allowed_tool_names_remove_siblings_and_discovery_bridges(monkeypatch):
+    """A bounded runtime exposes only its host allowlist, not deferred peers."""
+    from model_tools import _compute_tool_definitions
+
+    definitions = [
+        {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": name,
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        for name in ("workforce_goals", "workforce_signal")
+    ]
+    monkeypatch.setattr(
+        "model_tools.registry.get_definitions",
+        lambda *_args, **_kwargs: list(definitions),
+    )
+    monkeypatch.setattr("model_tools.validate_toolset", lambda _name: True)
+    monkeypatch.setattr(
+        "model_tools.resolve_toolset",
+        lambda _name: {"workforce_goals", "workforce_signal"},
+    )
+
+    result = _compute_tool_definitions(
+        enabled_toolsets=["workforce"],
+        quiet_mode=True,
+        allowed_tool_names={"workforce_goals"},
+        eager_tool_names={"workforce_goals"},
+    )
+
+    assert [tool["function"]["name"] for tool in result] == ["workforce_goals"]
+
+
 # =========================================================================
 # handle_function_call
 # =========================================================================

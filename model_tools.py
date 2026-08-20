@@ -338,6 +338,7 @@ def get_tool_definitions(
     quiet_mode: bool = False,
     skip_tool_search_assembly: bool = False,
     eager_tool_names: Optional[set[str] | frozenset[str]] = None,
+    allowed_tool_names: Optional[set[str] | frozenset[str]] = None,
     execution_context=None,
     execution_owner=None,
 ) -> List[Dict[str, Any]]:
@@ -387,6 +388,7 @@ def get_tool_definitions(
                 bool(os.environ.get("HERMES_KANBAN_TASK")),
                 bool(skip_tool_search_assembly),
                 frozenset(eager_tool_names or ()),
+                None if allowed_tool_names is None else frozenset(allowed_tool_names),
                 _is_delegated_child_context(),
                 _is_dispatcher_owned_worker(),
                 profile_scope,
@@ -409,6 +411,7 @@ def get_tool_definitions(
         quiet_mode,
         skip_tool_search_assembly=skip_tool_search_assembly,
         eager_tool_names=eager_tool_names,
+        allowed_tool_names=allowed_tool_names,
         execution_context=execution_context,
         execution_owner=execution_owner,
     )
@@ -444,6 +447,7 @@ def _compute_tool_definitions(
     quiet_mode: bool = False,
     skip_tool_search_assembly: bool = False,
     eager_tool_names: Optional[set[str] | frozenset[str]] = None,
+    allowed_tool_names: Optional[set[str] | frozenset[str]] = None,
     execution_context=None,
     execution_owner=None,
 ) -> List[Dict[str, Any]]:
@@ -540,6 +544,17 @@ def _compute_tool_definitions(
         execution_context=execution_context,
         execution_owner=execution_owner,
     )
+
+    # Bounded runtimes may name an exact host-permitted surface. Filter before
+    # progressive disclosure so disallowed sibling tools cannot reappear via
+    # tool_search/tool_describe/tool_call bridge schemas. This is a security
+    # and execution-budget boundary, not a prompting preference.
+    if allowed_tool_names is not None:
+        exact_allowed = frozenset(allowed_tool_names)
+        filtered_tools = [
+            tool for tool in filtered_tools
+            if (tool.get("function") or {}).get("name") in exact_allowed
+        ]
 
     # The set of tool names that actually passed check_fn filtering.
     # Use this (not tools_to_include) for any downstream schema that references

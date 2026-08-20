@@ -5743,6 +5743,9 @@ def _run_job_after_admission(
             eager_tool_names=frozenset(
                 (job.get("runtime_tool_budget") or {}).get("allowed_tools") or ()
             ),
+            allowed_tool_names=frozenset(
+                (job.get("runtime_tool_budget") or {}).get("allowed_tools") or ()
+            ),
             quiet_mode=True,
             # Cron jobs should always inherit the user's SOUL.md identity from
             # HERMES_HOME. When a workdir is configured, also inject project
