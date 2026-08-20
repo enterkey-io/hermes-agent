@@ -23,6 +23,18 @@ LIVE_GATEWAY_SILENT_MARKERS = frozenset({
     "NO REPLY",
 })
 
+# Models occasionally honor a group-room "let the addressed person answer"
+# instruction by emitting a zero-width placeholder instead of the documented
+# silence token.  Chat clients render that as an empty bubble.  Treat only a
+# response made entirely from these known invisible format characters as
+# intentional silence; ordinary blank output remains on the error path.
+_INVISIBLE_ONLY_REPLY_CHARS = frozenset({
+    "\u200b",  # zero width space
+    "\u2060",  # word joiner
+    "\u2063",  # invisible separator
+    "\ufeff",  # zero width no-break space / BOM
+})
+
 
 def _canonical_silence_candidate(text: str) -> str:
     return " ".join(text.strip().upper().split())
@@ -65,6 +77,8 @@ def is_intentional_silence_response(response: Any) -> bool:
     stripped = response.strip()
     if not stripped:
         return False
+    if all(char in _INVISIBLE_ONLY_REPLY_CHARS for char in stripped):
+        return True
     if len(stripped) > 64:
         return False
     return any(candidate in LIVE_GATEWAY_SILENT_MARKERS for candidate in _canonical_silence_candidates(stripped))

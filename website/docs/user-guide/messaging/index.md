@@ -127,6 +127,11 @@ Supported tokens:
 - `NO_REPLY`
 - `NO REPLY`
 
+An assistant response made entirely of a known zero-width placeholder is also
+suppressed. This prevents a model that tries to stay quiet in a shared room
+from creating an empty chat bubble. Substantive text containing such a
+character is still delivered normally.
+
 Whitespace and case are normalized, but the whole final response must be the token. A sentence like "Use `[SILENT]` when nothing changed" is delivered normally.
 
 Silence is a delivery decision only. Hermes keeps the assistant silence turn in the session transcript, so the conversation still alternates normally:
