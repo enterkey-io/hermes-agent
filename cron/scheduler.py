@@ -6558,6 +6558,18 @@ def _finish_workflow_registry_run(
                     error=str(error) if error else None,
                 )
             if step_status == "waiting_for_approval":
+                # A Cron fire is not resumable: the next fire starts a new
+                # registry run. Leaving this parent as ``running`` creates an
+                # immortal phantom run and makes the dashboard imply work is
+                # still executing. Preserve the waiting step as evidence and
+                # terminalize its one-shot parent explicitly.
+                workflow_registry.complete_run(
+                    workflow_conn,
+                    workflow_run_id,
+                    status="cancelled",
+                    summary=summary,
+                    error="cron fire ended blocked; a future fire must start a new run",
+                )
                 return
             workflow_registry.complete_run(
                 workflow_conn,

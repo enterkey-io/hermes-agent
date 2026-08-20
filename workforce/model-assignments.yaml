@@ -79,9 +79,39 @@ delegation_policy:
     - using an ephemeral child as the owner of durable work
 
 auxiliary_policy:
+  general_low_cost:
+    purpose: Keep recurring and support-model work off the accountable conversation model.
+    eligible_profiles: all-operational
+    tasks:
+      - background_review
+      - compression
+      - curator
+      - flush_memories
+      - kanban_decomposer
+      - mcp
+      - monitor
+      - profile_describer
+      - session_search
+      - skills_hub
+      - title_generation
+      - triage_specifier
+      - tts_audio_tags
+      - web_extract
+    provider: openai-codex
+    model: gpt-5.6-luna
+    reasoning_effort: xhigh
+    note: These bounded support tasks do not own strategy, authority, taste, risk, or final verification.
+  vision:
+    purpose: Preserve stronger visual judgment for image and screenshot interpretation.
+    eligible_profiles: all-operational
+    tasks: [vision]
+    provider: openai-codex
+    model: gpt-5.6-terra
+    reasoning_effort: high
+    note: Vision routing is separate from Emma's Grok design-generation workflow.
   background_review:
     purpose: Move automatic post-turn memory and skill review off expensive leadership models and force compact replay on the routed child model.
-    eligible_profiles: [aurora, grace, emily, alina, main, bridgette, xenia, maggie, mel]
+    eligible_profiles: all-operational
     provider: openai-codex
     model: gpt-5.6-luna
     reasoning_effort: xhigh
@@ -94,7 +124,7 @@ assignments:
   grace: {profile: grace, preset: sol-medium}
   brenna: {profile: brenna, preset: luna-xhigh}
   milena: {profile: milena, preset: luna-xhigh}
-  chloe: {profile: chloe, preset: luna-xhigh}
+  chloe: {profile: chloe, preset: sol-low}
   emily: {profile: emily, preset: sol-medium}
   sage: {profile: sage, preset: terra-high}
   iris: {profile: iris, preset: terra-high}

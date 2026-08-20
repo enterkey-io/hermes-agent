@@ -712,6 +712,112 @@ def prune_missing_schedule_links(
     return stale
 
 
+def reconcile_schedule_links(
+    conn: sqlite3.Connection,
+    live_jobs: Iterable[Mapping[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Make Registry schedule projection match workflow-linked live Cron jobs."""
+    desired: dict[tuple[str, str, str], bool] = {}
+    live_pairs: set[tuple[str, str]] = set()
+    for raw in live_jobs:
+        profile = str(raw.get("profile") or "").strip()
+        cron_job_id = str(raw.get("cron_job_id") or raw.get("id") or "").strip()
+        workflow_id = str(raw.get("workflow_id") or "").strip()
+        if not profile or not cron_job_id:
+            continue
+        live_pairs.add((profile, cron_job_id))
+        if workflow_id:
+            get_definition(conn, workflow_id)
+            desired[(workflow_id, profile, cron_job_id)] = bool(raw.get("enabled", True))
+
+    existing_rows = conn.execute(
+        "SELECT workflow_id,profile,cron_job_id,enabled FROM workflow_schedules"
+    ).fetchall()
+    existing = {
+        (str(row["workflow_id"]), str(row["profile"]), str(row["cron_job_id"])): bool(row["enabled"])
+        for row in existing_rows
+    }
+    removed: list[dict[str, Any]] = []
+    updated: list[dict[str, Any]] = []
+    added: list[dict[str, Any]] = []
+    with write_txn(conn):
+        for key, old_enabled in existing.items():
+            workflow_id, profile, cron_job_id = key
+            if (profile, cron_job_id) not in live_pairs or key not in desired:
+                conn.execute(
+                    "DELETE FROM workflow_schedules WHERE workflow_id=? AND profile=? AND cron_job_id=?",
+                    key,
+                )
+                removed.append({"workflow_id": workflow_id, "profile": profile, "cron_job_id": cron_job_id})
+                continue
+            new_enabled = desired[key]
+            if old_enabled != new_enabled:
+                conn.execute(
+                    "UPDATE workflow_schedules SET enabled=?,last_verified_at=? "
+                    "WHERE workflow_id=? AND profile=? AND cron_job_id=?",
+                    (int(new_enabled), _now(), *key),
+                )
+                updated.append({"workflow_id": workflow_id, "profile": profile, "cron_job_id": cron_job_id, "enabled": new_enabled})
+        for key, enabled in desired.items():
+            if key in existing:
+                continue
+            workflow_id, profile, cron_job_id = key
+            conn.execute(
+                "INSERT INTO workflow_schedules(workflow_id,profile,cron_job_id,enabled,last_verified_at) VALUES(?,?,?,?,?)",
+                (workflow_id, profile, cron_job_id, int(enabled), _now()),
+            )
+            added.append({"workflow_id": workflow_id, "profile": profile, "cron_job_id": cron_job_id, "enabled": enabled})
+    return {"added": added, "updated": updated, "removed": removed}
+
+
+def settle_orphaned_runs(
+    conn: sqlite3.Connection,
+    *,
+    max_age_seconds: int = 6 * 3600,
+    now: int | None = None,
+) -> list[dict[str, Any]]:
+    """Cancel non-resumable or stale Registry parents left marked running."""
+    current = int(_now() if now is None else now)
+    cutoff = current - max(1, int(max_age_seconds))
+    rows = conn.execute(
+        "SELECT * FROM workflow_runs WHERE status='running' ORDER BY started_at,id"
+    ).fetchall()
+    settled: list[dict[str, Any]] = []
+    for row in rows:
+        latest = conn.execute(
+            "SELECT * FROM workflow_step_runs WHERE workflow_run_id=? ORDER BY attempt DESC,started_at DESC LIMIT 1",
+            (row["id"],),
+        ).fetchone()
+        latest_status = str(latest["status"]) if latest else None
+        reason = None
+        successor = conn.execute(
+            "SELECT id FROM workflow_runs WHERE workflow_id=? "
+            "AND COALESCE(trigger_ref,'')=COALESCE(?, '') "
+            "AND started_at>? AND status IN ('succeeded','failed','cancelled') "
+            "ORDER BY started_at DESC LIMIT 1",
+            (row["workflow_id"], row["trigger_ref"], row["started_at"]),
+        ).fetchone()
+        if successor is not None:
+            reason = f"superseded by terminal successor {successor['id']}"
+        elif latest_status == "waiting_for_approval":
+            reason = "non-resumable cron run ended waiting_for_approval"
+        elif latest_status in TERMINAL_STEP_STATUSES:
+            reason = f"parent remained running after terminal step {latest_status}"
+        elif int(row["started_at"]) <= cutoff:
+            reason = "running lease exceeded registry stale-run policy"
+        if reason is None:
+            continue
+        if latest and latest_status in {"pending", "running"}:
+            finish_step(
+                conn, str(latest["id"]), status="cancelled", error=reason
+            )
+        complete_run(
+            conn, str(row["id"]), status="cancelled", error=reason
+        )
+        settled.append({"run_id": str(row["id"]), "reason": reason})
+    return settled
+
+
 def start_run(
     conn: sqlite3.Connection,
     workflow_id: str,

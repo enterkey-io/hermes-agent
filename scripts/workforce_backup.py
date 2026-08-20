@@ -48,6 +48,22 @@ SAFE_CONFIG_PATHS = {
     "auxiliary.background_review.timeout",
 }
 
+for _auxiliary_task in (
+    "compression", "curator", "flush_memories", "kanban_decomposer", "mcp",
+    "monitor", "profile_describer", "session_search", "skills_hub",
+    "title_generation", "triage_specifier", "tts_audio_tags", "vision",
+    "web_extract",
+):
+    SAFE_CONFIG_PATHS.update(
+        {
+            f"auxiliary.{_auxiliary_task}.enabled",
+            f"auxiliary.{_auxiliary_task}.provider",
+            f"auxiliary.{_auxiliary_task}.model",
+            f"auxiliary.{_auxiliary_task}.reasoning_effort",
+            f"auxiliary.{_auxiliary_task}.timeout",
+        }
+    )
+
 
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()

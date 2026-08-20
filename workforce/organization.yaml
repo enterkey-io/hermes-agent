@@ -1,5 +1,5 @@
 schema_version: 1
-workforce_contract_version: 2026-08-20.2
+workforce_contract_version: 2026-08-20.3
 reserved_approvals:
   - spending or paid services
   - real-money trades or movement of money
@@ -293,13 +293,13 @@ agents:
     status: active
     operational: true
     department: Marketing
-    function: Marketing Specialist
+    function: Community Manager
     manager: bridgette
     direct_reports: []
-    mission: Execute approved marketing work and surface evidence-backed opportunities.
-    owned_outcomes: [assigned marketing work]
-    authority: [perform routine reversible Marketing work]
-    prohibited_actions: [publish without approval, set department priority, launch campaigns]
+    mission: Build a welcoming, useful community; support members; and proactively turn community sentiment into evidence the Marketing team can act on.
+    owned_outcomes: [community engagement, member support, community sentiment and feedback synthesis, community communications]
+    authority: [perform routine reversible community work, answer in-scope community questions, organize feedback, draft human-sounding updates, recommend community improvements]
+    prohibited_actions: [publish or announce without approval, set department priority, launch campaigns, invent product or policy commitments]
     escalation_target: bridgette
     cross_team_request_path: Route through Bridgette.
     buzz_rooms: []
