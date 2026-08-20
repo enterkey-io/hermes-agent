@@ -44,6 +44,29 @@ def test_refresh_adds_late_landing_tools(monkeypatch):
     assert len(agent.tools) == 3
 
 
+def test_refresh_preserves_exact_bounded_tool_filters(monkeypatch):
+    """A registry refresh must not widen a host-bounded agent's tool surface."""
+    agent = _agent(["workforce_goals"])
+    agent._eager_tool_names = frozenset({"workforce_goals"})
+    agent._allowed_tool_names = frozenset({"workforce_goals"})
+
+    observed = {}
+
+    def _gtd(**kwargs):
+        observed.update(kwargs)
+        return [_tool("workforce_goals")]
+
+    import model_tools
+    monkeypatch.setattr(model_tools, "get_tool_definitions", _gtd)
+
+    added = mcp_tool.refresh_agent_mcp_tools(agent)
+
+    assert added == set()
+    assert observed["eager_tool_names"] == frozenset({"workforce_goals"})
+    assert observed["allowed_tool_names"] == frozenset({"workforce_goals"})
+    assert agent.valid_tool_names == {"workforce_goals"}
+
+
 def test_refresh_preserves_memory_provider_and_context_engine_tools(monkeypatch):
     """B1 regression: a rebuild must NOT drop post-build-injected tools.
 
