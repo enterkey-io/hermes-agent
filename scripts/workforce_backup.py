@@ -40,6 +40,12 @@ SAFE_CONFIG_PATHS = {
     "delegation.max_spawn_depth", "delegation.child_timeout_seconds",
     "delegation.subagent_auto_approve", "delegation.orchestrator_enabled",
     "delegation.default_toolsets", "delegation.inherit_mcp_toolsets",
+    "delegation.max_summary_chars",
+    "auxiliary.background_review.enabled",
+    "auxiliary.background_review.provider",
+    "auxiliary.background_review.model",
+    "auxiliary.background_review.reasoning_effort",
+    "auxiliary.background_review.timeout",
 }
 
 

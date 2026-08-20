@@ -51,10 +51,13 @@ delegation_policy:
   eligible_parents: [aurora, grace, emily, alina, main, bridgette, xenia, maggie, mel]
   child_preset: luna-xhigh
   max_iterations: 16
+  max_summary_chars: 8000
   max_concurrent_children: 2
   max_spawn_depth: 1
   child_timeout_seconds: 600
   subagent_auto_approve: false
+  orchestrator_enabled: false
+  inherit_mcp_toolsets: false
   suitable_work:
     - bounded source extraction and comparison
     - inventory and current-state reconciliation
@@ -70,6 +73,17 @@ delegation_policy:
     - recursive or speculative fanout
     - treating a subagent self-report as verified evidence
     - using an ephemeral child as the owner of durable work
+
+auxiliary_policy:
+  background_review:
+    purpose: Move automatic post-turn memory and skill review off expensive leadership models and force compact replay on the routed child model.
+    eligible_profiles: [aurora, grace, emily, alina, main, bridgette, xenia, maggie, mel]
+    provider: openai-codex
+    model: gpt-5.6-luna
+    reasoning_effort: xhigh
+    timeout_seconds: 120
+    enabled: true
+    note: Hermes automatically uses a compact conversation digest when this differs from the parent model; the parent conversation model is unchanged.
 
 assignments:
   aurora: {profile: aurora, preset: sol-medium}
