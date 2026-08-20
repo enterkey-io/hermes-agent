@@ -153,9 +153,15 @@ def test_list_workforce_reporting_line_is_host_scoped(monkeypatch, worker_env):
     }))
     assert "mutually exclusive" in error["error"]
 
+    self_result = json.loads(kt._handle_list({
+        "workforce_scope": "self", "status": "ready", "limit": 12,
+    }))
+    assert [task["id"] for task in self_result["tasks"]] == [own]
+    assert self_result["scope_profiles"] == ["director"]
+
     list_properties = kt.KANBAN_LIST_SCHEMA["parameters"]["properties"]
     show_properties = kt.KANBAN_SHOW_SCHEMA["parameters"]["properties"]
-    assert list_properties["workforce_scope"]["enum"] == ["reporting_line"]
+    assert list_properties["workforce_scope"]["enum"] == ["self", "reporting_line"]
     assert "workforce_scope" not in show_properties
 
 
