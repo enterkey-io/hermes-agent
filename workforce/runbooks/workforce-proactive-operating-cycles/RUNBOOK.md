@@ -42,6 +42,9 @@ schedules:
   deliver: buzz:<ROOM_UUID:admin>
   step_key: chloe_observe
   enabled_toolsets: [kanban, workforce, runbook, no_mcp]
+  provider: openai-codex
+  model: gpt-5.6-luna
+  reasoning_effort: xhigh
 - id: milena-executive-follow-through
   name: workforce-milena-executive-follow-through
   profile: milena
@@ -50,6 +53,9 @@ schedules:
   deliver: buzz:<ROOM_UUID:executive-support>
   step_key: milena_reconcile
   enabled_toolsets: [kanban, workforce, runbook, no_mcp]
+  provider: openai-codex
+  model: gpt-5.6-luna
+  reasoning_effort: xhigh
 - id: product-outcome-review
   name: workforce-product-outcome-review
   profile: emily
@@ -58,6 +64,9 @@ schedules:
   deliver: buzz:<ROOM_UUID:director-product>
   step_key: director_product
   enabled_toolsets: [kanban, workforce, runbook, no_mcp]
+  provider: openai-codex
+  model: gpt-5.6-luna
+  reasoning_effort: xhigh
 - id: agent-systems-outcome-review
   name: workforce-agent-systems-outcome-review
   profile: alina
@@ -66,6 +75,9 @@ schedules:
   deliver: buzz:<ROOM_UUID:director-agent-systems>
   step_key: director_agent_systems
   enabled_toolsets: [kanban, workforce, runbook, no_mcp]
+  provider: openai-codex
+  model: gpt-5.6-luna
+  reasoning_effort: xhigh
 - id: operations-outcome-review
   name: workforce-operations-outcome-review
   profile: main
@@ -74,6 +86,9 @@ schedules:
   deliver: buzz:<ROOM_UUID:director-operations>
   step_key: director_operations
   enabled_toolsets: [kanban, workforce, runbook, no_mcp]
+  provider: openai-codex
+  model: gpt-5.6-luna
+  reasoning_effort: xhigh
 - id: marketing-outcome-review
   name: workforce-marketing-outcome-review
   profile: bridgette
@@ -82,6 +97,9 @@ schedules:
   deliver: buzz:<ROOM_UUID:director-marketing>
   step_key: director_marketing
   enabled_toolsets: [kanban, workforce, runbook, no_mcp]
+  provider: openai-codex
+  model: gpt-5.6-luna
+  reasoning_effort: xhigh
 - id: trading-outcome-review
   name: workforce-trading-outcome-review
   profile: xenia
@@ -90,6 +108,9 @@ schedules:
   deliver: buzz:<ROOM_UUID:director-trading>
   step_key: director_trading
   enabled_toolsets: [kanban, workforce, runbook, no_mcp]
+  provider: openai-codex
+  model: gpt-5.6-luna
+  reasoning_effort: xhigh
 - id: finance-outcome-review
   name: workforce-finance-outcome-review
   profile: maggie
@@ -98,6 +119,9 @@ schedules:
   deliver: buzz:<ROOM_UUID:director-finance>
   step_key: director_finance
   enabled_toolsets: [kanban, workforce, runbook, no_mcp]
+  provider: openai-codex
+  model: gpt-5.6-luna
+  reasoning_effort: xhigh
 - id: vision-alternatives-review
   name: workforce-vision-alternatives-review
   profile: mel
@@ -106,6 +130,9 @@ schedules:
   deliver: buzz:<ROOM_UUID:director-vision>
   step_key: director_vision
   enabled_toolsets: [kanban, workforce, runbook, no_mcp]
+  provider: openai-codex
+  model: gpt-5.6-terra
+  reasoning_effort: high
 - id: aurora-portfolio-reconciliation
   name: workforce-aurora-portfolio-reconciliation
   profile: aurora
@@ -114,6 +141,9 @@ schedules:
   deliver: buzz:<ROOM_UUID:admin>
   step_key: aurora_portfolio
   enabled_toolsets: [kanban, workforce, runbook, no_mcp]
+  provider: openai-codex
+  model: gpt-5.6-luna
+  reasoning_effort: xhigh
 - id: aurora-leverage-factory-review
   name: workforce-aurora-leverage-factory-review
   profile: aurora
@@ -122,6 +152,9 @@ schedules:
   deliver: buzz:<ROOM_UUID:admin>
   step_key: aurora_leverage
   enabled_toolsets: [kanban, workforce, runbook, no_mcp]
+  provider: openai-codex
+  model: gpt-5.6-terra
+  reasoning_effort: high
 steps:
 - step_key: chloe_observe
   name: Confirm factual workforce current state

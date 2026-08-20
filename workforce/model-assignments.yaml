@@ -44,7 +44,11 @@ route_policy:
     note: The smart approval reviewer is independent of conversation and channel models.
   cron:
     source: per_job_pin
-    note: Scheduled jobs do not inherit this roster and require a separate reviewed migration.
+    proactive_operating_cycles:
+      routine_reconciliation: luna-xhigh
+      vision_alternatives: terra-high
+      leverage_factory_review: terra-high
+    note: Scheduled jobs do not inherit the main roster. Bounded proactive reconciliation is explicitly pinned to Luna; Vision and leverage synthesis are pinned to Terra; deep weekly goal review remains Sol medium.
 
 delegation_policy:
   purpose: Preserve expensive parent judgment while moving bounded support work into isolated lower-cost contexts.

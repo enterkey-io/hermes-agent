@@ -16,7 +16,9 @@ that file first whenever Elliott changes the roster.
 - Smart approval review remains `openai-codex/gpt-5.6-terra` at xhigh effort,
   independent of the conversation model.
 - Cron jobs remain independently pinned in each profile's `cron/jobs.json`.
-  Do not infer or change a Cron model from this table.
+  The managed proactive runbook pins routine reconciliation to Luna xhigh,
+  Vision/leverage synthesis to Terra high, and the deep weekly goals review to
+  Sol medium. Other Cron pins still require separate review.
 
 ## Cost-aware subagents
 
@@ -42,6 +44,14 @@ Sol/Terra parent, Hermes replays a compact digest instead of the full leadership
 conversation. This directly removes a major source of repeated Sol input-token
 spend without changing the agent's main conversation model or disabling memory
 review.
+
+The frequent managed proactive cycles do not pay the primary-model rate merely
+to list, compare, and reconcile bounded evidence. Chloe, Milena, each daily
+department review, and Aurora's twice-daily portfolio cycle are pinned to Luna
+xhigh. Mel's formal 10x response and Aurora's weekly leverage/factory review
+are pinned to Terra high because those steps require stronger synthesis. The
+weekly canonical-goals review stays on Sol medium; its weekday projection is
+Luna xhigh.
 
 ## Current roster
 
