@@ -23,6 +23,17 @@ profile_defaults:
   mel: {mode: team, room: director-vision, audience: vision-leadership}
   grace: {mode: team, room: executive-support, audience: executive-support}
 job_overrides:
+  aurora/7d64bfd2d638: {mode: local-only, reason: internal portfolio reconciliation routes work through Kanban and agent handoffs}
+  aurora/c02f79bda414: {mode: local-only, reason: internal leverage review routes qualified Vision work to Mel}
+  chloe/44f44143a9bd: {mode: local-only, reason: fact observation routes evidence to Aurora internally}
+  milena/c387a58b03e0: {mode: local-only, reason: executive reconciliation routes agent-directed follow-through internally}
+  emily/d597c09cfed1: {mode: local-only, reason: internal Product outcome reconciliation}
+  alina/26a0f1f95385: {mode: local-only, reason: internal Agent Systems outcome reconciliation}
+  main/841fad08f544: {mode: local-only, reason: internal Operations outcome reconciliation}
+  bridgette/b016134cf1a1: {mode: local-only, reason: internal Marketing outcome reconciliation}
+  xenia/708994d76c34: {mode: local-only, reason: internal Trading outcome reconciliation; critical personal alerts retain Photon exceptions}
+  maggie/a4e8a6f62f01: {mode: local-only, reason: internal Finance outcome reconciliation}
+  mel/c1fdbd4afbda: {mode: local-only, reason: formal Vision response routes to Aurora through Workforce Control}
   brenna/e0c7626e4467: {mode: team, room: executive-support, audience: executive-support, quiet_success: false}
   grace/019c9f963374: {mode: team, room: executive-support, audience: executive-support, quiet_success: false, reason: weekday LIFT One Thing is executive-support work}
   grace/537d8032bdaf: {mode: private-personal, reason: personal weekday continuity}

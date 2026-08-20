@@ -17,16 +17,17 @@ from hermes_cli.runbook_schema import split_frontmatter
 
 ROOM_TOKEN = re.compile(r"<ROOM_UUID:([a-z0-9-]+)>")
 BOUNDED_TOOLSETS = ["kanban", "workforce", "runbook", "no_mcp"]
-BOUNDED_MAX_ITERATIONS = 12
+BOUNDED_MAX_ITERATIONS = 8
 BOUNDED_TOOL_BUDGET = {
-    "max_calls": 10,
+    "max_calls": 6,
     "max_writes": 1,
-    "max_detail_reads": 3,
-    "max_list_items": 20,
+    "max_detail_reads": 2,
+    "max_list_items": 12,
     "allowed_tools": [
         "kanban_list", "kanban_show", "kanban_complete", "kanban_block",
         "kanban_request_review", "kanban_request_changes", "kanban_comment",
-        "kanban_archive_stale", "kanban_attachments", "workforce_signal", "runbook_list",
+        "kanban_archive_stale", "kanban_attachments", "workforce_signal",
+        "workforce_handoff", "runbook_list",
         "runbook_search", "runbook_get", "runbook_validate", "runbook_runs",
         "workforce_goals", "workforce_vision", "workforce_observe_buzz",
     ],
@@ -63,7 +64,7 @@ def render(template: Path, room_map_path: Path) -> str:
     schedules = parsed.metadata["schedules"]
     runtime = parsed.metadata["runtime"]
     if runtime.get("max_iterations") != BOUNDED_MAX_ITERATIONS:
-        raise ValueError("proactive cycle runtime must enforce max_iterations=12")
+        raise ValueError("proactive cycle runtime must enforce max_iterations=8")
     if runtime.get("tool_budget") != BOUNDED_TOOL_BUDGET:
         raise ValueError("proactive cycle runtime must use the bounded tool budget")
     steps = {
@@ -96,14 +97,11 @@ def render(template: Path, room_map_path: Path) -> str:
             )
         parse_schedule(str(schedule.get("schedule") or ""))
         destination = str(schedule.get("deliver") or "")
-        if not destination.startswith("buzz:"):
-            raise ValueError(f"schedule {schedule_id!r} must deliver through Buzz")
-        try:
-            destination_uuid = UUID(destination.split(":", 1)[1])
-        except (ValueError, AttributeError):
-            raise ValueError(f"schedule {schedule_id!r} has an invalid Buzz destination")
-        if str(destination_uuid) != destination.split(":", 1)[1].casefold():
-            raise ValueError(f"schedule {schedule_id!r} has an invalid Buzz destination")
+        if destination != "local":
+            raise ValueError(
+                f"schedule {schedule_id!r} must remain local-only; internal "
+                "reconciliation may not deliver to an Elliott-visible room"
+            )
         if schedule.get("enabled_toolsets") != BOUNDED_TOOLSETS:
             raise ValueError(
                 f"schedule {schedule_id!r} must use the bounded proactive toolsets"
