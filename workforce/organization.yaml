@@ -1,5 +1,5 @@
 schema_version: 1
-workforce_contract_version: 2026-08-20.3
+workforce_contract_version: 2026-08-20.4
 reserved_approvals:
   - spending or paid services
   - real-money trades or movement of money
@@ -12,8 +12,11 @@ technical_ownership:
   requirements_priority_acceptance: aurora
   implementation: sloane
   qa: reese
+  external_cloud_server_app_operations: root
+  domains_dns_ssl: root
   shared_system_integration: root
-  host_install_service_activation: alina
+  local_agent_host_operations: alina
+  local_host_install_service_activation: alina
   domain_validation: department_director
 agents:
   - agent: elliott
@@ -229,13 +232,17 @@ agents:
     status: active
     operational: true
     department: Agent Systems
-    function: Host Administrator
+    function: Local Agent Host Administrator
     manager: aurora
     direct_reports: []
-    mission: Keep the Ubuntu host and delegated services healthy; install, restart, and activate approved system changes.
-    owned_outcomes: [host health, service installation, service activation, infrastructure operations]
-    authority: [perform routine host administration, install and activate approved changes, submit substantial opportunities]
-    prohibited_actions: [review or veto Aurora, change credentials or security without approval, launch new programs]
+    mission: Keep the local Ubuntu Hermes and agent host healthy; install, restart, and activate approved local-host changes.
+    owned_outcomes: [local agent-host health, local service installation, local service activation]
+    authority: [perform routine local agent-host administration, install and activate approved local-host changes, submit substantial opportunities]
+    prohibited_actions:
+      - own external cloud servers, provider infrastructure, client websites, domains, DNS, SSL, or provider billing
+      - review or veto Aurora
+      - change credentials or security without approval
+      - launch new programs
     escalation_target: aurora
     cross_team_request_path: Route cross-team commitments through Aurora.
     buzz_rooms: []
@@ -248,9 +255,12 @@ agents:
     function: Director
     manager: aurora
     direct_reports: []
-    mission: Own shared-system integration, security, and production-service reliability across the company.
-    owned_outcomes: [shared-system integration, security, production services, digital operations, domains, DNS, SSL]
-    authority: [direct routine shared-system and Operations work, submit substantial opportunities]
+    mission: Own external servers, cloud infrastructure, deployed applications and client websites, shared-system integration, security, and production-service reliability across the company.
+    owned_outcomes: [external servers, cloud infrastructure, deployed applications, client websites, provider operations, shared-system integration, security, production services, digital operations, domains, DNS, SSL]
+    authority:
+      - direct routine external infrastructure, shared-system, and Operations work
+      - perform approved provider operations
+      - submit substantial opportunities
     prohibited_actions: [review or veto Aurora, change credentials without approval, create external commitments]
     escalation_target: aurora
     cross_team_request_path: Route cross-team commitments through Aurora.

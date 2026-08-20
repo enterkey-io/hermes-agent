@@ -244,7 +244,7 @@ def test_technical_ownership_and_reserved_authority_are_enforced(board, organiza
 
     reserved = plan_payload(nodes=[{
         "key": "activation", "title": "Activate production", "assignee": "alina",
-        "responsibility": "host_install_service_activation", "action_class": "activation",
+        "responsibility": "local_host_install_service_activation", "action_class": "activation",
         "acceptance_test": "Service is live", "authority_class": "reserved", "parents": [],
     }])
     plan = record_plan(board, actor="aurora", payload=reserved, organization=organization)
@@ -256,6 +256,27 @@ def test_technical_ownership_and_reserved_authority_are_enforced(board, organiza
             current_state_evidence_at=int(time.time()), confirmed_execution_ready=True,
             organization=organization,
         )
+
+    wrong_external_owner = plan_payload(nodes=[{
+        "key": "cloud", "title": "Operate external cloud resource", "assignee": "alina",
+        "responsibility": "external_cloud_server_app_operations", "action_class": "provider_operation",
+        "acceptance_test": "Provider state is verified", "authority_class": "routine", "parents": [],
+    }])
+    with pytest.raises(ValueError, match="owned by root"):
+        record_plan(
+            board, actor="aurora", payload=wrong_external_owner,
+            organization=organization,
+        )
+
+    correct_external_owner = plan_payload(nodes=[{
+        "key": "cloud", "title": "Operate external cloud resource", "assignee": "main",
+        "responsibility": "external_cloud_server_app_operations", "action_class": "provider_operation",
+        "acceptance_test": "Provider state is verified", "authority_class": "routine", "parents": [],
+    }])
+    record_plan(
+        board, actor="aurora", payload=correct_external_owner,
+        organization=organization,
+    )
 
 
 def test_materialization_requires_activation_fresh_state_and_resolved_intake(board, organization):

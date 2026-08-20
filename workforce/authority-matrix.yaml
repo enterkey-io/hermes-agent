@@ -1,5 +1,5 @@
 schema_version: 1
-contract_version: 2026-08-20.2
+contract_version: 2026-08-20.4
 retained_owner: elliott
 execution_owner: aurora
 rules:
@@ -56,8 +56,11 @@ responsibilities:
   requirements_priority_acceptance: aurora
   implementation: sloane
   qa: reese
+  external_cloud_server_app_operations: root
+  domains_dns_ssl: root
   shared_system_integration: root
-  host_install_service_activation: alina
+  local_agent_host_operations: alina
+  local_host_install_service_activation: alina
   domain_validation: department_director
 transitions:
   already_complete:

@@ -125,6 +125,34 @@ def simulate(organization: Path, staging_root: Path) -> dict[str, Any]:
     interaction_results["mel_vision_without_execution_authority"] = (
         "may not approve, prioritize, route, assign, or execute implementation" in mel_text
     )
+    aurora_text = (staging_root / "aurora" / "AGENTS.md").read_text(encoding="utf-8")
+    alina_text = (staging_root / "alina" / "AGENTS.md").read_text(encoding="utf-8")
+    root_text = (staging_root / "root" / "AGENTS.md").read_text(encoding="utf-8")
+    interaction_results["external_infrastructure_routes_to_root_main"] = all(
+        value in aurora_text
+        for value in (
+            "Root is a configured, active worker under the `main` profile",
+            "I assign DigitalOcean",
+            "client websites",
+            "provider billing verification to Root",
+        )
+    ) and all(
+        value in root_text
+        for value in (
+            "active Hermes worker under profile directory `main`",
+            "I own DigitalOcean",
+            "client websites",
+            "provider billing verification",
+        )
+    )
+    interaction_results["alina_is_local_host_not_external_infrastructure"] = all(
+        value in alina_text
+        for value in (
+            "local Agent Systems host operator",
+            "I do not own DigitalOcean",
+            "Those route to Root (`main`)",
+        )
+    )
     if not all(interaction_results.values()):
         errors.append("cross-workforce interaction simulation failed")
     return {
