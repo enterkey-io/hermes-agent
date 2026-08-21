@@ -13,6 +13,50 @@ def _write_jobs(root: Path, profile: str, jobs: list[dict]):
     path.write_text(json.dumps({"jobs": jobs}))
 
 
+def _write_runbook(root: Path, *, schedule: str, include_cron_job_id: bool = True):
+    path = root / "vt-cycle" / "RUNBOOK.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cron_job_id = "  cron_job_id: 5e918872bd5a\n" if include_cron_job_id else ""
+    path.write_text(
+        f"""---
+id: wf-vt
+slug: vt-cycle
+title: VT Cycle
+purpose: Test exact schedule parity.
+owner_profile: xenia
+status: active
+runtime:
+  kind: hermes
+  ref: profile:xenia
+schedules:
+- id: cron-vt-late
+  name: vt-late
+  profile: xenia
+{cron_job_id.rstrip()}
+  schedule: {schedule}
+  timezone: America/Chicago
+  enabled: true
+  step_key: late
+steps:
+- step_key: late
+  name: Late pass
+  description: Reconcile late evidence.
+  executor_profile: xenia
+inputs: {{}}
+outputs: {{}}
+permitted_writes: []
+approval_rules: {{}}
+retry: {{}}
+timeout: {{}}
+deduplication: {{}}
+related: {{}}
+---
+# Procedure
+""",
+        encoding="utf-8",
+    )
+
+
 def test_delivery_inventory_redacts_targets_and_detects_hidden_fallback(tmp_path):
     _write_jobs(
         tmp_path,
@@ -215,6 +259,82 @@ def test_xenia_critical_trading_alerts_preserve_photon_imessage(tmp_path):
     assert all(job["classification"] == "private-personal" for job in report["jobs"])
     assert all(job["current_destination"] == "photon:<redacted-target>" for job in report["jobs"])
     assert all(job["migration_required"] is False for job in report["jobs"])
+
+
+def test_registry_schedule_parity_detects_body_drift_not_just_identity(tmp_path):
+    runbooks_root = tmp_path / "runbooks"
+    _write_runbook(runbooks_root, schedule="55 14 * * 1-5")
+    _write_jobs(tmp_path, "xenia", [{
+        "id": "5e918872bd5a",
+        "name": "VT rolling reconciliation",
+        "enabled": True,
+        "schedule": {"kind": "cron", "expr": "35,40,45,50,55 14 * * 1-5"},
+        "timezone": "America/Chicago",
+        "deliver": "photon:+15551234567",
+        "workflow_id": "wf-vt",
+        "workflow_slug": "vt-cycle",
+    }])
+    report = build_manifest(
+        tmp_path, ROOT / "workforce/organization.yaml",
+        ROOT / "workforce/delivery-policy.yaml", ROOT / "workforce/buzz-topology.yaml",
+        runbooks_root=runbooks_root,
+    )
+    job = report["jobs"][0]
+    assert job["registry_cron_mismatch"] is True
+    assert job["registry_cron_mismatch_reasons"] == [
+        "Cron expression differs from canonical runbook"
+    ]
+    assert report["summary"]["registry_cron_mismatches"] == 1
+    assert report["registry_cron_mismatches"] == ["xenia/5e918872bd5a"]
+    assert report["valid"] is False
+
+
+def test_registry_schedule_parity_accepts_exact_canonical_contract(tmp_path):
+    runbooks_root = tmp_path / "runbooks"
+    _write_runbook(runbooks_root, schedule="35,40,45,50,55 14 * * 1-5")
+    _write_jobs(tmp_path, "xenia", [{
+        "id": "5e918872bd5a",
+        "name": "VT rolling reconciliation",
+        "enabled": True,
+        "schedule": {"kind": "cron", "expr": "35,40,45,50,55 14 * * 1-5"},
+        "timezone": "America/Chicago",
+        "deliver": "photon:+15551234567",
+        "workflow_id": "wf-vt",
+        "workflow_slug": "vt-cycle",
+    }])
+    report = build_manifest(
+        tmp_path, ROOT / "workforce/organization.yaml",
+        ROOT / "workforce/delivery-policy.yaml", ROOT / "workforce/buzz-topology.yaml",
+        runbooks_root=runbooks_root,
+    )
+    job = report["jobs"][0]
+    assert job["registry_cron_mismatch"] is False
+    assert job["registry_cron_mismatch_reasons"] == []
+    assert report["valid"] is True
+
+
+def test_registry_schedule_parity_accepts_profile_name_fallback(tmp_path):
+    runbooks_root = tmp_path / "runbooks"
+    _write_runbook(
+        runbooks_root,
+        schedule="35,40,45,50,55 14 * * 1-5",
+        include_cron_job_id=False,
+    )
+    _write_jobs(tmp_path, "xenia", [{
+        "id": "different-live-id",
+        "name": "vt-late",
+        "enabled": True,
+        "schedule": {"kind": "cron", "expr": "35,40,45,50,55 14 * * 1-5"},
+        "deliver": "photon:+15551234567",
+        "workflow_id": "wf-vt",
+        "workflow_slug": "vt-cycle",
+    }])
+    report = build_manifest(
+        tmp_path, ROOT / "workforce/organization.yaml",
+        ROOT / "workforce/delivery-policy.yaml", ROOT / "workforce/buzz-topology.yaml",
+        runbooks_root=runbooks_root,
+    )
+    assert report["jobs"][0]["registry_cron_mismatch"] is False
 
 
 def test_paperclip_route_is_explicitly_dispositioned(tmp_path):
