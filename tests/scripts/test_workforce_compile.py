@@ -64,6 +64,9 @@ def test_canonical_compile_includes_active_chloe_and_emma(tmp_path):
     assert "submit one concrete workforce signal for Aurora" not in aurora_text
     assert "Root is a configured, active worker under the `main` profile" in aurora_text
     assert "I assign DigitalOcean" in aurora_text
+    assert "Close every accepted commitment" in aurora_text
+    assert "report_to_origin: true" in aurora_text
+    assert "exact DM, room thread, or conversation" in aurora_text
 
     alina_text = (tmp_path / "alina" / "AGENTS.md").read_text()
     assert "I do not own DigitalOcean" in alina_text

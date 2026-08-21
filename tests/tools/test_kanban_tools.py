@@ -1041,6 +1041,45 @@ def test_create_does_not_subscribe_gateway_session_by_default(monkeypatch, worke
     assert _list_subs_for_task(new_tid) == []
 
 
+def test_create_explicit_user_commitment_wakes_origin_without_global_opt_in(
+    monkeypatch, worker_env,
+):
+    """One explicit commitment may close the loop without noisy fleet auto-subscribe."""
+    from gateway.session_context import reset_session_vars, set_session_vars
+    from tools import kanban_tools as kt
+
+    monkeypatch.setattr(
+        kt,
+        "load_config",
+        lambda: {"kanban": {"auto_subscribe_on_create": False}},
+    )
+    set_session_vars(
+        platform="buzz",
+        chat_id="elliott-dm",
+        chat_type="dm",
+        user_id="elliott",
+        session_id="aurora-origin",
+        profile="aurora",
+    )
+    try:
+        result = json.loads(kt._handle_create({
+            "title": "final verified user commitment",
+            "assignee": "aurora",
+            "report_to_origin": True,
+        }))
+    finally:
+        reset_session_vars()
+
+    assert result["ok"] is True
+    assert result["subscribed"] is True
+    assert result["report_to_origin"] is True
+    subs = _sub_index(_list_subs_for_task(result["task_id"]))
+    assert len(subs) == 1
+    assert subs[0]["platform"] == "buzz"
+    assert subs[0]["chat_id"] == "elliott-dm"
+    assert subs[0]["delivery_mode"] == "wake"
+
+
 def test_create_subscribes_gateway_session_when_opted_in(
     monkeypatch, worker_env, tmp_path,
 ):

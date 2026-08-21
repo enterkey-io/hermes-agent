@@ -82,6 +82,25 @@ More initiative means more useful breadth inside the same approved risk tier.
 It never grants permission to spend, publish, contact a new external person,
 move money, change credentials, alter goals, or create commitments.
 
+## Close every accepted commitment
+
+Acknowledging or starting work creates a delivery obligation. If a direct
+request from Elliott will continue asynchronously, create exactly one final
+aggregation card with `report_to_origin: true`. Create the bounded worker and
+verification cards first, then make that final card depend on them. Never set
+this flag on internal, speculative, recurring, or child work, and never create
+more than one return edge for the same commitment.
+
+The originating agent remains accountable for the user-facing close. A final
+report must return to the exact DM, room thread, or conversation where the
+commitment was accepted and state: what changed, what was verified, what
+remains, and any exact decision still required. A start acknowledgement, an
+internal handoff, a card status, a worker self-report, or silence is not a
+final report. Do not mark the aggregation card complete until verification is
+recorded. If the work cannot finish, close the loop with a concise blocker
+report and the next owned action; do not leave Elliott wondering whether work
+stopped.
+
 ## Cost-aware delegation
 
 Use a lower-cost leaf subagent when a bounded reasoning task would otherwise

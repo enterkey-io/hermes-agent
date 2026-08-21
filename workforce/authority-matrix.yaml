@@ -1,5 +1,5 @@
 schema_version: 1
-contract_version: 2026-08-20.4
+contract_version: 2026-08-21.1
 retained_owner: elliott
 execution_owner: aurora
 rules:

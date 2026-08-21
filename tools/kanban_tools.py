@@ -1488,6 +1488,9 @@ def _handle_create(args: dict, **kw) -> str:
     goal_mode, goal_bool_error = _parse_bool_arg(args, "goal_mode")
     if goal_bool_error:
         return tool_error(goal_bool_error)
+    report_to_origin, report_bool_error = _parse_bool_arg(args, "report_to_origin")
+    if report_bool_error:
+        return tool_error(report_bool_error)
     goal_max_turns = args.get("goal_max_turns")
     model_override = args.get("model")
     provider_override = args.get("provider")
@@ -1543,7 +1546,12 @@ def _handle_create(args: dict, **kw) -> str:
                 session_id=session_id,
             )
             new_task = kb.get_task(conn, new_tid)
-            subscribed = _maybe_auto_subscribe(conn, new_tid)
+            subscribed = _maybe_auto_subscribe(
+                conn,
+                new_tid,
+                explicit=report_to_origin,
+                delivery_mode="wake" if report_to_origin else None,
+            )
             attached_session_id = new_task.session_id if new_task else session_id
             wake_attached = bool(subscribed and attached_session_id)
             if wake_attached:
@@ -1569,6 +1577,7 @@ def _handle_create(args: dict, **kw) -> str:
                 workspace_path=new_task.workspace_path if new_task else None,
                 project_id=new_task.project_id if new_task else None,
                 subscribed=subscribed,
+                report_to_origin=bool(report_to_origin and subscribed),
                 session_id=attached_session_id,
                 wake_attached=wake_attached,
                 delivery_mode=delivery_mode,
@@ -1583,7 +1592,13 @@ def _handle_create(args: dict, **kw) -> str:
         return tool_error(f"kanban_create: {e}")
 
 
-def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
+def _maybe_auto_subscribe(
+    conn: Any,
+    task_id: str,
+    *,
+    explicit: bool = False,
+    delivery_mode: str | None = None,
+) -> bool:
     """Auto-subscribe the calling session to task completion / block events.
 
     Returns True if a subscription row was written, False otherwise (no
@@ -1593,10 +1608,10 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
     explicit ``kanban_notify-subscribe`` or to polling.
 
     Gated by ``kanban.auto_subscribe_on_create`` in config.yaml (default
-    False). Enable only when an operator intentionally wants every task
-    created by the model in a persistent session to subscribe that session.
-    Explicit user subscriptions, including gateway ``/kanban create``, use a
-    separate path and are unaffected.
+    False), unless the caller explicitly marks one user-facing commitment for
+    return-to-origin reporting. Explicit commitment subscriptions use
+    wake-only delivery so the originating agent writes a verified final report
+    instead of exposing raw internal Kanban chatter to the user.
 
     Subscription paths:
 
@@ -1623,9 +1638,10 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
     kanban_create that the agent is mid-conversation about.
     """
     try:
-        cfg = load_config()
-        if not cfg_get(cfg, "kanban", "auto_subscribe_on_create", default=False):
-            return False
+        if not explicit:
+            cfg = load_config()
+            if not cfg_get(cfg, "kanban", "auto_subscribe_on_create", default=False):
+                return False
     except Exception:
         # Configuration failure must fail closed. Auto-subscription is an
         # optional delivery side effect; task creation itself still succeeds.
@@ -1661,7 +1677,10 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
             chat_id = session_key
         is_gateway_session = platform != "tui"
         chat_type = get_session_env("HERMES_SESSION_CHAT_TYPE", "") or None
-        delivery_mode = "notify+wake" if is_gateway_session else None
+        selected_delivery_mode = (
+            delivery_mode if is_gateway_session and delivery_mode else
+            "notify+wake" if is_gateway_session else None
+        )
         thread_id = get_session_env("HERMES_SESSION_THREAD_ID", "") or None
         user_id = get_session_env("HERMES_SESSION_USER_ID", "") or None
         user_id_alt = get_session_env("HERMES_SESSION_USER_ID_ALT", "") or None
@@ -1700,7 +1719,7 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
             thread_id=thread_id, user_id=user_id, user_id_alt=user_id_alt,
             chat_type=chat_type,
             notifier_profile=notifier_profile,
-            delivery_mode=delivery_mode,
+            delivery_mode=selected_delivery_mode,
             delivery_metadata=delivery_metadata or None,
         )
         return True
@@ -2426,6 +2445,18 @@ KANBAN_CREATE_SCHEMA = {
                     "continuation turns the worker may take before the task "
                     "is blocked for review. Ignored unless goal_mode is "
                     "true. Defaults to the goal-engine default (20)."
+                ),
+            },
+            "report_to_origin": {
+                "type": "boolean",
+                "description": (
+                    "Set true only on the single final aggregation card for a "
+                    "direct user commitment that will continue asynchronously. "
+                    "Its terminal event wakes the originating agent in this exact "
+                    "conversation so the agent can verify the outcome and deliver "
+                    "a final report. Never set it on internal work, speculative "
+                    "tasks, or multiple child cards for the same commitment. Build "
+                    "worker cards first, then make this final card depend on them."
                 ),
             },
             "model": {

@@ -3,6 +3,15 @@ effective_date: 2026-08-20
 status: trial
 approved_by: elliott
 
+context_policy:
+  provider: openai-codex
+  model_prefix: gpt-5.6-
+  mode: provider-resolved
+  direct_api_advertised_tokens: 1050000
+  codex_oauth_verified_tokens: 900000
+  native_compact_threshold_tokens: 750000
+  note: Remove stale per-profile context_length pins. Hermes resolves the provider-aware ceiling; native server compaction fires just before the 85% local fallback on the verified Codex OAuth route.
+
 presets:
   sol-medium:
     provider: openai-codex
@@ -149,5 +158,6 @@ change_contract:
   - Keep Matrix provider, model, and reasoning effort explicit in every operational profile.
   - Do not add a Buzz model override; Buzz inherits the approved agent assignment.
   - Reconcile any model language embedded in profile instructions.
+  - Do not pin GPT-5.6 Codex OAuth profiles to 200000 tokens; use the provider-aware resolver and the approved native compaction threshold.
   - Treat Cron job pins as a separate inventory and approval decision.
   - Back up changed profiles, restart only affected gateways, and validate effective routes.

@@ -42,6 +42,33 @@ def _apply_auxiliary_policy(raw: dict[str, Any], registry: dict[str, Any]) -> li
     return changes
 
 
+def _apply_context_policy(
+    raw: dict[str, Any], preset: dict[str, Any], registry: dict[str, Any]
+) -> list[str]:
+    """Remove stale fixed ceilings and keep native compaction near the safe route limit."""
+    policy = registry.get("context_policy") or {}
+    if not policy:
+        return []
+    provider = str(preset.get("provider") or "")
+    model_name = str(preset.get("model") or "")
+    if provider != str(policy.get("provider") or ""):
+        return []
+    if not model_name.startswith(str(policy.get("model_prefix") or "")):
+        return []
+
+    model = raw.setdefault("model", {})
+    model.pop("context_length", None)
+    compression = raw.setdefault("compression", {})
+    compression["codex_responses_native"] = True
+    threshold = int(policy["native_compact_threshold_tokens"])
+    compression["codex_responses_compact_threshold"] = threshold
+    return [
+        "model.context_length:provider-resolved",
+        "compression.codex_responses_native:true",
+        f"compression.codex_responses_compact_threshold:{threshold}",
+    ]
+
+
 def _dotenv_value(path: Path, key: str) -> str | None:
     """Read one simple credential value without loading other profile secrets."""
     if not path.is_file():
@@ -126,6 +153,7 @@ def stage(organization: Path, output: Path, models_path: Path | None = None) -> 
             model["provider"] = preset["provider"]
             model["default"] = preset["model"]
             raw.setdefault("agent", {})["reasoning_effort"] = preset["reasoning_effort"]
+            managed_change.extend(_apply_context_policy(raw, preset, model_registry))
             platform_models = raw.setdefault("platform_models", {})
             platform_models["matrix"] = {
                 "provider": "ollama-cloud", "default": "glm-5.2:cloud",

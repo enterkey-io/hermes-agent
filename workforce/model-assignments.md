@@ -24,6 +24,11 @@ that file first whenever Elliott changes the roster.
   task decomposition is disabled fleet-wide. Durable fan-out must be an
   intentional, reviewed task graph, not a side effect of whichever gateway
   acquires the shared lock first.
+- GPT-5.6 profiles do not carry a fixed `model.context_length`. OpenAI advertises
+  1,050,000 tokens for the direct API model family; Hermes' Codex OAuth route is
+  conservatively resolved to its locally verified 900,000-token usable ceiling.
+  Native Responses compaction is configured at 750,000 tokens, just before the
+  local 85% fallback (765,000), rather than at the old 200,000-token default.
 
 ## Cost-aware subagents
 
@@ -114,3 +119,5 @@ and behavioral mismatch observed on Luna.
    verify one read-only child canary before relying on the route.
 8. Apply and validate the complete auxiliary policy; verify low-cost tasks
    resolve to Luna, vision resolves to Terra, and task-specific limits survive.
+9. Verify GPT-5.6 profiles have no fixed `model.context_length`, resolve to the
+   provider-aware ceiling, and set native Responses compaction to 750,000.

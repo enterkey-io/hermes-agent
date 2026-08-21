@@ -1,5 +1,5 @@
 schema_version: 1
-workforce_contract_version: 2026-08-20.4
+workforce_contract_version: 2026-08-21.1
 reserved_approvals:
   - spending or paid services
   - real-money trades or movement of money

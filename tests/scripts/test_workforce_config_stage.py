@@ -60,8 +60,9 @@ def test_config_stage_routes_auxiliary_models_and_assigns_one_dispatch_owner(tmp
         profile.mkdir(parents=True)
         (profile / "AGENTS.md").write_text(f"# {agent_id}\n")
         (profile / "config.yaml").write_text(
-            "model: {provider: old, default: old}\n"
+            "model: {provider: old, default: old, context_length: 200000}\n"
             "agent: {reasoning_effort: low}\n"
+            "compression: {codex_responses_native: true, codex_responses_compact_threshold: 200000}\n"
             "auxiliary:\n  compression: {timeout: 77}\n"
         )
         agents.append({
@@ -91,6 +92,10 @@ def test_config_stage_routes_auxiliary_models_and_assigns_one_dispatch_owner(tmp
     models = tmp_path / "models.yaml"
     models.write_text(yaml.safe_dump({
         "presets": {"p": {"provider": "openai-codex", "model": "primary", "reasoning_effort": "medium"}},
+        "context_policy": {
+            "provider": "openai-codex", "model_prefix": "primary",
+            "native_compact_threshold_tokens": 750000,
+        },
         "assignments": {
             "aurora": {"profile": "aurora", "preset": "p"},
             "root": {"profile": "main", "preset": "p"},
@@ -111,6 +116,10 @@ def test_config_stage_routes_auxiliary_models_and_assigns_one_dispatch_owner(tmp
         "reasoning_effort": "xhigh",
     }
     assert by_agent["root"]["auxiliary"]["vision"]["model"] == "gpt-5.6-terra"
+    for candidate in by_agent.values():
+        assert "context_length" not in candidate["model"]
+        assert candidate["compression"]["codex_responses_native"] is True
+        assert candidate["compression"]["codex_responses_compact_threshold"] == 750000
 
 
 def test_config_stage_removes_only_a_proven_env_migrated_buzz_key(tmp_path: Path):
