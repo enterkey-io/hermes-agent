@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 import yaml
@@ -14,8 +15,95 @@ import yaml
 from hermes_cli.workforce_org import load_organization
 
 
+_HEX_KEY = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
 def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _apply_auxiliary_policy(raw: dict[str, Any], registry: dict[str, Any]) -> list[str]:
+    """Apply explicit auxiliary routes without replacing task-specific timeouts."""
+    changes: list[str] = []
+    auxiliary = raw.setdefault("auxiliary", {})
+    policies = registry.get("auxiliary_policy") or {}
+    for policy_name in ("general_low_cost", "vision"):
+        policy = policies.get(policy_name) or {}
+        for task in policy.get("tasks") or []:
+            slot = auxiliary.setdefault(str(task), {})
+            slot["provider"] = str(policy["provider"])
+            slot["model"] = str(policy["model"])
+            slot["reasoning_effort"] = str(policy["reasoning_effort"])
+            if task == "background_review":
+                slot["enabled"] = True
+            changes.append(
+                f"auxiliary.{task}:{policy['model']}/{policy['reasoning_effort']}"
+            )
+    return changes
+
+
+def _apply_context_policy(
+    raw: dict[str, Any], preset: dict[str, Any], registry: dict[str, Any]
+) -> list[str]:
+    """Remove stale fixed ceilings and keep native compaction near the safe route limit."""
+    policy = registry.get("context_policy") or {}
+    if not policy:
+        return []
+    provider = str(preset.get("provider") or "")
+    model_name = str(preset.get("model") or "")
+    if provider != str(policy.get("provider") or ""):
+        return []
+    if not model_name.startswith(str(policy.get("model_prefix") or "")):
+        return []
+
+    model = raw.setdefault("model", {})
+    model.pop("context_length", None)
+    compression = raw.setdefault("compression", {})
+    compression["codex_responses_native"] = True
+    threshold = int(policy["native_compact_threshold_tokens"])
+    compression["codex_responses_compact_threshold"] = threshold
+    return [
+        "model.context_length:provider-resolved",
+        "compression.codex_responses_native:true",
+        f"compression.codex_responses_compact_threshold:{threshold}",
+    ]
+
+
+def _dotenv_value(path: Path, key: str) -> str | None:
+    """Read one simple credential value without loading other profile secrets."""
+    if not path.is_file():
+        return None
+    prefix = f"{key}="
+    found: str | None = None
+    for line in path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("export "):
+            stripped = stripped[7:].lstrip()
+        if not stripped.startswith(prefix):
+            continue
+        value = stripped[len(prefix):].strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        if found is not None:
+            raise ValueError(f"{path}: duplicate {key} definitions")
+        found = value
+    return found
+
+
+def _remove_migrated_config_secrets(raw: dict[str, Any], profile: Path) -> list[str]:
+    """Remove a legacy top-level Buzz key only after proving its env migration."""
+    if "BUZZ_PRIVATE_KEY" not in raw:
+        return []
+    legacy = str(raw["BUZZ_PRIVATE_KEY"] or "").strip()
+    env_value = _dotenv_value(profile / ".env", "BUZZ_PRIVATE_KEY")
+    if not _HEX_KEY.fullmatch(legacy):
+        raise ValueError(f"{profile.name}: legacy BUZZ_PRIVATE_KEY is not a 64-character hex key")
+    if env_value != legacy:
+        raise RuntimeError(
+            f"{profile.name}: migrate the exact legacy BUZZ_PRIVATE_KEY to the owner-only .env before staging"
+        )
+    raw.pop("BUZZ_PRIVATE_KEY")
+    return ["credential-location:BUZZ_PRIVATE_KEY:config-to-env"]
 
 
 def stage(organization: Path, output: Path, models_path: Path | None = None) -> dict[str, Any]:
@@ -28,6 +116,7 @@ def stage(organization: Path, output: Path, models_path: Path | None = None) -> 
         raw = yaml.safe_load(source.read_text(encoding="utf-8-sig")) or {}
         if not isinstance(raw, dict):
             raise ValueError(f"{agent.agent}: config must be a mapping")
+        secret_changes = _remove_migrated_config_secrets(raw, profile)
         toolsets = list(raw.get("toolsets") or [])
         if "workforce" not in toolsets:
             toolsets.append("workforce")
@@ -40,7 +129,16 @@ def stage(organization: Path, output: Path, models_path: Path | None = None) -> 
         disabled = [name for name in disabled if name != "workforce-control"]
         plugins["enabled"] = enabled
         plugins["disabled"] = disabled
-        managed_change = ["toolsets:+workforce", "plugins.enabled:+workforce-control"]
+        managed_change = [
+            "toolsets:+workforce", "plugins.enabled:+workforce-control", *secret_changes
+        ]
+        kanban = raw.setdefault("kanban", {})
+        kanban["auto_decompose"] = False
+        kanban["dispatch_in_gateway"] = agent.agent == "root"
+        managed_change.extend([
+            "kanban.auto_decompose:false",
+            f"kanban.dispatch_in_gateway:{str(agent.agent == 'root').lower()}",
+        ])
         if model_registry:
             assignment = (model_registry.get("assignments") or {}).get(agent.agent)
             if not assignment:
@@ -55,12 +153,14 @@ def stage(organization: Path, output: Path, models_path: Path | None = None) -> 
             model["provider"] = preset["provider"]
             model["default"] = preset["model"]
             raw.setdefault("agent", {})["reasoning_effort"] = preset["reasoning_effort"]
+            managed_change.extend(_apply_context_policy(raw, preset, model_registry))
             platform_models = raw.setdefault("platform_models", {})
             platform_models["matrix"] = {
                 "provider": "ollama-cloud", "default": "glm-5.2:cloud",
                 "reasoning_effort": "medium",
             }
             platform_models.pop("buzz", None)
+            managed_change.extend(_apply_auxiliary_policy(raw, model_registry))
             managed_change.extend([
                 f"model:{preset_name}", "platform_models.matrix:glm-5.2:cloud/medium",
                 "platform_models.buzz:inherit-main",

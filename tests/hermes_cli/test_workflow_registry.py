@@ -276,6 +276,62 @@ def test_prune_missing_schedule_links_keeps_only_live_jobs(conn) -> None:
     assert [tuple(row) for row in rows] == [("grace", "live")]
 
 
+def test_reconcile_schedule_links_adds_updates_and_removes_drift(conn) -> None:
+    one = _definition(conn, "one")
+    two = _definition(conn, "two")
+    reg.link_schedule(conn, one.id, profile="grace", cron_job_id="disabled", enabled=True)
+    reg.link_schedule(conn, one.id, profile="grace", cron_job_id="removed", enabled=True)
+
+    result = reg.reconcile_schedule_links(conn, [
+        {"profile": "grace", "cron_job_id": "disabled", "workflow_id": one.id, "enabled": False},
+        {"profile": "main", "cron_job_id": "new", "workflow_id": two.id, "enabled": True},
+    ])
+
+    assert [(row["cron_job_id"], row["enabled"]) for row in result["updated"]] == [("disabled", False)]
+    assert [row["cron_job_id"] for row in result["removed"]] == ["removed"]
+    assert [row["cron_job_id"] for row in result["added"]] == ["new"]
+    rows = conn.execute(
+        "SELECT profile,cron_job_id,enabled FROM workflow_schedules ORDER BY profile,cron_job_id"
+    ).fetchall()
+    assert [tuple(row) for row in rows] == [("grace", "disabled", 0), ("main", "new", 1)]
+
+
+def test_settle_orphaned_runs_closes_waiting_and_stale_parents(conn) -> None:
+    workflow = _definition(conn)
+    waiting = reg.start_run(conn, workflow.id, trigger_kind="cron")
+    waiting_step = reg.start_step(conn, waiting.id, "collect")
+    reg.finish_step(conn, waiting_step.id, status="waiting_for_approval")
+    stale = reg.start_run(conn, workflow.id, trigger_kind="cron")
+    stale_step = reg.start_step(conn, stale.id, "collect")
+    with reg.write_txn(conn):
+        conn.execute("UPDATE workflow_runs SET started_at=1 WHERE id=?", (stale.id,))
+
+    settled = reg.settle_orphaned_runs(conn, max_age_seconds=100, now=1000)
+
+    assert {row["run_id"] for row in settled} == {waiting.id, stale.id}
+    assert reg.get_run(conn, waiting.id).status == "cancelled"
+    assert reg.get_run(conn, stale.id).status == "cancelled"
+    assert reg.get_step_run(conn, stale_step.id).status == "cancelled"
+
+
+def test_settle_orphaned_runs_closes_parent_superseded_by_terminal_successor(conn) -> None:
+    workflow = _definition(conn)
+    orphan = reg.start_run(conn, workflow.id, trigger_kind="cron", trigger_ref="job")
+    successor = reg.start_run(conn, workflow.id, trigger_kind="cron", trigger_ref="job")
+    with reg.write_txn(conn):
+        conn.execute("UPDATE workflow_runs SET started_at=1 WHERE id=?", (orphan.id,))
+        conn.execute("UPDATE workflow_runs SET started_at=2 WHERE id=?", (successor.id,))
+    reg.complete_run(conn, successor.id)
+
+    settled = reg.settle_orphaned_runs(conn, max_age_seconds=9999, now=100)
+
+    assert settled == [{
+        "run_id": orphan.id,
+        "reason": f"superseded by terminal successor {successor.id}",
+    }]
+    assert reg.get_run(conn, orphan.id).status == "cancelled"
+
+
 def test_canonical_organization_rejects_friend_owner(conn, monkeypatch) -> None:
     org_path = Path(__file__).parents[2] / "workforce" / "organization.yaml"
     monkeypatch.setenv("HERMES_WORKFORCE_ORG", str(org_path))

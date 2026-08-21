@@ -164,6 +164,44 @@ def test_run_one_job_records_workflow_registry_run(monkeypatch):
     assert step_runs[0]["summary"] == "Collected context."
 
 
+def test_blocked_cron_workflow_terminalizes_non_resumable_parent(monkeypatch):
+    from hermes_cli import workflow_registry as reg
+
+    with reg.connect_closing() as conn:
+        reg.create_definition(
+            conn, id="wf-cron-blocked", slug="cron-workflow-blocked",
+            name="Cron Workflow Blocked", owner_profile="default",
+            status="active", runtime_kind="hermes",
+        )
+        reg.replace_steps(
+            conn, "wf-cron-blocked",
+            [{"step_key": "collect", "position": 0, "name": "Collect"}],
+        )
+    monkeypatch.setattr(
+        s, "run_job",
+        lambda job, **kwargs: (
+            True, "out", "Need a retained decision.\n[WORKFLOW_STATUS:blocked]", None
+        ),
+    )
+    monkeypatch.setattr(s, "save_job_output", lambda jid, out: "/tmp/out")
+    monkeypatch.setattr(s, "_deliver_result", lambda *args, **kwargs: None)
+    monkeypatch.setattr(s, "mark_job_run", lambda *args, **kwargs: None)
+
+    assert s.run_one_job({
+        "id": "workflow-blocked-job", "name": "blocked job",
+        "workflow_id": "wf-cron-blocked", "workflow_step_key": "collect",
+        "track_workflow_status": True,
+    })
+
+    with reg.connect_closing() as conn:
+        run = reg.list_runs(conn, "wf-cron-blocked")[0]
+        step = conn.execute("SELECT * FROM workflow_step_runs").fetchone()
+    assert run.status == "cancelled"
+    assert run.ended_at is not None
+    assert "future fire" in run.error
+    assert step["status"] == "waiting_for_approval"
+
+
 def test_failed_workflow_run_does_not_create_kanban_task(monkeypatch):
     from hermes_cli import workflow_registry as reg
     from hermes_constants import get_default_hermes_root

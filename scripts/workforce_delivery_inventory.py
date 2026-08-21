@@ -13,6 +13,7 @@ from uuid import UUID
 
 import yaml
 
+from hermes_cli.runbook_schema import split_frontmatter
 from hermes_cli.workforce_org import load_organization
 
 
@@ -166,12 +167,109 @@ def _command(profile_home: Path, job_id: str, destination: str) -> str:
     )
 
 
+def _cron_expression(job: dict[str, Any]) -> str | None:
+    schedule = job.get("schedule")
+    if isinstance(schedule, dict):
+        value = schedule.get("expr") or schedule.get("display")
+    else:
+        value = schedule
+    normalized = str(value or "").strip()
+    return normalized or None
+
+
+def _runbook_schedule_contracts(
+    runbooks_root: Path,
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]]]:
+    by_id: dict[str, list[dict[str, Any]]] = {}
+    by_slug: dict[str, list[dict[str, Any]]] = {}
+    if not runbooks_root.is_dir():
+        return by_id, by_slug
+    for path in sorted(runbooks_root.glob("*/RUNBOOK.md")):
+        parsed = split_frontmatter(path.read_text(encoding="utf-8-sig"))
+        metadata = parsed.metadata
+        contract = {
+            "id": str(metadata.get("id") or ""),
+            "slug": str(metadata.get("slug") or ""),
+            "schedules": list(metadata.get("schedules") or []),
+        }
+        if contract["id"]:
+            by_id.setdefault(contract["id"], []).append(contract)
+        if contract["slug"]:
+            by_slug.setdefault(contract["slug"], []).append(contract)
+    return by_id, by_slug
+
+
+def _registry_cron_mismatch_reasons(
+    job: dict[str, Any],
+    profile: str,
+    contracts_by_id: dict[str, list[dict[str, Any]]],
+    contracts_by_slug: dict[str, list[dict[str, Any]]],
+) -> list[str]:
+    workflow_id = str(job.get("workflow_id") or "").strip()
+    workflow_slug = str(job.get("workflow_slug") or job.get("runbook_slug") or "").strip()
+    if not workflow_id and not workflow_slug:
+        return ["cron job has no workflow/runbook identity"]
+
+    candidates: list[dict[str, Any]] = []
+    if workflow_id:
+        candidates.extend(contracts_by_id.get(workflow_id, []))
+    if workflow_slug:
+        candidates.extend(contracts_by_slug.get(workflow_slug, []))
+    unique = {(item["id"], item["slug"]): item for item in candidates}
+    if len(unique) != 1:
+        return [
+            "linked canonical runbook is missing"
+            if not unique
+            else "workflow identity resolves to multiple canonical runbooks"
+        ]
+    contract = next(iter(unique.values()))
+    if workflow_id and contract["id"] != workflow_id:
+        return ["workflow_id does not match canonical runbook"]
+    if workflow_slug and contract["slug"] != workflow_slug:
+        return ["workflow_slug does not match canonical runbook"]
+
+    job_id = str(job.get("id") or "")
+    schedules = [
+        item for item in contract["schedules"]
+        if isinstance(item, dict)
+        and str(item.get("cron_job_id") or "") == job_id
+        and str(item.get("profile") or "") == profile
+    ]
+    if not schedules:
+        job_name = str(job.get("name") or "")
+        schedules = [
+            item for item in contract["schedules"]
+            if isinstance(item, dict)
+            and not str(item.get("cron_job_id") or "")
+            and str(item.get("profile") or "") == profile
+            and str(item.get("name") or "") == job_name
+        ]
+    if len(schedules) != 1:
+        return [
+            "canonical runbook has no matching profile/cron_job_id schedule"
+            if not schedules
+            else "canonical runbook has duplicate profile/cron_job_id schedules"
+        ]
+    runbook_schedule = schedules[0]
+    reasons: list[str] = []
+    if str(runbook_schedule.get("schedule") or "").strip() != _cron_expression(job):
+        reasons.append("Cron expression differs from canonical runbook")
+    if bool(runbook_schedule.get("enabled", True)) != bool(job.get("enabled", True)):
+        reasons.append("enabled state differs from canonical runbook")
+    job_timezone = str(job.get("timezone") or "").strip()
+    runbook_timezone = str(runbook_schedule.get("timezone") or "").strip()
+    if job_timezone and runbook_timezone and job_timezone != runbook_timezone:
+        reasons.append("timezone differs from canonical runbook")
+    return reasons
+
+
 def build_manifest(
     profiles_root: Path,
     organization_path: Path,
     policy_path: Path,
     topology_path: Path,
     room_map: dict[str, str] | None = None,
+    runbooks_root: Path | None = None,
 ) -> dict[str, Any]:
     org = load_organization(organization_path)
     policy = yaml.safe_load(policy_path.read_text(encoding="utf-8-sig")) or {}
@@ -184,6 +282,10 @@ def build_manifest(
         for item in org.operational_agents(include_planned=False)
         if item.profile_path
     }
+    contracts_by_id: dict[str, list[dict[str, Any]]] = {}
+    contracts_by_slug: dict[str, list[dict[str, Any]]] = {}
+    if runbooks_root is not None:
+        contracts_by_id, contracts_by_slug = _runbook_schedule_contracts(runbooks_root)
     jobs: list[dict[str, Any]] = []
     seen_override_keys: set[str] = set()
     for profile, agent in sorted(operational_profiles.items()):
@@ -237,6 +339,17 @@ def build_manifest(
             paperclip_mentions, paperclip_disposition = _paperclip_evidence(
                 job, profiles_root / profile
             )
+            registry_mismatch_reasons = (
+                _registry_cron_mismatch_reasons(
+                    job, profile, contracts_by_id, contracts_by_slug
+                )
+                if runbooks_root is not None
+                else (
+                    []
+                    if job.get("workflow_id") or job.get("workflow_slug") or job.get("runbook_slug")
+                    else ["cron job has no workflow/runbook identity"]
+                )
+            )
             disallowed = mode == "team" and (
                 current_platform in {"telegram", "matrix", "photon", "origin", "missing"}
                 or bool(hidden)
@@ -286,11 +399,10 @@ def build_manifest(
                         if job.get("workflow_id") or job.get("workflow_slug") or job.get("runbook_slug")
                         else "unregistered"
                     ),
-                    "registry_cron_mismatch": not bool(
-                        job.get("workflow_id") or job.get("workflow_slug") or job.get("runbook_slug")
-                    ),
-                    "validation_blocked_until_registry_reconciled": not bool(
-                        job.get("workflow_id") or job.get("workflow_slug") or job.get("runbook_slug")
+                    "registry_cron_mismatch": bool(registry_mismatch_reasons),
+                    "registry_cron_mismatch_reasons": registry_mismatch_reasons,
+                    "validation_blocked_until_registry_reconciled": bool(
+                        registry_mismatch_reasons
                     ),
                     "paperclip_mentions": paperclip_mentions,
                     "legacy_paperclip_disposition": paperclip_disposition,
@@ -305,6 +417,11 @@ def build_manifest(
             )
     unused_overrides = sorted(set(overrides) - seen_override_keys)
     unclassified = [f"{row['profile']}/{row['job_id']}" for row in jobs if row["classification"] == "unclassified"]
+    registry_mismatches = [
+        f"{row['profile']}/{row['job_id']}"
+        for row in jobs
+        if row["registry_cron_mismatch"]
+    ]
     return {
         "schema_version": 1,
         "mutation_performed": False,
@@ -327,8 +444,11 @@ def build_manifest(
             "unclassified": len(unclassified),
         },
         "unclassified": unclassified,
+        "registry_cron_mismatches": registry_mismatches,
         "unused_policy_overrides": unused_overrides,
-        "valid": not unclassified,
+        "valid": not unclassified and (
+            runbooks_root is None or not registry_mismatches
+        ),
     }
 
 
@@ -339,6 +459,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--policy", type=Path, required=True)
     parser.add_argument("--topology", type=Path, required=True)
     parser.add_argument("--room-map", type=Path)
+    parser.add_argument(
+        "--runbooks-root",
+        type=Path,
+        help="Canonical runbooks root; when supplied, validate exact schedule parity",
+    )
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
     try:
@@ -348,6 +473,7 @@ def main(argv: list[str] | None = None) -> int:
             args.policy,
             args.topology,
             load_room_map(args.room_map) if args.room_map else None,
+            args.runbooks_root,
         )
     except (OSError, ValueError, json.JSONDecodeError, yaml.YAMLError) as exc:
         report = {"valid": False, "mutation_performed": False, "error": str(exc)}

@@ -153,6 +153,11 @@ def test_goal_projection_is_aurora_owned_bounded_and_reports_freshness(board):
     )
     assert published_again["snapshot_id"] == published["snapshot_id"]
     assert current_goal_snapshot(board)["captured_at"] >= first_capture
+    board.execute(
+        "UPDATE wc_goal_snapshots SET captured_at = captured_at - ? WHERE snapshot_id = ?",
+        (37 * 3600, published["snapshot_id"]),
+    )
+    assert current_goal_snapshot(board, max_age_hours=36)["stale"] is True
     with pytest.raises(ValueError, match="older than"):
         publish_goal_snapshot(
             board, actor="aurora", source_guid="guid", source_title="Goals",
@@ -239,7 +244,7 @@ def test_technical_ownership_and_reserved_authority_are_enforced(board, organiza
 
     reserved = plan_payload(nodes=[{
         "key": "activation", "title": "Activate production", "assignee": "alina",
-        "responsibility": "host_install_service_activation", "action_class": "activation",
+        "responsibility": "local_host_install_service_activation", "action_class": "activation",
         "acceptance_test": "Service is live", "authority_class": "reserved", "parents": [],
     }])
     plan = record_plan(board, actor="aurora", payload=reserved, organization=organization)
@@ -251,6 +256,27 @@ def test_technical_ownership_and_reserved_authority_are_enforced(board, organiza
             current_state_evidence_at=int(time.time()), confirmed_execution_ready=True,
             organization=organization,
         )
+
+    wrong_external_owner = plan_payload(nodes=[{
+        "key": "cloud", "title": "Operate external cloud resource", "assignee": "alina",
+        "responsibility": "external_cloud_server_app_operations", "action_class": "provider_operation",
+        "acceptance_test": "Provider state is verified", "authority_class": "routine", "parents": [],
+    }])
+    with pytest.raises(ValueError, match="owned by root"):
+        record_plan(
+            board, actor="aurora", payload=wrong_external_owner,
+            organization=organization,
+        )
+
+    correct_external_owner = plan_payload(nodes=[{
+        "key": "cloud", "title": "Operate external cloud resource", "assignee": "main",
+        "responsibility": "external_cloud_server_app_operations", "action_class": "provider_operation",
+        "acceptance_test": "Provider state is verified", "authority_class": "routine", "parents": [],
+    }])
+    record_plan(
+        board, actor="aurora", payload=correct_external_owner,
+        organization=organization,
+    )
 
 
 def test_materialization_requires_activation_fresh_state_and_resolved_intake(board, organization):
@@ -294,6 +320,27 @@ def test_bounded_graph_materializes_atomically_and_idempotently(board, organizat
     assert len(first["execution_tasks"]) == 1
     root = kanban_db.get_task(board, first["root_task_id"])
     assert root is not None and root.status == "todo"
+
+
+def test_plan_rejects_more_than_eight_execution_nodes(board, organization):
+    nodes = [
+        {
+            "key": f"node-{index}",
+            "title": f"Bounded node {index}",
+            "assignee": "sloane",
+            "responsibility": "backend_development",
+            "acceptance_test": "A bounded acceptance check passes",
+            "parents": [f"node-{index - 1}"] if index else [],
+        }
+        for index in range(9)
+    ]
+    with pytest.raises(ValueError, match="8-node safety limit"):
+        record_plan(
+            board,
+            actor="aurora",
+            payload=plan_payload(nodes=nodes),
+            organization=organization,
+        )
 
 
 def test_failed_verification_reopens_outcome_and_creates_one_remediation(board, organization):

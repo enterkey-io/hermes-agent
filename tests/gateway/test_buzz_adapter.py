@@ -260,6 +260,22 @@ class TestMentionGating:
         assert len(adapter._dispatched) == 1
 
     @pytest.mark.asyncio
+    async def test_leading_natural_language_addressee_is_preserved(self, adapter):
+        await self._poll_with(
+            adapter,
+            _event("e1", content="Chip you still here?", created_at=10),
+        )
+        assert adapter._dispatched[0]["text"] == "Chip you still here?"
+
+    @pytest.mark.asyncio
+    async def test_leading_mention_is_stripped_for_slash_command(self, adapter):
+        await self._poll_with(
+            adapter,
+            _event("e1", content="@Chip /whoami", created_at=10),
+        )
+        assert adapter._dispatched[0]["text"] == "/whoami"
+
+    @pytest.mark.asyncio
     async def test_followup_in_participated_thread_needs_no_repeat_mention(self, adapter):
         await self._poll_with(
             adapter,
@@ -369,6 +385,24 @@ class TestDmClassification:
         assert adapter._channel_state[DM_CHANNEL]["chat_type"] == "dm"
         assert [d["message_id"] for d in adapter._dispatched] == ["e1"]
         assert adapter._dispatched[0]["chat_type"] == "dm"
+
+    @pytest.mark.asyncio
+    async def test_dm_thread_reply_preserves_root_in_dispatch(self, adapter):
+        """A DM reply inside a thread must retain the user's chosen lane."""
+        await self._poll_with(
+            adapter,
+            DM_CHANNEL,
+            _tagged_event(
+                "dm-child",
+                DM_CHANNEL,
+                content="following up in this thread",
+                p=SELF_PUBKEY,
+                reply_to="dm-root",
+            ),
+        )
+
+        assert adapter._channel_state[DM_CHANNEL]["chat_type"] == "dm"
+        assert adapter._dispatched[0]["thread_id"] == "dm-root"
 
 
     @pytest.mark.asyncio
@@ -518,7 +552,7 @@ class TestBuzzAdapterSend:
         assert args[args.index("--reply-to") + 1] == "original-root"
 
     @pytest.mark.asyncio
-    async def test_dm_reply_stays_top_level(self):
+    async def test_top_level_dm_reply_stays_top_level(self):
         adapter = _make_adapter()
         adapter._channel_state[DM_CHANNEL] = {
             "chat_type": "dm",
@@ -534,12 +568,36 @@ class TestBuzzAdapterSend:
             DM_CHANNEL,
             "flat DM reply",
             reply_to="latest-child",
-            metadata={"thread_id": "original-root"},
         )
 
         assert result.success is True
         args, _stdin = cli.calls[0]
         assert "--reply-to" not in args
+        assert args[args.index("--mention") + 1] == OTHER_PUBKEY
+
+    @pytest.mark.asyncio
+    async def test_dm_thread_reply_targets_canonical_root(self):
+        adapter = _make_adapter()
+        adapter._channel_state[DM_CHANNEL] = {
+            "chat_type": "dm",
+            "last_ts": 0,
+            "seen": {},
+            "peer_pubkey": OTHER_PUBKEY,
+        }
+        cli = _ScriptedCli()
+        cli.script("messages", "send", {"accepted": True, "event_id": "evt-dm-thread"})
+        adapter._run_cli = cli
+
+        result = await adapter.send(
+            DM_CHANNEL,
+            "threaded DM reply",
+            reply_to="latest-child",
+            metadata={"thread_id": "original-root"},
+        )
+
+        assert result.success is True
+        args, _stdin = cli.calls[0]
+        assert args[args.index("--reply-to") + 1] == "original-root"
         assert args[args.index("--mention") + 1] == OTHER_PUBKEY
 
     @pytest.mark.asyncio
@@ -610,7 +668,7 @@ class TestBuzzAdapterSend:
         assert args[args.index("--reply-to") + 1] == "original-root"
 
     @pytest.mark.asyncio
-    async def test_send_image_in_dm_stays_top_level(self, tmp_path):
+    async def test_send_image_in_top_level_dm_stays_top_level(self, tmp_path):
         img = tmp_path / "shot.png"
         img.write_bytes(b"\x89PNG fake")
         adapter = _make_adapter()
@@ -628,12 +686,38 @@ class TestBuzzAdapterSend:
             DM_CHANNEL,
             str(img),
             reply_to="latest-child",
-            metadata={"thread_id": "original-root"},
         )
 
         assert result.success is True
         args, _stdin = cli.calls[0]
         assert "--reply-to" not in args
+        assert args[args.index("--mention") + 1] == OTHER_PUBKEY
+
+    @pytest.mark.asyncio
+    async def test_send_image_in_dm_thread_targets_root(self, tmp_path):
+        img = tmp_path / "shot.png"
+        img.write_bytes(b"\x89PNG fake")
+        adapter = _make_adapter()
+        adapter._channel_state[DM_CHANNEL] = {
+            "chat_type": "dm",
+            "last_ts": 0,
+            "seen": {},
+            "peer_pubkey": OTHER_PUBKEY,
+        }
+        cli = _ScriptedCli()
+        cli.script("messages", "send", {"accepted": True, "event_id": "evt-dm-image-thread"})
+        adapter._run_cli = cli
+
+        result = await adapter.send_image(
+            DM_CHANNEL,
+            str(img),
+            reply_to="latest-child",
+            metadata={"thread_id": "original-root"},
+        )
+
+        assert result.success is True
+        args, _stdin = cli.calls[0]
+        assert args[args.index("--reply-to") + 1] == "original-root"
         assert args[args.index("--mention") + 1] == OTHER_PUBKEY
 
     @pytest.mark.asyncio

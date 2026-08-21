@@ -421,7 +421,7 @@ hermes dashboard        # 导航栏中出现 "Kanban" 标签页，位于 "Skills
 
 **手动** —— `kanban.auto_decompose: false`。分诊任务保持在分诊中，直到你操作。点击卡片上的 **⚗ Decompose** 按钮，运行 `hermes kanban decompose <id>`（或 `--all`），或从聊天中使用 `/kanban decompose <id>`。这与看板的预分解器行为一致，适合需要完全控制运行时机的场景。
 
-**重要边界：** 手动模式只会关闭内置的 Triage 分解器。它不会阻止配置文件调用 `kanban_create`，也不会关闭创建者会话的唤醒。启用 `kanban.auto_subscribe_on_create: true` 时，任务的终止事件会通过合成状态消息恢复原始 agent，使其读取交接并判断是否确实需要新的后续工作。希望任务完成保持被动时，请设置 `auto_subscribe_on_create: false`。溯源时，内置分解器创建的子任务标记为 `created_by=auto-decomposer`；由恢复后的配置文件创建的任务则记录该配置文件名。
+**重要边界：** 手动模式只会关闭内置的 Triage 分解器。它不会阻止配置文件调用 `kanban_create`。模型创建的任务默认保持被动，不会订阅或唤醒用户当前的聊天。运营者可通过 `kanban.auto_subscribe_on_create: true` 明确启用创建者会话唤醒；gateway 的 `/kanban create` 等用户显式订阅不受影响。溯源时，内置分解器创建的子任务标记为 `created_by=auto-decomposer`；由恢复后的配置文件创建的任务则记录该配置文件名。
 
 从 kanban 页面顶部的 **Orchestration: Auto/Manual** 切换按钮（翠绿色 = 自动，静音灰色 = 手动）在两种模式之间切换，或直接编辑 `config.yaml`。两种模式都与 `hermes kanban specify` 共存 —— 当你不想扇出时，它仍然可用作单任务规格重写。
 
@@ -435,7 +435,7 @@ hermes dashboard        # 导航栏中出现 "Kanban" 标签页，位于 "Skills
 | `auto_decompose_per_tick` | `3` | 每个调度器 tick 的分解上限。超出部分推迟到下一个 tick。 |
 | `orchestrator_profile` | `""` | 拥有分解权的配置文件。空 = 回退到活动默认配置文件。 |
 | `default_assignee` | `""` | LLM 选择未知配置文件时子任务的落地位置。空 = 回退到活动默认配置文件。 |
-| `auto_subscribe_on_create` | `true` | 当 `kanban_create` 在持久 gateway/TUI 会话中运行时，终止事件会通过合成状态回合恢复原始 agent。设为 `false` 可让完成保持被动，或要求显式调用 `kanban_notify-subscribe`。此设置独立于 `auto_decompose`。 |
+| `auto_subscribe_on_create` | `false` | 明确选择在模型侧 `kanban_create` 运行时订阅并唤醒原始 gateway/TUI 会话。内部协调应保持关闭；用户显式订阅和 gateway `/kanban create` 独立处理。 |
 
 以及两个辅助 LLM 槽：
 

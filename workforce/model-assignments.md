@@ -19,6 +19,16 @@ that file first whenever Elliott changes the roster.
   The managed proactive runbook pins routine reconciliation to Luna xhigh,
   Vision/leverage synthesis to Terra high, and the deep weekly goals review to
   Sol medium. Other Cron pins still require separate review.
+- Kanban dispatch is single-owner: only the `main` profile may run the gateway
+  dispatcher. Every other profile has gateway dispatch disabled, and automatic
+  task decomposition is disabled fleet-wide. Durable fan-out must be an
+  intentional, reviewed task graph, not a side effect of whichever gateway
+  acquires the shared lock first.
+- GPT-5.6 profiles do not carry a fixed `model.context_length`. OpenAI advertises
+  1,050,000 tokens for the direct API model family; Hermes' Codex OAuth route is
+  conservatively resolved to its locally verified 900,000-token usable ceiling.
+  Native Responses compaction is configured at 750,000 tokens, just before the
+  local 85% fallback (765,000), rather than at the old 200,000-token default.
 
 ## Cost-aware subagents
 
@@ -38,12 +48,14 @@ taste, authority, spending, publication, credentials, or real-money risk.
 Durable work still belongs to the named workforce owner in Hermes Kanban; an
 ephemeral subagent is never the accountable owner.
 
-The same nine leadership profiles route Hermes' automatic post-turn memory and
-skill review to Luna xhigh. Because the auxiliary model differs from their
-Sol/Terra parent, Hermes replays a compact digest instead of the full leadership
-conversation. This directly removes a major source of repeated Sol input-token
-spend without changing the agent's main conversation model or disabling memory
-review.
+Every operational profile routes bounded auxiliary work to a lower-cost model.
+Background review, compression, curator, memory flush, Kanban decomposition,
+MCP orchestration, monitoring, profile description, session search, skill-hub
+selection, title generation, triage specification, TTS audio tags, and web
+extraction use Luna xhigh. Vision uses Terra high. Task-specific timeout and
+tool settings remain intact. When the auxiliary model differs from the parent,
+Hermes uses the compact routed context supported by that task instead of paying
+the primary-model rate for mechanical support work.
 
 The frequent managed proactive cycles do not pay the primary-model rate merely
 to list, compare, and reconcile bounded evidence. Chloe, Milena, each daily
@@ -61,7 +73,7 @@ Luna xhigh.
 | Grace | `grace` | `gpt-5.6-sol`, medium | `glm-5.2:cloud`, medium |
 | Brenna | `brenna` | `gpt-5.6-luna`, xhigh | `glm-5.2:cloud`, medium |
 | Milena | `milena` | `gpt-5.6-luna`, xhigh | `glm-5.2:cloud`, medium |
-| Chloe | `chloe` | `gpt-5.6-luna`, xhigh | `glm-5.2:cloud`, medium |
+| Chloe | `chloe` | `gpt-5.6-sol`, low | `glm-5.2:cloud`, medium |
 | Emily | `emily` | `gpt-5.6-sol`, medium | `glm-5.2:cloud`, medium |
 | Sage | `sage` | `gpt-5.6-terra`, high | `glm-5.2:cloud`, medium |
 | Iris | `iris` | `gpt-5.6-terra`, high | `glm-5.2:cloud`, medium |
@@ -80,13 +92,18 @@ Luna xhigh.
 | Maggie | `maggie` | `gpt-5.6-sol`, medium | `glm-5.2:cloud`, medium |
 | Mel | `mel` | `gpt-5.6-terra`, high | `glm-5.2:cloud`, medium |
 
-Totals: 8 Sol, 11 Terra, and 3 Luna assignments.
+Totals: 9 Sol, 11 Terra, and 2 Luna assignments.
 
 Emma uses Sol at low effort as a specialist assignment: Sol preserves the
 creative judgment, voice fidelity, and direct taste feedback her role needs,
 while low effort keeps routine design conversation responsive. Complex campaign
 strategy can still be escalated explicitly rather than making every interaction
 pay the director-level reasoning cost.
+
+Chloe also uses Sol at low effort. Her executive-assistant role depends on
+nuanced intent recognition, relational continuity, and concise judgment; low
+effort keeps routine coordination economical while Sol avoids the flattening
+and behavioral mismatch observed on Luna.
 
 ## Change procedure
 
@@ -100,5 +117,7 @@ pay the director-level reasoning cost.
    not change an existing scheduled job.
 7. Apply and validate `delegation_policy` separately for every eligible parent;
    verify one read-only child canary before relying on the route.
-8. Apply and validate `auxiliary_policy.background_review` separately; verify
-   the resolved review runtime reports Luna and routed compact-digest mode.
+8. Apply and validate the complete auxiliary policy; verify low-cost tasks
+   resolve to Luna, vision resolves to Terra, and task-specific limits survive.
+9. Verify GPT-5.6 profiles have no fixed `model.context_length`, resolve to the
+   provider-aware ceiling, and set native Responses compaction to 750,000.

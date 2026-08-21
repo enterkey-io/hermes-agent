@@ -678,12 +678,21 @@ class BuzzAdapter(BasePlatformAdapter):
         reply_to: Optional[str],
         metadata: Optional[Dict[str, Any]],
     ) -> Optional[str]:
-        """Return the canonical room thread root; DMs always stay flat."""
+        """Return the canonical thread root without auto-threading flat DMs.
+
+        A top-level DM turn carries only ``reply_to`` (the triggering message)
+        and deliberately stays inline.  A user message sent *inside* a DM
+        thread carries an explicit ``metadata.thread_id``; preserve that root
+        so the response remains in the thread the user chose.
+        """
         channel_id = str(chat_id)
         state = self._channel_state.get(channel_id) or {}
-        if channel_id in self.no_thread_channels or state.get("chat_type") == "dm":
+        if channel_id in self.no_thread_channels:
             return None
-        return (metadata or {}).get("thread_id") or reply_to
+        thread_id = (metadata or {}).get("thread_id")
+        if state.get("chat_type") == "dm":
+            return thread_id
+        return thread_id or reply_to
 
     async def _dm_mention_args(self, chat_id: str) -> List[str]:
         """Address an outbound DM to its sole peer explicitly.
@@ -719,9 +728,10 @@ class BuzzAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Empty message")
         args = ["messages", "send", "--channel", str(chat_id), "--content", "-"]
         args += await self._dm_mention_args(str(chat_id))
-        # Keep room replies at one thread level. The gateway's direct reply
-        # target can be the latest child message, while thread_id is the
-        # canonical root parsed from the inbound NIP-10 tags. DMs stay flat.
+        # Keep replies at one thread level. The gateway's direct reply target
+        # can be the latest child message, while thread_id is the canonical
+        # root parsed from the inbound NIP-10 tags. Top-level DMs stay flat;
+        # explicit DM-thread replies preserve that root.
         reply_target = self._reply_target(chat_id, reply_to, metadata)
         if reply_target:
             args += ["--reply-to", str(reply_target)]
@@ -1270,7 +1280,10 @@ class BuzzAdapter(BasePlatformAdapter):
             user_name=await self._resolve_user_name(pubkey),
             message_id=event_id,
             created_at=created_at,
-            thread_id=thread_root if not is_dm else None,
+            # A top-level DM still has no thread id and therefore stays flat.
+            # When the user explicitly replies inside a DM thread, preserve
+            # the NIP-10 root through session routing and outbound metadata.
+            thread_id=thread_root,
             prospective_thread_id=(
                 event_id
                 if not is_dm
@@ -1446,8 +1459,16 @@ class BuzzAdapter(BasePlatformAdapter):
         # Optional leading '@', one of the identity forms, optional trailing
         # ':' or ',' and surrounding whitespace.
         pattern = rf"^@?(?:{'|'.join(candidates)})[\s:,]*"
-        stripped = re.sub(pattern, "", text, count=1, flags=re.IGNORECASE)
-        return stripped.strip()
+        stripped = re.sub(pattern, "", text, count=1, flags=re.IGNORECASE).strip()
+        # The routing mention is still semantic context for ordinary prose.
+        # Removing ``Chloe`` from ``Chloe you still here?`` turns a direct
+        # question into an ambiguous group utterance and can make a correctly
+        # mention-gated agent choose intentional silence.  The original reason
+        # for stripping is command recognition, so limit stripping to that
+        # case and preserve natural-language addressees for the model.
+        if stripped.startswith("/"):
+            return stripped
+        return text
 
     async def _resolve_user_name(self, pubkey: str) -> str:
         """Resolve a pubkey to a display name (cached; falls back to npub prefix).

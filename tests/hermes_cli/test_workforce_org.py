@@ -19,6 +19,11 @@ def test_canonical_organization_is_reciprocal_and_excludes_friends():
     assert org.get("root").profile_path.endswith("/profiles/main")
     assert org.resolve_profile("main").agent == "root"
     assert org.validate_execution_profile("main").agent == "root"
+    assert org.technical_ownership["external_cloud_server_app_operations"] == "root"
+    assert org.technical_ownership["domains_dns_ssl"] == "root"
+    assert org.technical_ownership["local_agent_host_operations"] == "alina"
+    assert org.technical_ownership["local_host_install_service_activation"] == "alina"
+    assert "host_install_service_activation" not in org.technical_ownership
     assert org.get("chloe").manager == "aurora"
     assert org.get("amy").operational is False
     with pytest.raises(WorkforceOrganizationError):

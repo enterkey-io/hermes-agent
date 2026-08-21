@@ -1,0 +1,12 @@
+[Unit]
+Description=Hermes deterministic workforce failure and closure monitor
+After=default.target
+ConditionPathExists=%h/.hermes/kanban.db
+
+[Service]
+Type=oneshot
+Environment=HERMES_HOME=%h/.hermes
+WorkingDirectory=%h/.hermes/hermes-agent
+ExecStart=%h/.hermes/hermes-agent/venv/bin/python %h/.hermes/hermes-agent/scripts/workforce_health_monitor.py --organization %h/.hermes/hermes-agent/workforce/organization.yaml --database %h/.hermes/kanban.db --state %h/.hermes/workforce-control/health-monitor-state.json
+NoNewPrivileges=true
+PrivateTmp=true

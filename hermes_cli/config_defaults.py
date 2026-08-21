@@ -2489,14 +2489,13 @@ DEFAULT_CONFIG = {
     # each claimable ready task. One dispatcher per profile is sufficient;
     # running more than one on the same kanban.db will race for claims.
     "kanban": {
-        # Auto-subscribe the originating gateway/TUI session to task
-        # completion + block events when ``kanban_create`` is called from
-        # inside a session that has a persistent delivery channel. The
-        # agent that dispatched the task will get notified automatically
-        # instead of having to poll. Disable to mirror pre-feature
-        # behaviour — e.g. for a profile that prefers explicit
-        # ``kanban_notify-subscribe`` calls per task.
-        "auto_subscribe_on_create": True,
+        # Opt in to subscribing the originating gateway/TUI session when the
+        # model-facing ``kanban_create`` tool creates a task. This is off by
+        # default: an agent's internal coordination work must not silently
+        # turn the human's current chat into a raw task-event destination.
+        # Explicit user subscriptions (including gateway ``/kanban create``)
+        # are separate and remain supported.
+        "auto_subscribe_on_create": False,
         # Run the dispatcher inside the gateway process. On by default —
         # the cost is ~300µs every `dispatch_interval_seconds` when idle,
         # and gateway is the supervisor users already have. Set to false

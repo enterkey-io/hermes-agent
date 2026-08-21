@@ -1,0 +1,12 @@
+[Unit]
+Description=Detect recurring Hermes workflow failures without model-token polling
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=10min
+AccuracySec=30s
+Persistent=true
+Unit=hermes-workforce-health-monitor.service
+
+[Install]
+WantedBy=timers.target
