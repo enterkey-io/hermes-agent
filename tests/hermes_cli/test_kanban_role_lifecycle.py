@@ -763,6 +763,86 @@ def test_creation_preflight_rejects_duplicate_live_outcome(
 
 
 @pytest.mark.parametrize(
+    ("workspace_path", "expected"),
+    [
+        (None, "worktree workspace requires an absolute repository/worktree anchor"),
+        ("relative-worktree", "worktree workspace requires an absolute repository/worktree anchor"),
+        ("/definitely/not/a/repository", "worktree workspace anchor is not usable"),
+    ],
+)
+def test_creation_preflight_rejects_unusable_lifecycle_worktree_anchor(
+    lifecycle_env, monkeypatch, workspace_path, expected
+) -> None:
+    """Lifecycle worktree cards must fail before a bad runnable card exists."""
+    monkeypatch.setattr(kb, "lifecycle_enforcement_enabled", lambda *_a, **_k: True)
+    with kb.connect() as conn:
+        before = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+        with pytest.raises(kb.LifecyclePreflightError, match=expected):
+            _managed_task(
+                conn,
+                title=f"bad anchor {workspace_path!r}",
+                workspace_kind="worktree",
+                workspace_path=workspace_path,
+                idempotency_key=f"bad-anchor-{workspace_path!r}",
+            )
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == before
+
+
+def test_activation_budget_checkpoint_resumes_without_repeating_preflight(
+    lifecycle_env, monkeypatch
+) -> None:
+    """An activation retry uses the durable checkpoint, not another preflight."""
+    monkeypatch.setattr(kb, "lifecycle_enforcement_enabled", lambda *_a, **_k: True)
+    with kb.connect() as conn:
+        task_id = _managed_task(
+            conn,
+            title="activation checkpoint",
+            assignee="alina",
+            current_phase="activation",
+            idempotency_key="activation-checkpoint-v1",
+        )
+        original_preflight = kb.lifecycle_preflight_errors
+        calls = []
+
+        def counted_preflight(conn, task, **kwargs):
+            calls.append(task.id)
+            return original_preflight(conn, task, **kwargs)
+
+        monkeypatch.setattr(kb, "lifecycle_preflight_errors", counted_preflight)
+        first_run = kb.claim_task(conn, task_id)
+        assert first_run is not None
+        assert calls == [task_id]
+
+        assert not kb._record_task_failure(
+            conn,
+            task_id,
+            "Iteration budget exhausted (10/10)",
+            outcome="timed_out",
+            release_claim=True,
+            end_run=True,
+            lifecycle_recovery_checkpoint={
+                "reason": "iteration_budget_exhausted",
+                "budget": {"used": 10, "max": 10},
+            },
+        )
+        checkpoint = _events(conn, task_id, "activation_recovery_checkpoint")[-1]
+        assert checkpoint["completed_verified_work"] == [
+            {"step": "lifecycle_preflight", "status": "passed"}
+        ]
+        assert checkpoint["remaining_action"] == (
+            "Resume the activation action after the verified lifecycle preflight."
+        )
+        assert "workspace_path" not in checkpoint
+        recovered_task = kb.get_task(conn, task_id)
+        assert recovered_task is not None and recovered_task.status == "ready"
+
+        retried = kb.claim_task(conn, task_id)
+        assert retried is not None
+        assert calls == [task_id]
+        assert "activation_recovery_checkpoint" in kb.build_worker_context(conn, task_id)
+
+
+@pytest.mark.parametrize(
     ("overrides", "expected"),
     [
         (

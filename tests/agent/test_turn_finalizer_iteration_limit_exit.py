@@ -193,6 +193,10 @@ def test_pending_response_records_kanban_timeout(monkeypatch):
         release_claim=True,
         end_run=True,
         event_payload_extra={"budget_used": 60, "budget_max": 60},
+        lifecycle_recovery_checkpoint={
+            "reason": "iteration_budget_exhausted",
+            "budget": {"used": 60, "max": 60},
+        },
     )
 
 

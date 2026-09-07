@@ -72,24 +72,47 @@ def _record_kanban_budget_exhausted(
     """
     try:
         from hermes_cli import kanban_db as _kb
+        expected_run_id = None
+        raw_run_id = (os.environ.get("HERMES_KANBAN_RUN_ID") or "").strip()
+        expected_claim_lock = (
+            os.environ.get("HERMES_KANBAN_CLAIM_LOCK") or ""
+        ).strip()
+        if raw_run_id and expected_claim_lock:
+            try:
+                expected_run_id = int(raw_run_id)
+            except ValueError:
+                expected_claim_lock = ""
         _conn = _kb.connect()
         try:
-            _kb._record_task_failure(
-                _conn,
-                kanban_task,
-                error=(
+            kwargs = {
+                "error": (
                     f"Iteration budget exhausted "
                     f"({api_call_count}/{max_iterations}) — "
                     "task could not complete within the allowed "
                     "iterations"
                 ),
-                outcome="timed_out",
-                release_claim=True,
-                end_run=True,
-                event_payload_extra={
+                "outcome": "timed_out",
+                "release_claim": True,
+                "end_run": True,
+                "event_payload_extra": {
                     "budget_used": api_call_count,
                     "budget_max": max_iterations,
                 },
+                "lifecycle_recovery_checkpoint": {
+                    "reason": "iteration_budget_exhausted",
+                    "budget": {
+                        "used": api_call_count,
+                        "max": max_iterations,
+                    },
+                },
+            }
+            if expected_run_id is not None and expected_claim_lock:
+                kwargs["expected_run_id"] = expected_run_id
+                kwargs["expected_claim_lock"] = expected_claim_lock
+            _kb._record_task_failure(
+                _conn,
+                kanban_task,
+                **kwargs,
             )
         finally:
             try:

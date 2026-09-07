@@ -163,6 +163,44 @@ def test_scheduled_tasks_have_their_own_column_not_todo(client):
     assert not any(t["id"] == task["id"] for t in columns["todo"])
 
 
+def test_dashboard_operator_can_recover_block_loop_triage_task(client):
+    """A real dashboard PATCH leaves a loop-triaged card runnable again."""
+    task = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "recover loop", "assignee": "worker"},
+    ).json()["task"]
+    task_id = task["id"]
+    conn = kb.connect()
+    try:
+        first = kb.claim_task(conn, task_id, claimer="worker")
+        assert first is not None
+        assert kb.block_task(conn, task_id, reason="same blocker", kind="capability")
+        assert kb.unblock_task(conn, task_id)
+        second = kb.claim_task(conn, task_id, claimer="worker")
+        assert second is not None
+        assert kb.block_task(conn, task_id, reason="same blocker", kind="capability")
+        triaged = kb.get_task(conn, task_id)
+        assert triaged is not None and triaged.status == "triage"
+    finally:
+        conn.close()
+
+    recovered = client.patch(
+        f"/api/plugins/kanban/tasks/{task_id}", json={"status": "ready"},
+    )
+    assert recovered.status_code == 200, recovered.text
+    assert recovered.json()["task"]["status"] == "ready"
+
+    conn = kb.connect()
+    try:
+        statuses = [
+            event.payload for event in kb.list_events(conn, task_id)
+            if event.kind == "status"
+        ]
+        assert statuses[-1] == {"status": "ready", "requested_status": "ready"}
+    finally:
+        conn.close()
+
+
 def test_tenant_filter(client):
     client.post("/api/plugins/kanban/tasks", json={"title": "A", "tenant": "t1"})
     client.post("/api/plugins/kanban/tasks", json={"title": "B", "tenant": "t2"})

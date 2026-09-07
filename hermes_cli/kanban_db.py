@@ -4016,6 +4016,16 @@ def create_task(
                         except Exception:
                             branch_name = None
 
+                # This is deliberately before INSERT, not merely claim-time:
+                # a lifecycle worktree needs a deterministic repository anchor
+                # before any persisted card can be observed as runnable.
+                if lifecycle_type and lifecycle_enforcement_enabled():
+                    anchor_error = _lifecycle_worktree_anchor_error(
+                        workspace_path
+                    ) if workspace_kind == "worktree" else None
+                    if anchor_error:
+                        raise LifecyclePreflightError(anchor_error)
+
                 conn.execute(
                     """
                     INSERT INTO tasks (
@@ -13520,6 +13530,11 @@ def _record_task_failure(
     when the breaker trips, so callers can include outcome-specific
     context (e.g. pid on crash, elapsed on timeout).
 
+    ``lifecycle_recovery_checkpoint`` is accepted only for a currently
+    running lifecycle activation. It writes a fixed, redacted checkpoint in
+    the same transaction as the failure transition, allowing an unchanged
+    activation retry to resume its already-verified preflight.
+
     ``expected_run_id`` / ``expected_claim_lock`` optionally bind an
     in-process worker fallback to the exact dispatcher-issued run. A stale
     worker must not close or requeue a replacement owner's newer run. Existing
@@ -13570,6 +13585,49 @@ def _record_task_failure(
             else ("review" if row["status"] == "review" else "ready")
         )
         failures = int(row["consecutive_failures"]) + 1
+
+        # A budget-exhausted activation can safely resume after the exact
+        # verified preflight only when its durable routing/workspace inputs are
+        # unchanged. Persist just the hashed identity plus fixed, redacted
+        # checkpoint facts — never raw paths, task body, tool output, or model
+        # text from the interrupted worker.
+        if (
+            lifecycle_recovery_checkpoint
+            and row["lifecycle_type"]
+            and row["current_phase"] == "activation"
+            and row["status"] == "running"
+            and row["current_run_id"]
+        ):
+            # Fetch the canonical task object rather than synthesising a
+            # partial dataclass from this narrow race-check query. The
+            # fingerprint is intentionally tied to the persisted row.
+            checkpoint_task = get_task(conn, task_id)
+            if checkpoint_task is None:
+                return False
+            budget = lifecycle_recovery_checkpoint.get("budget", {})
+            _append_event(
+                conn,
+                task_id,
+                "activation_recovery_checkpoint",
+                {
+                    "reason": "iteration_budget_exhausted",
+                    "budget": {
+                        "used": int(budget.get("used", 0)),
+                        "max": int(budget.get("max", 0)),
+                    },
+                    "completed_verified_work": [
+                        {"step": "lifecycle_preflight", "status": "passed"}
+                    ],
+                    "remaining_action": (
+                        "Resume the activation action after the verified "
+                        "lifecycle preflight."
+                    ),
+                    "preflight_fingerprint": _activation_preflight_fingerprint(
+                        checkpoint_task
+                    ),
+                },
+                run_id=int(row["current_run_id"]),
+            )
 
         # Per-task override wins over both caller-supplied and default
         # thresholds. None (the common case) falls through.
