@@ -10887,6 +10887,9 @@ def request_changes(
                 },
                 run_id=run_id,
             )
+    notify_task_updated(
+        conn, task_id, ("status", "assignee", "current_phase", "return_to")
+    )
     return True, implementer
 
 

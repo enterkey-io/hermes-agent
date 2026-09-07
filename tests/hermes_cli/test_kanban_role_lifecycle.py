@@ -15,6 +15,7 @@ import pytest
 import yaml
 
 from hermes_cli import kanban_db as kb
+from hermes_cli.plugins import get_plugin_manager
 from hermes_cli.workforce_org import load_organization
 from tests.workforce_test_helpers import materialize_test_organization
 
@@ -294,6 +295,66 @@ def test_review_and_intent_failures_return_to_recorded_implementer(
         assert task.current_phase == "execution"
         assert task.technical_reviewer == "reese"
         assert task.intent_validator == "aurora"
+
+
+def test_lifecycle_review_reassignments_notify_after_commit(
+    lifecycle_env, monkeypatch
+) -> None:
+    """Review handoffs wake the next same-card lifecycle owner post-commit."""
+    monkeypatch.setattr(kb, "lifecycle_enforcement_enabled", lambda *_a, **_k: True)
+    manager = get_plugin_manager()
+    saved_hooks = {name: list(hooks) for name, hooks in manager._hooks.items()}
+    observed: list[tuple[dict, tuple[str | None, str | None]]] = []
+
+    def _capture(**kwargs) -> None:
+        with sqlite3.connect(kb.kanban_db_path()) as observer_conn:
+            row = observer_conn.execute(
+                "SELECT assignee, current_phase FROM tasks WHERE id = ?",
+                (kwargs["task_id"],),
+            ).fetchone()
+        observed.append((kwargs, tuple(row) if row else (None, None)))
+
+    manager._hooks.setdefault("on_kanban_task_updated", []).append(_capture)
+    try:
+        with kb.connect() as conn:
+            task_id = _managed_task(conn, idempotency_key="notify-review-v1")
+            implementation = kb.claim_task(conn, task_id)
+            assert implementation is not None
+            observed.clear()
+
+            assert kb.request_review(
+                conn,
+                task_id,
+                summary="Implemented and ran focused tests.",
+                metadata={"tests_run": ["focused"]},
+                expected_run_id=implementation.current_run_id,
+            )
+            assert len(observed) == 1
+            review_update, review_snapshot = observed.pop()
+            assert review_update["changed_fields"] == [
+                "status", "assignee", "current_phase", "return_to"
+            ]
+            assert review_update["assignee"] == "reese"
+            assert review_snapshot == ("reese", "technical_review")
+
+            review = kb.claim_review_task(conn, task_id)
+            assert review is not None
+            observed.clear()
+            assert kb.request_changes(
+                conn,
+                task_id,
+                reason="The failure path does not preserve the prior value.",
+                expected_run_id=review.current_run_id,
+            ) == (True, "sloane")
+            assert len(observed) == 1
+            changes_update, changes_snapshot = observed.pop()
+            assert changes_update["changed_fields"] == [
+                "status", "assignee", "current_phase", "return_to"
+            ]
+            assert changes_update["assignee"] == "sloane"
+            assert changes_snapshot == ("sloane", "execution")
+    finally:
+        manager._hooks = saved_hooks
 
 
 def test_handoff_retry_is_idempotent(lifecycle_env, monkeypatch) -> None:
