@@ -21,6 +21,19 @@ ALLOWED_DEPARTMENTS = {
 }
 EXECUTABLE_STATUSES = {"active", "planned"}
 
+# Same-card Kanban phases.  Keep this tuple ordered: generated role contracts
+# use it for stable, reviewable output while validators use the companion set.
+LIFECYCLE_PHASES = (
+    "execution",
+    "technical_review",
+    "intent_review",
+    "activation",
+    "live_acceptance",
+    "closure",
+    "recovery",
+)
+LIFECYCLE_PHASE_SET = frozenset(LIFECYCLE_PHASES)
+
 
 class WorkforceOrganizationError(ValueError):
     """Raised when canonical workforce metadata is invalid."""
@@ -96,6 +109,30 @@ class WorkforceAgent:
         for key in ("direct_reports", "owned_outcomes", "authority", "prohibited_actions", "buzz_rooms"):
             data[key] = list(data[key])
         return data
+
+
+@dataclass(frozen=True)
+class WorkforceLifecycleRoute:
+    """Compact lifecycle policy derived from one canonical org record.
+
+    Receivers such as ``intent_validator`` and ``implementer`` deliberately
+    name task-role slots rather than individual people: the card is the durable
+    authority for those roles, while the organization supplies stable manager,
+    QA, and activation ownership.
+    """
+
+    agent: str
+    profile: str
+    manager: str
+    escalation_target: str
+    accepted_work_classes: tuple[str, ...]
+    accepted_phases: tuple[str, ...]
+    normal_receiver: str
+    failure_receiver: str
+    technical_reviewer: str
+    local_activation_owner: str
+    external_activation_owner: str
+    stuck_route: str
 
 
 @dataclass(frozen=True)
@@ -302,6 +339,160 @@ def validate_workflow_profiles(
     for profile in executor_profiles:
         if profile:
             org.validate_execution_profile(profile)
+
+
+def _technical_owner(org: WorkforceOrganization, key: str) -> str:
+    owner = normalize_agent_id(org.technical_ownership.get(key, ""))
+    if not owner or owner == "department_director":
+        raise WorkforceOrganizationError(
+            f"technical ownership {key!r} must resolve to one operational agent"
+        )
+    return org.validate_execution_profile(owner).agent
+
+
+def derive_lifecycle_route(
+    org: WorkforceOrganization,
+    agent_or_profile: str,
+) -> WorkforceLifecycleRoute:
+    """Derive one operational agent's Kanban route from org + ownership.
+
+    The derivation intentionally operates on role families (QA owner,
+    activation owners, managers/directors, and specialists) instead of a
+    hand-maintained table of every profile.  Adding another specialist under a
+    department director therefore inherits the right return/stuck route.
+    """
+    agent = org.validate_execution_profile(agent_or_profile)
+    profile = Path(agent.profile_path or "").name
+    if not profile:
+        raise WorkforceOrganizationError(
+            f"{agent.agent} has no profile path for lifecycle dispatch"
+        )
+
+    qa_owner = _technical_owner(org, "qa")
+    implementation_owner = _technical_owner(org, "implementation")
+    local_owner = _technical_owner(org, "local_host_install_service_activation")
+    external_owner = _technical_owner(org, "external_cloud_server_app_operations")
+
+    manager = normalize_agent_id(agent.manager or agent.escalation_target or "")
+    if not manager:
+        raise WorkforceOrganizationError(
+            f"{agent.agent} has no manager/escalation route"
+        )
+    # Elliott is retained authority, not an operational worker.  The org's
+    # explicit escalation target remains visible, but routine internal stuck
+    # work must stay inside the operating workforce.  Aurora and Grace are the
+    # two top-level operational managers for their respective branches.
+    escalation = normalize_agent_id(agent.escalation_target or manager)
+    internal_manager = manager
+    if internal_manager == "elliott":
+        internal_manager = "aurora" if agent.agent == "aurora" else "grace"
+
+    is_manager = bool(agent.direct_reports) or (agent.function or "").casefold() == "director"
+    if agent.agent == qa_owner:
+        phases = ("technical_review", "recovery")
+        normal_receiver = "intent_validator"
+    elif agent.agent in {local_owner, external_owner}:
+        phases = ("execution", "activation", "recovery")
+        normal_receiver = "original_author"
+    elif is_manager or agent.agent in {"aurora", "grace"}:
+        phases = (
+            "execution",
+            "intent_review",
+            "live_acceptance",
+            "closure",
+            "recovery",
+        )
+        normal_receiver = "original_author"
+    elif agent.agent == implementation_owner or "developer" in (agent.function or "").casefold():
+        phases = ("execution", "recovery")
+        normal_receiver = qa_owner
+    else:
+        phases = ("execution", "recovery")
+        normal_receiver = internal_manager
+
+    # Owned outcomes are the organization-native work classes.  Function and
+    # department are included as compact fallback labels for newly added roles
+    # that have not accumulated detailed outcome metadata yet.
+    work_classes = tuple(agent.owned_outcomes)
+    if not work_classes:
+        fallback = agent.department or agent.function or "assigned work"
+        work_classes = (fallback,)
+
+    return WorkforceLifecycleRoute(
+        agent=agent.agent,
+        profile=profile,
+        manager=manager,
+        escalation_target=escalation,
+        accepted_work_classes=work_classes,
+        accepted_phases=phases,
+        normal_receiver=normal_receiver,
+        failure_receiver="implementer",
+        technical_reviewer=qa_owner,
+        local_activation_owner=local_owner,
+        external_activation_owner=external_owner,
+        stuck_route=internal_manager,
+    )
+
+
+_PHASE_ROLE = {
+    "execution": "implementer",
+    "technical_review": "technical_reviewer",
+    "intent_review": "intent_validator",
+    "activation": "activation_owner",
+    "live_acceptance": "closure_owner",
+    "closure": "closure_owner",
+}
+
+
+def validate_lifecycle_assignment(
+    org: WorkforceOrganization,
+    assignee: str,
+    phase: str,
+    roles: Mapping[str, Any],
+) -> WorkforceAgent:
+    """Validate that an operational assignee owns ``phase`` on this card."""
+    normalized_phase = str(phase or "").strip().casefold()
+    if normalized_phase not in LIFECYCLE_PHASE_SET:
+        raise WorkforceOrganizationError(
+            f"invalid lifecycle phase {phase!r}; expected one of {list(LIFECYCLE_PHASES)}"
+        )
+    agent = org.validate_execution_profile(assignee)
+    route = derive_lifecycle_route(org, agent.agent)
+
+    role_key = _PHASE_ROLE.get(normalized_phase)
+    if role_key:
+        expected = normalize_agent_id(roles.get(role_key, ""))
+        if not expected:
+            raise WorkforceOrganizationError(
+                f"phase {normalized_phase} requires recorded {role_key}"
+            )
+        expected_agent = org.resolve_profile(expected).agent
+        if agent.agent != expected_agent:
+            raise WorkforceOrganizationError(
+                f"phase {normalized_phase} belongs to {role_key} "
+                f"{expected_agent!r}, not {agent.agent!r}"
+            )
+    elif normalized_phase == "recovery":
+        allowed = {
+            normalize_agent_id(roles.get("return_to", "")),
+            route.stuck_route,
+            route.manager,
+            route.escalation_target,
+        }
+        if agent.agent not in {value for value in allowed if value}:
+            raise WorkforceOrganizationError(
+                f"recovery for {agent.agent!r} does not follow its manager/stuck route"
+            )
+
+    # Explicit card ownership is authoritative for intent/live/closure phases;
+    # for the stable specialist phases, the generated route provides an extra
+    # defense against assigning a developer as QA or a reviewer as implementer.
+    if normalized_phase in {"execution", "technical_review", "activation"}:
+        if normalized_phase not in route.accepted_phases:
+            raise WorkforceOrganizationError(
+                f"{agent.agent} does not accept lifecycle phase {normalized_phase}"
+            )
+    return agent
 
 
 def _main(argv: list[str] | None = None) -> int:

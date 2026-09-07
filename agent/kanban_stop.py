@@ -137,14 +137,22 @@ def build_kanban_stop_nudge(
     """
     if not kanban_stop_nudge_enabled():
         return None
-    if attempts >= max_attempts:
-        return None
     if session_called_kanban_terminal(messages):
         return None
     if _worker_run_is_scheduled():
         return None
 
     tid = (task_id or os.environ.get("HERMES_KANBAN_TASK") or "").strip() or "this task"
+    failure = latest_operational_failure(messages)
+    failure_guidance = ""
+    if failure:
+        failure_guidance = (
+            f"\n\nAn operational failure is still unresolved: {failure}. "
+            "Reporting it or promising follow-up is advisory only, not a durable "
+            "action. Retry/recover when safe, request changes on this same card, "
+            "hand it to the authorized recovery owner, or call `kanban_block` "
+            "with the concrete external reason."
+        )
     return (
         "[System: You are a Hermes kanban worker. A plain-text reply is NOT a "
         "terminal state for the board.\n\n"
@@ -160,12 +168,15 @@ def build_kanban_stop_nudge(
         "release, use `kanban_block(kind=\"scheduled\", reason=...)` and stop after "
         "it succeeds. Never unblock yourself to satisfy this guard.\n\n"
         "Never end a turn with only a promise of future action. Repeated "
-        "protocol violations will block this task and require manual intervention.]"
+        "operational failures route this run through durable recovery rather "
+        "than returning advisory prose.]"
     )
 
 
 __all__ = [
     "build_kanban_stop_nudge",
     "kanban_stop_nudge_enabled",
+    "kanban_stop_requires_failure_recovery",
+    "latest_operational_failure",
     "session_called_kanban_terminal",
 ]

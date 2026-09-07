@@ -52,6 +52,13 @@ If a skill is missing from this list but present in the repo, the catalog is reg
 | [`songwriting-and-ai-music`](/docs/user-guide/skills/bundled/creative/creative-songwriting-and-ai-music) | Songwriting craft and Suno AI music prompts. | `creative/songwriting-and-ai-music` |
 | [`touchdesigner-mcp`](/docs/user-guide/skills/bundled/creative/creative-touchdesigner-mcp) | Control TouchDesigner via twozero MCP. | `creative/touchdesigner-mcp` |
 
+## devops
+
+| Skill | Description | Path |
+|-------|-------------|------|
+| [`kanban-workflows`](/docs/user-guide/skills/bundled/devops/devops-kanban-workflows) | Execute one assigned Kanban lifecycle phase safely. | `devops/kanban-workflows` |
+| [`sdlc-review`](/docs/user-guide/skills/bundled/devops/devops-sdlc-review) | Review Kanban handoffs and route verified outcomes. | `devops/sdlc-review` |
+
 ## email
 
 | Skill | Description | Path |

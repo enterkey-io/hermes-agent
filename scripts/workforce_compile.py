@@ -11,7 +11,12 @@ from pathlib import Path
 
 import yaml
 
-from hermes_cli.workforce_org import WorkforceAgent, load_organization
+from hermes_cli.workforce_org import (
+    WorkforceAgent,
+    WorkforceOrganization,
+    derive_lifecycle_route,
+    load_organization,
+)
 
 
 BEGIN = "<!-- BEGIN MANAGED WORKFORCE CONTRACT -->"
@@ -77,7 +82,49 @@ effort, dependencies, risks, needed capabilities, and my department's factual
 recommendation. I do not recursively create speculative tasks or busywork."""
 
 
-def render_block(agent: WorkforceAgent, template: str, version: str) -> str:
+def lifecycle_role_block(
+    agent: WorkforceAgent,
+    org: WorkforceOrganization,
+) -> str:
+    route = derive_lifecycle_route(org, agent.agent)
+    phases = ", ".join(f"`{phase}`" for phase in route.accepted_phases)
+    classes = "; ".join(route.accepted_work_classes)
+    pass_receiver = (
+        route.normal_receiver
+        if agent.agent == route.technical_reviewer
+        else "not this role"
+    )
+    fail_receiver = (
+        route.failure_receiver
+        if agent.agent == route.technical_reviewer
+        else "not this role"
+    )
+    return "\n".join(
+        [
+            "## Kanban role lifecycle",
+            "",
+            f"- Manager: `{route.manager}`; stuck route: `{route.stuck_route}`.",
+            f"- Accepted work classes: {classes}.",
+            f"- Accepted phases: {phases}.",
+            f"- Normal receiver: `{route.normal_receiver}`.",
+            f"- Technical reviewer: `{route.technical_reviewer}`.",
+            f"- Technical-review PASS: `{pass_receiver}`.",
+            f"- Technical-review FAIL: `{fail_receiver}`.",
+            f"- Activation: local → `{route.local_activation_owner}`; external/shared production → `{route.external_activation_owner}`.",
+            "- Return and closure owner: use the card's recorded `original_author` / `closure_owner`; never infer a substitute.",
+            "- Before ending a worker turn, use exactly one lifecycle terminal action and include evidence, the next expected outcome, and a recheck condition.",
+            "- Never close another role's phase. Do not create a child card for an ordinary execution/review/validation/activation/acceptance handoff.",
+        ]
+    )
+
+
+def render_block(
+    agent: WorkforceAgent,
+    template: str,
+    version: str,
+    org: WorkforceOrganization | None = None,
+) -> str:
+    org = org or load_organization()
     context = "\n".join([
         f"- Identity: {agent.display_name} (`{agent.agent}`)",
         f"- Manager: `{agent.manager}`",
@@ -93,6 +140,7 @@ def render_block(agent: WorkforceAgent, template: str, version: str) -> str:
     body = template.replace("{{contract_version}}", version)
     body = body.replace("{{role_context}}", context)
     body = body.replace("{{substantial_work_path}}", substantial_work_path(agent))
+    body = body.replace("{{lifecycle_role}}", lifecycle_role_block(agent, org))
     body = body.replace("{{role_constraints}}", role_constraints(agent))
     return f"{BEGIN}\n{body.strip()}\n{END}"
 
@@ -184,11 +232,15 @@ def compile_profiles(
             source_kind = "planned-private-source"
         if source.is_file():
             original = source.read_text(encoding="utf-8-sig")
-            candidate, operation = insert_block(original, render_block(agent, template, version))
+            candidate, operation = insert_block(
+                original, render_block(agent, template, version, org)
+            )
             source_hash = sha(source)
         elif agent.status == "planned":
             original = f"# {agent.display_name} Operating Instructions\n"
-            candidate, operation = insert_block(original, render_block(agent, template, version))
+            candidate, operation = insert_block(
+                original, render_block(agent, template, version, org)
+            )
             source_hash = None
             source_kind = "generated-placeholder"
         else:

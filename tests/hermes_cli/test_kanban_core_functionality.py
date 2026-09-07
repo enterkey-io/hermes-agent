@@ -693,17 +693,10 @@ def test_pid_alive_detects_zombie(kanban_home):
 
 
 
-def test_default_spawn_does_not_auto_load_any_skill(kanban_home, monkeypatch):
-    """The dispatcher no longer auto-loads a bundled kanban skill.
-
-    The kanban lifecycle (formerly the kanban-worker/kanban-orchestrator
-    skills) is now injected into every worker's system prompt via
-    KANBAN_GUIDANCE, so _default_spawn must NOT append a `--skills` flag
-    when the task carries no per-task skills.
-
-    We intercept Popen to capture the argv without actually spawning a
-    hermes subprocess (which would hang trying to call an LLM).
-    """
+def test_default_spawn_legacy_worker_keeps_historical_skill_contract(
+    kanban_home, monkeypatch
+):
+    """A legacy card must not receive the opt-in same-card lifecycle guide."""
     captured = {}
 
     class FakeProc:
@@ -729,9 +722,7 @@ def test_default_spawn_does_not_auto_load_any_skill(kanban_home, monkeypatch):
         conn.close()
 
     cmd = captured["cmd"]
-    assert "--skills" not in cmd, (
-        f"spawn argv should not auto-load any skill: {cmd}"
-    )
+    assert "--skills" not in cmd
     assert "--accept-hooks" in cmd, f"spawn argv missing --accept-hooks: {cmd}"
     assert cmd.index("--accept-hooks") < cmd.index("chat"), (
         f"--accept-hooks must come before 'chat' in argv: {cmd}"
@@ -741,6 +732,37 @@ def test_default_spawn_does_not_auto_load_any_skill(kanban_home, monkeypatch):
     env = captured["env"]
     assert env.get("HERMES_KANBAN_TASK") == tid
     assert env.get("HERMES_PROFILE") == "some-profile"
+
+
+def test_dispatch_legacy_worker_does_not_inject_lifecycle_skill(
+    kanban_home, monkeypatch
+):
+    """The real ready-lane dispatch path must preserve legacy worker skills."""
+    import hermes_cli.profiles as profmod
+
+    monkeypatch.setattr(profmod, "profile_exists", lambda _name: True)
+    monkeypatch.setattr(kb, "_memory_pressure_level", lambda *_a, **_k: "ok")
+    monkeypatch.setattr(kb, "count_running_tasks_other_boards", lambda *_a, **_k: 0)
+    monkeypatch.setattr(kb, "_resolve_dispatch_profile", lambda value: value)
+    captured: list[list[str]] = []
+
+    def spawn(task, workspace):
+        captured.append(list(task.skills or []))
+        return None
+
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="legacy dispatch",
+            assignee="builder",
+            skills=["specialist"],
+        )
+        result = kb.dispatch_once(
+            conn, spawn_fn=spawn, reconcile_orphans=False
+        )
+
+    assert [item[0] for item in result.spawned] == [task_id]
+    assert captured == [["specialist"]]
 
 
 # ---------------------------------------------------------------------------
@@ -1406,5 +1428,3 @@ def test_notify_sub_starts_caught_up_on_active_task(kanban_home):
         assert events == [], "historical events must not replay to a new sub"
     finally:
         conn.close()
-
-

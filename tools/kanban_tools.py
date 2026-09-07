@@ -213,6 +213,52 @@ def _enforce_worker_task_ownership(tid: str) -> Optional[str]:
     return None
 
 
+def _enforce_current_assignee(kb: Any, conn: Any, tid: str) -> Optional[str]:
+    """Bind phase-ending transitions to the runtime profile that owns the card."""
+    task = kb.get_task(conn, tid)
+    if task is None:
+        return tool_error(f"task {tid} not found")
+    caller = (os.environ.get("HERMES_PROFILE") or "").strip()
+    if not caller:
+        return tool_error(
+            "lifecycle transition refused: HERMES_PROFILE is unset, so current "
+            "assignee ownership cannot be verified"
+        )
+    try:
+        is_assignee = kb.lifecycle_identities_match(caller, task.assignee or "")
+    except Exception:
+        return tool_error(
+            "lifecycle transition refused: caller/assignee identity cannot be "
+            "verified through the workforce organization"
+        )
+    if not is_assignee:
+        return tool_error(
+            f"lifecycle transition refused: caller {caller!r} is not current "
+            f"assignee {task.assignee!r}"
+        )
+    return None
+
+
+def _enforce_current_worker_run(
+    kb: Any,
+    conn: Any,
+    tid: str,
+    expected_run_id: Optional[int],
+) -> Optional[str]:
+    """Reject stale run ids after the authorized retry check has missed."""
+    if expected_run_id is None:
+        return None
+    task = kb.get_task(conn, tid)
+    if task is None:
+        return tool_error(f"task {tid} not found")
+    if task.current_run_id != int(expected_run_id):
+        return tool_error(
+            f"lifecycle transition refused: worker run {expected_run_id} is no "
+            "longer the active run for this task"
+        )
+    return None
+
+
 def _connect(board: Optional[str] = None):
     """Import + connect lazily so the module imports cleanly in non-kanban
     contexts (e.g. test rigs that import every tool module).
@@ -504,6 +550,15 @@ def _task_summary_dict(kb, conn, task) -> dict[str, Any]:
         "current_run_id": task.current_run_id,
         "model_override": task.model_override,
         "provider_override": task.provider_override,
+        "lifecycle_type": task.lifecycle_type,
+        "current_phase": task.current_phase,
+        "original_author": task.original_author,
+        "implementer": task.implementer,
+        "technical_reviewer": task.technical_reviewer,
+        "intent_validator": task.intent_validator,
+        "activation_owner": task.activation_owner,
+        "closure_owner": task.closure_owner,
+        "return_to": task.return_to,
         "parents": parents,
         "children": children,
         "parent_count": len(parents),
@@ -531,7 +586,11 @@ def _handle_show(args: dict, **kw) -> str:
             if task is None:
                 return tool_error(f"task {tid} not found")
             comments = kb.list_comments(conn, tid)
-            events = kb.list_events(conn, tid)
+            if task.lifecycle_type:
+                events, omitted_events = kb.lifecycle_history_for_context(conn, tid)
+            else:
+                events = kb.list_events(conn, tid)[-50:]
+                omitted_events = {}
             runs = kb.list_runs(conn, tid)
             parents = kb.parent_ids(conn, tid)
             children = kb.child_ids(conn, tid)
@@ -583,6 +642,15 @@ def _handle_show(args: dict, **kw) -> str:
                     "current_run_id": t.current_run_id,
                     "model_override": t.model_override,
                     "provider_override": t.provider_override,
+                    "lifecycle_type": t.lifecycle_type,
+                    "current_phase": t.current_phase,
+                    "original_author": t.original_author,
+                    "implementer": t.implementer,
+                    "technical_reviewer": t.technical_reviewer,
+                    "intent_validator": t.intent_validator,
+                    "activation_owner": t.activation_owner,
+                    "closure_owner": t.closure_owner,
+                    "return_to": t.return_to,
                 }
 
             def _run_dict(r):
@@ -606,8 +674,12 @@ def _handle_show(args: dict, **kw) -> str:
                 "events": [
                     {"kind": e.kind, "payload": e.payload,
                      "created_at": e.created_at, "run_id": e.run_id}
-                    for e in events[-50:]   # cap; full log via CLI
+                    for e in events
                 ],
+                "events_omitted": {
+                    "total": sum(omitted_events.values()),
+                    "by_kind": omitted_events,
+                } if omitted_events else None,
                 "runs": [_run_dict(r) for r in runs],
                 # Also surface the worker's own context block so the
                 # agent can include it directly if it wants. This is
@@ -888,6 +960,14 @@ def _handle_complete(args: dict, **kw) -> str:
             # Only enforce when a judge is actually reachable — see
             # _goal_judge_available for why an unavailable judge fails open.
             task = kb.get_task(conn, tid)
+            if (
+                task is not None
+                and task.lifecycle_type
+                and kb.lifecycle_enforcement_enabled()
+            ):
+                assignee_err = _enforce_current_assignee(kb, conn, tid)
+                if assignee_err:
+                    return assignee_err
             rejection = _goal_mode_handoff_rejection(
                 task,
                 (summary or result or "").strip(),
@@ -1078,7 +1158,6 @@ def _handle_request_review(args: dict, **kw) -> str:
             metadata = json.loads(metadata_json)
         except json.JSONDecodeError:
             return tool_error("metadata could not be safely serialized")
-    metadata = _stamp_worker_session_metadata(tid, metadata)
     reviewer = args.get("reviewer") or None
     if reviewer:
         # Model-supplied free text stored durably on the event payload —
@@ -1090,6 +1169,16 @@ def _handle_request_review(args: dict, **kw) -> str:
         kb, conn = _connect(board=board)
         try:
             task = kb.get_task(conn, tid)
+            if (
+                task is not None
+                and task.lifecycle_type
+                and kb.lifecycle_enforcement_enabled()
+                and not metadata
+            ):
+                return tool_error(
+                    "lifecycle review request requires structured verification "
+                    "evidence supplied by the caller"
+                )
             rejection = _goal_mode_handoff_rejection(task, summary)
             if rejection is not None:
                 return tool_error(
@@ -1097,6 +1186,7 @@ def _handle_request_review(args: dict, **kw) -> str:
                     "Provide acceptance evidence matching the card before "
                     "requesting review."
                 )
+            metadata = _stamp_worker_session_metadata(tid, metadata)
             ok, fail_reason = kb.request_review(
                 conn, tid,
                 summary=summary,
@@ -1185,6 +1275,162 @@ def _handle_request_changes(args: dict, **kw) -> str:
         return tool_error(f"kanban_request_changes: {e}")
 
 
+def _handle_handoff(args: dict, **kw) -> str:
+    """Finish this phase and wake the next owner on the same card."""
+    delegated_err = _reject_delegated_child_mutation("kanban_handoff")
+    if delegated_err:
+        return delegated_err
+    tid = _default_task_id(args.get("task_id"))
+    if not tid:
+        return tool_error(
+            "task_id is required (or set HERMES_KANBAN_TASK in the env)"
+        )
+    ownership_err = _enforce_worker_task_ownership(tid)
+    if ownership_err:
+        return ownership_err
+    evidence = args.get("evidence")
+    if not isinstance(evidence, dict) or not evidence:
+        return tool_error("evidence must be a non-empty object")
+    board = args.get("board")
+    try:
+        kb, conn = _connect(board=board)
+        try:
+            run_id = _worker_run_id(tid)
+            retry_actor = (
+                (os.environ.get("HERMES_PROFILE") or "").strip() or None
+            )
+            retry_ok, retry_detail = kb.handoff_task(
+                conn,
+                tid,
+                next_assignee=args.get("next_assignee"),
+                next_phase=args.get("next_phase"),
+                summary=args.get("summary") or "",
+                evidence=evidence,
+                expected_outcome=args.get("expected_outcome") or "",
+                recheck_condition=args.get("recheck_condition") or "",
+                expected_run_id=run_id,
+                retry_actor=retry_actor,
+                retry_only=True,
+            )
+            if retry_ok:
+                landed = kb.get_task(conn, tid)
+                return _ok(
+                    task_id=tid,
+                    status=landed.status if landed else None,
+                    next_assignee=landed.assignee if landed else retry_detail,
+                    next_phase=(
+                        landed.current_phase if landed else args.get("next_phase")
+                    ),
+                    current_run_id=landed.current_run_id if landed else None,
+                )
+            assignee_err = _enforce_current_assignee(kb, conn, tid)
+            if assignee_err:
+                return assignee_err
+            run_err = _enforce_current_worker_run(kb, conn, tid, run_id)
+            if run_err:
+                return run_err
+            ok, detail = kb.handoff_task(
+                conn,
+                tid,
+                next_assignee=args.get("next_assignee"),
+                next_phase=args.get("next_phase"),
+                summary=args.get("summary") or "",
+                evidence=evidence,
+                expected_outcome=args.get("expected_outcome") or "",
+                recheck_condition=args.get("recheck_condition") or "",
+                expected_run_id=run_id,
+            )
+            if not ok:
+                return tool_error(f"could not hand off {tid}: {detail}")
+            landed = kb.get_task(conn, tid)
+            return _ok(
+                task_id=tid,
+                status=landed.status if landed else None,
+                next_assignee=landed.assignee if landed else detail,
+                next_phase=landed.current_phase if landed else args.get("next_phase"),
+                current_run_id=landed.current_run_id if landed else None,
+            )
+        finally:
+            conn.close()
+    except ValueError as e:
+        return tool_error(f"kanban_handoff: {e}")
+    except Exception as e:
+        logger.exception("kanban_handoff failed")
+        return tool_error(f"kanban_handoff: {e}")
+
+
+def _handle_pass_review(args: dict, **kw) -> str:
+    """Record an independent technical PASS and route to intent review."""
+    delegated_err = _reject_delegated_child_mutation("kanban_pass_review")
+    if delegated_err:
+        return delegated_err
+    tid = _default_task_id(args.get("task_id"))
+    if not tid:
+        return tool_error(
+            "task_id is required (or set HERMES_KANBAN_TASK in the env)"
+        )
+    ownership_err = _enforce_worker_task_ownership(tid)
+    if ownership_err:
+        return ownership_err
+    evidence = args.get("evidence")
+    if not isinstance(evidence, dict) or not evidence:
+        return tool_error("evidence must be a non-empty object")
+    board = args.get("board")
+    try:
+        kb, conn = _connect(board=board)
+        try:
+            run_id = _worker_run_id(tid)
+            retry_actor = (
+                (os.environ.get("HERMES_PROFILE") or "").strip() or None
+            )
+            retry_ok, retry_detail = kb.pass_review(
+                conn,
+                tid,
+                summary=args.get("summary") or "",
+                metadata=evidence,
+                expected_run_id=run_id,
+                retry_actor=retry_actor,
+                retry_only=True,
+            )
+            if retry_ok:
+                landed = kb.get_task(conn, tid)
+                return _ok(
+                    task_id=tid,
+                    status=landed.status if landed else None,
+                    next_assignee=landed.assignee if landed else retry_detail,
+                    next_phase=landed.current_phase if landed else "intent_review",
+                    current_run_id=landed.current_run_id if landed else None,
+                )
+            assignee_err = _enforce_current_assignee(kb, conn, tid)
+            if assignee_err:
+                return assignee_err
+            run_err = _enforce_current_worker_run(kb, conn, tid, run_id)
+            if run_err:
+                return run_err
+            ok, detail = kb.pass_review(
+                conn,
+                tid,
+                summary=args.get("summary") or "",
+                metadata=evidence,
+                expected_run_id=run_id,
+            )
+            if not ok:
+                return tool_error(f"could not pass review for {tid}: {detail}")
+            landed = kb.get_task(conn, tid)
+            return _ok(
+                task_id=tid,
+                status=landed.status if landed else None,
+                next_assignee=landed.assignee if landed else detail,
+                next_phase=landed.current_phase if landed else "intent_review",
+                current_run_id=landed.current_run_id if landed else None,
+            )
+        finally:
+            conn.close()
+    except ValueError as e:
+        return tool_error(f"kanban_pass_review: {e}")
+    except Exception as e:
+        logger.exception("kanban_pass_review failed")
+        return tool_error(f"kanban_pass_review: {e}")
 def _handle_heartbeat(args: dict, **kw) -> str:
     """Signal that the worker is still alive during a long operation.
 
@@ -1942,6 +2188,10 @@ def _handle_create(args: dict, **kw) -> str:
                 workspace_kind=new_task.workspace_kind if new_task else None,
                 workspace_path=new_task.workspace_path if new_task else None,
                 project_id=new_task.project_id if new_task else None,
+                lifecycle_type=new_task.lifecycle_type if new_task else None,
+                current_phase=new_task.current_phase if new_task else None,
+                original_author=new_task.original_author if new_task else None,
+                return_to=new_task.return_to if new_task else None,
                 subscribed=subscribed,
                 report_to_origin=bool(report_to_origin and subscribed),
                 session_id=attached_session_id,
@@ -2520,6 +2770,81 @@ KANBAN_REQUEST_CHANGES_SCHEMA = {
     },
 }
 
+KANBAN_HANDOFF_SCHEMA = {
+    "name": "kanban_handoff",
+    "description": (
+        "Complete the current lifecycle phase and reassign this same card to "
+        "the next accountable owner. The transition ends the current run "
+        "successfully, records evidence and the recheck contract, and lands "
+        "the card in ready (or parent-gated todo). It never marks the card done."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "string", "description": _DESC_TASK_ID_DEFAULT},
+            "next_assignee": {
+                "type": "string",
+                "description": "Recorded lifecycle owner who must execute the next phase.",
+            },
+            "next_phase": {
+                "type": "string",
+                "enum": [
+                    "execution", "technical_review", "intent_review",
+                    "activation", "live_acceptance", "closure", "recovery",
+                ],
+            },
+            "summary": {
+                "type": "string",
+                "description": "Concise account of the completed phase.",
+            },
+            "evidence": {
+                "type": "object",
+                "description": "Non-empty structured verification evidence for this phase.",
+                "additionalProperties": True,
+            },
+            "expected_outcome": {
+                "type": "string",
+                "description": "The concrete outcome the receiving owner must produce.",
+            },
+            "recheck_condition": {
+                "type": "string",
+                "description": "The observable condition the receiver must verify.",
+            },
+            "board": _board_schema_prop(),
+        },
+        "required": [
+            "next_assignee", "next_phase", "summary", "evidence",
+            "expected_outcome", "recheck_condition",
+        ],
+    },
+}
+
+KANBAN_PASS_REVIEW_SCHEMA = {
+    "name": "kanban_pass_review",
+    "description": (
+        "Record an independent technical-review PASS on the current review "
+        "run and reassign this same card to its recorded intent validator "
+        "(or original author) in intent_review. It does not complete the card."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "string", "description": _DESC_TASK_ID_DEFAULT},
+            "summary": {
+                "type": "string",
+                "description": "Independent review verdict and the checks performed.",
+            },
+            "evidence": {
+                "type": "object",
+                "description": "Non-empty structured PASS evidence.",
+                "additionalProperties": True,
+            },
+            "board": _board_schema_prop(),
+        },
+        "required": ["summary", "evidence"],
+    },
+}
+
 KANBAN_HEARTBEAT_SCHEMA = {
     "name": "kanban_heartbeat",
     "description": (
@@ -2937,6 +3262,28 @@ KANBAN_CREATE_SCHEMA = {
                     "to a different one. Requires 'model'."
                 ),
             },
+            "lifecycle_type": {
+                "type": "string",
+                "enum": [
+                    "design", "executive_support", "finance", "managed",
+                    "marketing", "operations", "research", "software", "vision",
+                ],
+                "description": "Opt this card into the same-card role lifecycle.",
+            },
+            "original_author": {"type": "string"},
+            "implementer": {"type": "string"},
+            "technical_reviewer": {"type": "string"},
+            "intent_validator": {"type": "string"},
+            "activation_owner": {"type": "string"},
+            "closure_owner": {"type": "string"},
+            "current_phase": {
+                "type": "string",
+                "enum": [
+                    "execution", "technical_review", "intent_review",
+                    "activation", "live_acceptance", "closure", "recovery",
+                ],
+            },
+            "return_to": {"type": "string"},
             "board": _board_schema_prop(),
         },
         "required": ["title", "assignee"],
@@ -3039,6 +3386,24 @@ registry.register(
     handler=_handle_request_changes,
     check_fn=_check_kanban_mode,
     emoji="↩",
+)
+
+registry.register(
+    name="kanban_handoff",
+    toolset="kanban",
+    schema=KANBAN_HANDOFF_SCHEMA,
+    handler=_handle_handoff,
+    check_fn=_check_kanban_mode,
+    emoji="→",
+)
+
+registry.register(
+    name="kanban_pass_review",
+    toolset="kanban",
+    schema=KANBAN_PASS_REVIEW_SCHEMA,
+    handler=_handle_pass_review,
+    check_fn=_check_kanban_mode,
+    emoji="✓",
 )
 
 registry.register(

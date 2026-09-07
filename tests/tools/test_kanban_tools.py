@@ -842,31 +842,45 @@ def test_worker_lifecycle_through_tools(worker_env):
 
 
 def test_kanban_guidance_prompt_size_bounded():
-    """KANBAN_GUIDANCE is injected into every kanban-capable process's system
-    prompt and resolved once at agent init, so its size is a per-worker token
-    tax paid on every spawn. Bound it as an invariant, not a change-detector:
-    the ceiling (8000 chars, roughly 2000 tokens) leaves headroom above the
-    current ~6.2k chars for tight additions, while catching accidental bloat
-    (pasted docs, duplicated sections) before it ships to every worker.
-    """
+    """The system prompt carries only a bootstrap; procedure lives in skill."""
     from agent.prompt_builder import KANBAN_GUIDANCE
 
-    assert len(KANBAN_GUIDANCE) < 8000, (
+    assert len(KANBAN_GUIDANCE) < 1200, (
         f"KANBAN_GUIDANCE is {len(KANBAN_GUIDANCE)} chars; it is injected into "
         "every kanban worker's system prompt — trim it or consciously re-bound "
         "this invariant with justification."
     )
 
 
-def test_kanban_guidance_orchestrator_decision_ownership():
-    """The orchestrator section must carry the split-brain prevention
-    contract: decisions are made by the orchestrator before fan-out and
-    stamped into every dependent card body."""
+def test_kanban_guidance_points_to_loaded_lifecycle_skill():
     from agent.prompt_builder import KANBAN_GUIDANCE
 
-    assert KANBAN_GUIDANCE.count("Decision ownership.") == 1
-    assert "Never let two subtree cards decide the same question" in KANBAN_GUIDANCE
-    assert "workers cannot see sibling context" in KANBAN_GUIDANCE
+    assert "kanban-workflows" in KANBAN_GUIDANCE
+    assert "kanban_show" in KANBAN_GUIDANCE
+    assert "safety" in KANBAN_GUIDANCE.lower()
+
+
+def test_kanban_guidance_forbids_advisory_only_operational_failure_exit():
+    from agent.prompt_builder import KANBAN_GUIDANCE
+
+    guidance = KANBAN_GUIDANCE.lower()
+    assert "operational failure" in guidance
+    assert "durable" in guidance
+    assert "advisory" in guidance
+
+
+def test_kanban_guidance_preserves_task_graph_terminal_decision():
+    """A pre-created downstream lane must be released, not duplicated."""
+    from agent.prompt_builder import KANBAN_GUIDANCE
+
+    guidance = KANBAN_GUIDANCE.lower()
+    assert "child" in guidance
+    assert "inspect" in guidance
+    assert "review" in guidance
+    assert "qa" in guidance
+    assert "release" in guidance
+    assert "kanban_complete" in guidance
+    assert "same-card review" in guidance
 
 
 # ---------------------------------------------------------------------------

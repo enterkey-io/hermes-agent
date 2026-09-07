@@ -89,6 +89,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 
+import yaml
+
 from hermes_cli.sqlite_util import add_column_if_missing as _add_column_if_missing
 from toolsets import get_toolset_names
 
@@ -101,6 +103,52 @@ _log = logging.getLogger(__name__)
 
 VALID_STATUSES = {"triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"}
 VALID_INITIAL_STATUSES = {"running", "blocked"}
+VALID_LIFECYCLE_PHASES = {
+    "execution",
+    "technical_review",
+    "intent_review",
+    "activation",
+    "live_acceptance",
+    "closure",
+    "recovery",
+}
+VALID_LIFECYCLE_TYPES = {
+    "software",
+    "research",
+    "design",
+    "marketing",
+    "executive_support",
+    "operations",
+    "finance",
+    "vision",
+    "managed",
+}
+KANBAN_LIFECYCLE_SKILL = "kanban-workflows"
+
+
+def _worker_skills_for_task(task: "Task", *, review: bool = False) -> list[str]:
+    """Resolve worker skills without opting legacy cards into lifecycle."""
+    requested = [
+        skill
+        for skill in (task.skills or [])
+        if skill and skill != KANBAN_LIFECYCLE_SKILL
+    ]
+    ordered = (
+        [KANBAN_LIFECYCLE_SKILL, *requested]
+        if task.lifecycle_type
+        else requested
+    )
+    if review:
+        ordered.append("sdlc-review")
+    return list(dict.fromkeys(ordered))
+
+
+class LifecyclePreflightError(ValueError):
+    """An opted-in task cannot safely enter its next worker run."""
+
+
+class LifecycleEnforcementError(ValueError):
+    """A same-card transition violates recorded lifecycle ownership/evidence."""
 
 # Small-repair pilot defaults. They are persisted per request so larger work
 # can opt into different explicit limits without changing a fleet-wide knob.
@@ -1346,6 +1394,29 @@ class Task:
                 if "block_recurrences" in keys and row["block_recurrences"] is not None
                 else 0
             ),
+            original_author=(
+                row["original_author"] if "original_author" in keys else None
+            ),
+            implementer=row["implementer"] if "implementer" in keys else None,
+            technical_reviewer=(
+                row["technical_reviewer"] if "technical_reviewer" in keys else None
+            ),
+            intent_validator=(
+                row["intent_validator"] if "intent_validator" in keys else None
+            ),
+            activation_owner=(
+                row["activation_owner"] if "activation_owner" in keys else None
+            ),
+            closure_owner=(
+                row["closure_owner"] if "closure_owner" in keys else None
+            ),
+            current_phase=(
+                row["current_phase"] if "current_phase" in keys else None
+            ),
+            lifecycle_type=(
+                row["lifecycle_type"] if "lifecycle_type" in keys else None
+            ),
+            return_to=row["return_to"] if "return_to" in keys else None,
         )
 
 
@@ -1635,7 +1706,18 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- ``blocked`` so a cron can't spin it forever. Reset to 0 only on a
     -- successful completion — NOT on unblock (resetting on unblock is exactly
     -- the amnesia that let the loop run unbounded).
-    block_recurrences    INTEGER NOT NULL DEFAULT 0
+    block_recurrences    INTEGER NOT NULL DEFAULT 0,
+    -- Optional same-card lifecycle provenance. NULL lifecycle_type keeps a
+    -- legacy card on the historical advisory transition rules.
+    original_author      TEXT,
+    implementer          TEXT,
+    technical_reviewer   TEXT,
+    intent_validator     TEXT,
+    activation_owner     TEXT,
+    closure_owner        TEXT,
+    current_phase        TEXT,
+    lifecycle_type       TEXT,
+    return_to            TEXT
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
@@ -2967,6 +3049,28 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             "block_recurrences INTEGER NOT NULL DEFAULT 0",
         )
 
+    # Same-card workforce lifecycle metadata is deliberately additive and
+    # nullable.  Existing cards therefore remain byte-for-byte operable under
+    # the legacy transition rules even when the global enforcement flag is on.
+    for lifecycle_column in (
+        "original_author",
+        "implementer",
+        "technical_reviewer",
+        "intent_validator",
+        "activation_owner",
+        "closure_owner",
+        "current_phase",
+        "lifecycle_type",
+        "return_to",
+    ):
+        if lifecycle_column not in cols:
+            _add_column_if_missing(
+                conn,
+                "tasks",
+                lifecycle_column,
+                f"{lifecycle_column} TEXT",
+            )
+
     # Indexes over additive ``tasks`` columns must be created after the
     # columns exist. Keeping them in SCHEMA_SQL breaks legacy boards: SQLite
     # parses each statement in ``executescript`` against the live schema, so a
@@ -3611,6 +3715,43 @@ def create_task(
         raise ValueError("provider_override requires a model_override")
     assignee = _canonical_assignee(assignee)
     _require_operational_assignee(assignee)
+    lifecycle_type = (
+        str(lifecycle_type).strip().casefold() if lifecycle_type else None
+    )
+    original_author = _normalize_lifecycle_value(original_author)
+    implementer = _normalize_lifecycle_value(implementer)
+    technical_reviewer = _normalize_lifecycle_value(technical_reviewer)
+    intent_validator = _normalize_lifecycle_value(intent_validator)
+    activation_owner = _normalize_lifecycle_value(activation_owner)
+    closure_owner = _normalize_lifecycle_value(closure_owner)
+    return_to = _normalize_lifecycle_value(return_to)
+    current_phase = (
+        str(current_phase).strip().casefold() if current_phase else None
+    )
+    if lifecycle_type:
+        if lifecycle_type not in VALID_LIFECYCLE_TYPES:
+            raise LifecyclePreflightError(
+                f"lifecycle_type must be one of {sorted(VALID_LIFECYCLE_TYPES)}"
+            )
+        current_phase = current_phase or "execution"
+        if current_phase not in VALID_LIFECYCLE_PHASES:
+            raise LifecyclePreflightError(
+                f"current_phase must be one of {sorted(VALID_LIFECYCLE_PHASES)}"
+            )
+        original_author = original_author or _normalize_lifecycle_value(created_by)
+        implementer = implementer or (assignee if current_phase == "execution" else None)
+        intent_validator = intent_validator or original_author
+        closure_owner = closure_owner or original_author
+        return_to = return_to or assignee
+        if lifecycle_type == "software" and technical_reviewer is None:
+            try:
+                from hermes_cli.workforce_org import load_organization
+
+                technical_reviewer = _canonical_assignee(
+                    load_organization().technical_ownership.get("qa")
+                )
+            except Exception:
+                technical_reviewer = None
     if not title or not title.strip():
         raise ValueError("title is required")
     if initial_status not in VALID_INITIAL_STATUSES:
@@ -6525,6 +6666,57 @@ def list_events(conn: sqlite3.Connection, task_id: str) -> list[Event]:
     return out
 
 
+def lifecycle_history_for_context(
+    conn: sqlite3.Connection,
+    task_id: str,
+) -> tuple[list[Event], dict[str, int]]:
+    """Return a bounded, lifecycle-specific event history for workers.
+
+    The newest meaningful transitions fill the history, while the latest
+    evidence-bearing event of each kind is reserved even when assignment
+    churn would otherwise push it past the cap. Handoffs are reserved once
+    per valid source phase because completion gates audit those phases
+    independently. The second return value deterministically counts omitted
+    meaningful events by kind; operational claim/heartbeat/retry noise is
+    excluded entirely rather than summarized into the prompt.
+    """
+    meaningful = [
+        event
+        for event in list_events(conn, task_id)
+        if event.kind in _LIFECYCLE_CONTEXT_EVENT_KINDS
+    ]
+
+    protected_ids: set[int] = set()
+    protected_keys: set[tuple[str, str]] = set()
+    for event in reversed(meaningful):
+        if event.kind == "assigned":
+            continue
+        if event.kind == "handoff_created":
+            payload = event.payload if isinstance(event.payload, dict) else {}
+            source_phase = str(payload.get("source_phase") or "").strip()
+            if source_phase not in VALID_LIFECYCLE_PHASES:
+                source_phase = "(unknown)"
+            key = (event.kind, source_phase)
+        else:
+            key = (event.kind, "")
+        if key not in protected_keys:
+            protected_keys.add(key)
+            protected_ids.add(event.id)
+
+    selected_ids = set(protected_ids)
+    for event in reversed(meaningful):
+        if len(selected_ids) >= _CTX_MAX_LIFECYCLE_EVENTS:
+            break
+        selected_ids.add(event.id)
+
+    selected = [event for event in meaningful if event.id in selected_ids]
+    omitted_by_kind: dict[str, int] = {}
+    for event in meaningful:
+        if event.id not in selected_ids:
+            omitted_by_kind[event.kind] = omitted_by_kind.get(event.kind, 0) + 1
+    return selected, dict(sorted(omitted_by_kind.items()))
+
+
 def _append_event(
     conn: sqlite3.Connection,
     task_id: str,
@@ -6888,6 +7080,8 @@ def claim_task(
     Returns the claimed ``Task`` on success, ``None`` if the task was
     already claimed (or is not in ``ready`` status).
     """
+    if not _preflight_claim(conn, task_id):
+        return None
     now = int(time.time())
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
@@ -7023,7 +7217,12 @@ def claim_task(
         )
         _append_event(
             conn, task_id, "claimed",
-            {"lock": lock, "expires": expires, "run_id": run_id},
+            {
+                "lock": lock,
+                "expires": expires,
+                "run_id": run_id,
+                "source_phase": guarded["current_phase"] if guarded else None,
+            },
             run_id=run_id,
         )
         claimed = get_task(conn, task_id)
@@ -7057,6 +7256,8 @@ def claim_review_task(
     Creates a new run entry so the review agent's lifecycle is tracked
     independently from the original worker run.
     """
+    if not _preflight_claim(conn, task_id):
+        return None
     now = int(time.time())
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
@@ -7111,7 +7312,7 @@ def claim_review_task(
         if cur.rowcount != 1:
             return None
         trow = conn.execute(
-            "SELECT assignee, max_runtime_seconds, current_step_key "
+            "SELECT assignee, max_runtime_seconds, current_step_key, current_phase "
             "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
@@ -7141,7 +7342,8 @@ def claim_review_task(
         _append_event(
             conn, task_id, "claimed",
             {"lock": lock, "expires": expires, "run_id": run_id,
-             "source_status": "review"},
+             "source_status": "review",
+             "source_phase": trow["current_phase"] if trow else None},
             run_id=run_id,
         )
         return get_task(conn, task_id)
@@ -7408,6 +7610,12 @@ def release_stale_claims(
                 conn, row["id"], "reclaimed",
                 payload,
                 run_id=run_id,
+            )
+            _append_lifecycle_manager_notification(
+                conn,
+                row["id"],
+                kind="missed_checkpoint",
+                detail=f"claim expired; retry_status={retry_status}",
             )
             reclaimed += 1
         # Worker-lifecycle observer (RFC #58548): the reclaim txn above has
@@ -8727,6 +8935,18 @@ def complete_task(
         conn, task_id, metadata, summary=summary, result=result,
     )
     with write_txn(conn):
+        # Re-read and revalidate under the same write lock as the state
+        # transition. The advisory check above gives fast feedback before
+        # artifact staging, but another connection can reassign the card or
+        # alter its phase between that check and this transaction.
+        lifecycle_row = conn.execute(
+            "SELECT * FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if lifecycle_row is None:
+            return False
+        _validate_lifecycle_completion(
+            conn, Task.from_row(lifecycle_row), metadata
+        )
         # Parent completion is a hard invariant even for direct human review
         # approval. A parent may have been reopened after this task entered
         # ``review`` or ``running``.
@@ -8758,7 +8978,11 @@ def complete_task(
                        claim_expires= NULL,
                        worker_pid   = NULL,
                        block_kind   = NULL,
-                       block_recurrences = 0
+                       block_recurrences = 0,
+                       current_phase = CASE WHEN lifecycle_type IS NOT NULL
+                                            THEN 'closure' ELSE current_phase END,
+                       return_to = CASE WHEN lifecycle_type IS NOT NULL
+                                        THEN closure_owner ELSE return_to END
                  WHERE id = ?
                    AND status IN ('running', 'ready', 'blocked', 'review')
                 """,
@@ -8775,7 +8999,11 @@ def complete_task(
                        claim_expires= NULL,
                        worker_pid   = NULL,
                        block_kind   = NULL,
-                       block_recurrences = 0
+                       block_recurrences = 0,
+                       current_phase = CASE WHEN lifecycle_type IS NOT NULL
+                                            THEN 'closure' ELSE current_phase END,
+                       return_to = CASE WHEN lifecycle_type IS NOT NULL
+                                        THEN closure_owner ELSE return_to END
                  WHERE id = ?
                    AND status IN ('running', 'ready', 'blocked', 'review')
                    AND current_run_id = ?
@@ -9748,6 +9976,9 @@ def block_task(
                 },
                 run_id=run_id,
             )
+            _append_lifecycle_manager_notification(
+                conn, task_id, kind="stuck", detail=reason
+            )
         else:
             if expected_run_id is None:
                 cur = conn.execute(
@@ -9804,6 +10035,9 @@ def block_task(
                     "source_status": source_status,
                 },
                 run_id=run_id,
+            )
+            _append_lifecycle_manager_notification(
+                conn, task_id, kind="stuck", detail=reason
             )
         _blocked_task = get_task(conn, task_id)
     _fire_kanban_lifecycle_hook(
@@ -9966,6 +10200,41 @@ def request_review(
                 reviewer = prior_reviewer
         reviewer = _canonical_assignee(reviewer) if reviewer is not None else None
         _require_operational_assignee(reviewer)
+        if trow["lifecycle_type"] and lifecycle_enforcement_enabled():
+            if trow["current_phase"] != "execution":
+                return _ret(
+                    False,
+                    f"lifecycle request_review requires execution phase, got "
+                    f"{trow['current_phase']!r}",
+                )
+            if not isinstance(metadata, dict) or not metadata:
+                return _ret(
+                    False,
+                    "lifecycle review request requires structured verification evidence",
+                )
+            if not reviewer:
+                return _ret(False, "lifecycle task has no technical_reviewer")
+            try:
+                from hermes_cli.workforce_org import (
+                    load_organization,
+                    validate_lifecycle_assignment,
+                )
+
+                validate_lifecycle_assignment(
+                    load_organization(),
+                    reviewer,
+                    "technical_review",
+                    {
+                        "implementer": implementer,
+                        "technical_reviewer": reviewer,
+                        "intent_validator": trow["intent_validator"],
+                        "activation_owner": trow["activation_owner"],
+                        "closure_owner": trow["closure_owner"],
+                        "return_to": reviewer,
+                    },
+                )
+            except Exception as exc:
+                return _ret(False, f"invalid technical review route: {exc}")
         assignee_sql = ", assignee = ?" if reviewer is not None else ""
         params: tuple[Any, ...]
         if expected_run_id is None:
@@ -9984,12 +10253,24 @@ def request_review(
                SET status        = 'review',
                    claim_lock    = NULL,
                    claim_expires = NULL,
-                   worker_pid    = NULL
+                   worker_pid    = NULL,
+                   implementer   = CASE WHEN lifecycle_type IS NOT NULL
+                                        THEN COALESCE(implementer, ?)
+                                        ELSE implementer END,
+                   technical_reviewer = CASE WHEN lifecycle_type IS NOT NULL
+                                             THEN COALESCE(?, technical_reviewer)
+                                             ELSE technical_reviewer END,
+                   current_phase = CASE WHEN lifecycle_type IS NOT NULL
+                                        THEN 'technical_review'
+                                        ELSE current_phase END,
+                   return_to = CASE WHEN lifecycle_type IS NOT NULL
+                                    THEN COALESCE(?, return_to)
+                                    ELSE return_to END
             """ + assignee_sql + """
              WHERE id = ?
                AND status IN ('running', 'ready')
             """ + run_guard,
-            params,
+            (implementer, reviewer, reviewer, *params),
         )
         if cur.rowcount != 1:
             return _ret(
@@ -10023,6 +10304,10 @@ def request_review(
                 "summary": event_summary or None,
                 "implementer": implementer,
                 "reviewer": reviewer,
+                "source_phase": trow["current_phase"],
+                "next_phase": (
+                    "technical_review" if trow["lifecycle_type"] else None
+                ),
             },
             run_id=run_id,
         )
@@ -10036,6 +10321,416 @@ def request_review(
                 "reserved_decision": reserved_decision,
             }, run_id=run_id)
     return _ret(True)
+
+
+_HANDOFF_PHASE_TRANSITIONS = {
+    "execution": {"intent_review", "activation", "live_acceptance", "closure", "recovery"},
+    "intent_review": {"activation", "live_acceptance", "closure", "recovery"},
+    "activation": {"live_acceptance", "recovery"},
+    "live_acceptance": {"closure", "recovery"},
+    "closure": {"recovery"},
+    "recovery": {
+        "execution", "technical_review", "intent_review", "activation",
+        "live_acceptance", "closure", "recovery",
+    },
+}
+
+
+def _idempotent_lifecycle_result(
+    conn: sqlite3.Connection,
+    task_id: str,
+    expected_run_id: Optional[int],
+    *,
+    outcome: str,
+    event_kind: str,
+    receiver: Optional[str] = None,
+    next_phase: Optional[str] = None,
+) -> Optional[tuple[bool, Optional[str]]]:
+    """Recognize a response-lost retry of an already committed transition."""
+    if expected_run_id is None:
+        return None
+    run = conn.execute(
+        "SELECT outcome FROM task_runs WHERE id = ? AND task_id = ?",
+        (int(expected_run_id), task_id),
+    ).fetchone()
+    if not run or run["outcome"] != outcome:
+        return None
+    event = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND run_id = ? "
+        "AND kind = ? ORDER BY id DESC LIMIT 1",
+        (task_id, int(expected_run_id), event_kind),
+    ).fetchone()
+    if not event:
+        return None
+    try:
+        payload = json.loads(event["payload"] or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return None
+    recorded_receiver = payload.get("next_assignee") or payload.get("assignee")
+    if receiver is not None and recorded_receiver != receiver:
+        return None
+    if next_phase is not None and payload.get("next_phase") != next_phase:
+        return None
+    return True, recorded_receiver
+
+
+def _lifecycle_run_owned_by_actor(
+    conn: sqlite3.Connection,
+    task_id: str,
+    run_id: Optional[int],
+    actor: Optional[str],
+) -> bool:
+    """Return whether ``actor`` canonically owns this task run.
+
+    This is deliberately strict: missing run provenance, an unset actor, or
+    any organization-resolution failure all return ``False``.
+    """
+    if run_id is None or not str(actor or "").strip():
+        return False
+    run = conn.execute(
+        "SELECT profile FROM task_runs WHERE id = ? AND task_id = ?",
+        (int(run_id), task_id),
+    ).fetchone()
+    profile = run["profile"] if run else None
+    if not profile:
+        return False
+    try:
+        return lifecycle_identities_match(str(actor), str(profile))
+    except Exception:
+        return False
+
+
+def handoff_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    next_assignee: str,
+    next_phase: str,
+    summary: str,
+    evidence: Optional[dict],
+    expected_outcome: str,
+    recheck_condition: str,
+    expected_run_id: Optional[int] = None,
+    retry_actor: Optional[str] = None,
+    retry_only: bool = False,
+) -> tuple[bool, Optional[str]]:
+    """End one run and reassign the same card to its next lifecycle owner.
+
+    ``retry_only`` performs the same validation and durable-idempotency lookup
+    without entering the mutation transaction.  When it is set, the ended run
+    must canonically belong to ``retry_actor``.  Tool handlers use that narrow
+    path before enforcing the card's *current* assignee, because a successful
+    prior transition has already changed that assignee.
+    """
+    receiver = _canonical_assignee(next_assignee)
+    phase = str(next_phase or "").strip().casefold()
+    summary = str(redact_review_value(summary or "")).strip()
+    expected_outcome = str(redact_review_value(expected_outcome or "")).strip()
+    recheck_condition = str(redact_review_value(recheck_condition or "")).strip()
+    evidence = redact_review_value(evidence)
+    if not receiver:
+        return False, "next_assignee is required"
+    if phase not in VALID_LIFECYCLE_PHASES:
+        return False, f"next_phase must be one of {sorted(VALID_LIFECYCLE_PHASES)}"
+    if not summary:
+        return False, "summary is required"
+    if not isinstance(evidence, dict) or not evidence:
+        return False, "evidence must be a non-empty object"
+    if not expected_outcome:
+        return False, "expected_outcome is required"
+    if not recheck_condition:
+        return False, "recheck_condition is required"
+    _require_operational_assignee(receiver)
+
+    retry = _idempotent_lifecycle_result(
+        conn,
+        task_id,
+        expected_run_id,
+        outcome="handoff_created",
+        event_kind="handoff_created",
+        receiver=receiver,
+        next_phase=phase,
+    )
+    if retry is not None:
+        actor_check = retry_only or retry_actor is not None
+        if actor_check and not _lifecycle_run_owned_by_actor(
+            conn,
+            task_id,
+            expected_run_id,
+            retry_actor,
+        ):
+            return False, "retry run is not owned by the caller"
+        return retry
+    if retry_only:
+        return False, "no matching committed lifecycle transition"
+
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT * FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if row is None:
+            return False, "task not found"
+        task = Task.from_row(row)
+        if task.status != "running" or task.current_run_id is None:
+            return False, "task is not in an active worker run"
+        if expected_run_id is not None and task.current_run_id != int(expected_run_id):
+            return False, "run_id mismatch"
+        source_phase = task.current_phase
+        if task.lifecycle_type and lifecycle_enforcement_enabled():
+            allowed = _HANDOFF_PHASE_TRANSITIONS.get(source_phase or "", set())
+            if phase not in allowed:
+                return False, (
+                    f"invalid lifecycle handoff {source_phase!r} -> {phase!r}"
+                )
+            if source_phase == "technical_review":
+                return False, "technical review PASS must use kanban_pass_review"
+            try:
+                from hermes_cli.workforce_org import (
+                    derive_lifecycle_route,
+                    load_organization,
+                    validate_lifecycle_assignment,
+                )
+
+                org = load_organization()
+                if phase == "recovery":
+                    source_route = derive_lifecycle_route(org, task.assignee or "")
+                    allowed_recovery = {
+                        source_route.stuck_route,
+                        source_route.local_activation_owner,
+                        source_route.external_activation_owner,
+                    }
+                    receiver_agent = org.resolve_profile(receiver).agent
+                    if receiver_agent not in allowed_recovery:
+                        raise ValueError(
+                            f"recovery receiver {receiver_agent!r} is not the source "
+                            f"owner's stuck route {source_route.stuck_route!r} or a "
+                            "recognized systems owner"
+                        )
+                else:
+                    validate_lifecycle_assignment(
+                        org, receiver, phase, _task_lifecycle_roles(task)
+                    )
+            except Exception as exc:
+                return False, f"invalid lifecycle receiver: {exc}"
+
+        landing = _landing_status_after_parents(conn, task_id)
+        if phase == "technical_review":
+            if landing != "ready":
+                return False, (
+                    "technical_review handoff cannot enter the review lane "
+                    "until parent dependencies are satisfied"
+                )
+            landing = "review"
+        cur = conn.execute(
+            "UPDATE tasks SET status = ?, assignee = ?, current_phase = ?, "
+            "return_to = ?, claim_lock = NULL, claim_expires = NULL, "
+            "worker_pid = NULL WHERE id = ? AND status = 'running' "
+            "AND current_run_id = ?",
+            (
+                landing,
+                receiver,
+                phase,
+                receiver,
+                task_id,
+                int(task.current_run_id),
+            ),
+        )
+        if cur.rowcount != 1:
+            return False, "task changed during handoff"
+        run_metadata = dict(evidence)
+        run_metadata.update(
+            {
+                "expected_outcome": expected_outcome,
+                "recheck_condition": recheck_condition,
+                "source_phase": source_phase,
+                "next_phase": phase,
+                "next_assignee": receiver,
+            }
+        )
+        run_id = _end_run(
+            conn,
+            task_id,
+            outcome="handoff_created",
+            status=landing,
+            summary=summary,
+            metadata=run_metadata,
+        )
+        payload = {
+            "summary": summary.splitlines()[0][:400],
+            "evidence": evidence,
+            "source_phase": source_phase,
+            "next_phase": phase,
+            "next_assignee": receiver,
+            "expected_outcome": expected_outcome,
+            "recheck_condition": recheck_condition,
+            "status": landing,
+        }
+        _append_event(
+            conn, task_id, "handoff_created", payload, run_id=run_id
+        )
+        _append_event(
+            conn,
+            task_id,
+            "assigned",
+            {
+                "assignee": receiver,
+                "phase": phase,
+                "source": "handoff_created",
+            },
+            run_id=run_id,
+        )
+    notify_task_updated(
+        conn, task_id, ("status", "assignee", "current_phase", "return_to")
+    )
+    return True, receiver
+
+
+def pass_review(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    summary: str,
+    metadata: Optional[dict],
+    expected_run_id: Optional[int] = None,
+    retry_actor: Optional[str] = None,
+    retry_only: bool = False,
+) -> tuple[bool, Optional[str]]:
+    """Record independent QA PASS and route to intent validation.
+
+    ``retry_only`` has the same non-mutating, actor-bound semantics documented
+    by :func:`handoff_task`.
+    """
+    summary = str(redact_review_value(summary or "")).strip()
+    metadata = redact_review_value(metadata)
+    if not summary:
+        return False, "summary is required"
+    if not isinstance(metadata, dict) or not metadata:
+        return False, "metadata must contain independent PASS evidence"
+
+    # Receiver is card-derived, so resolve it before checking idempotency.
+    existing = get_task(conn, task_id)
+    if existing is None:
+        return False, "task not found"
+    receiver = existing.intent_validator or existing.original_author
+    if not receiver:
+        return False, "review handoff has no intent validator or original author"
+    receiver = _canonical_assignee(receiver)
+    retry = _idempotent_lifecycle_result(
+        conn,
+        task_id,
+        expected_run_id,
+        outcome="review_passed",
+        event_kind="review_passed",
+        receiver=receiver,
+        next_phase="intent_review",
+    )
+    if retry is not None:
+        actor_check = retry_only or retry_actor is not None
+        if actor_check and not _lifecycle_run_owned_by_actor(
+            conn,
+            task_id,
+            expected_run_id,
+            retry_actor,
+        ):
+            return False, "retry run is not owned by the caller"
+        return retry
+    if retry_only:
+        return False, "no matching committed lifecycle transition"
+
+    with write_txn(conn):
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if row is None:
+            return False, "task not found"
+        task = Task.from_row(row)
+        if task.status != "running" or task.current_run_id is None:
+            return False, "task is not in an active review run"
+        if expected_run_id is not None and task.current_run_id != int(expected_run_id):
+            return False, "run_id mismatch"
+        claimed = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id = ? AND run_id = ? "
+            "AND kind = 'claimed' ORDER BY id DESC LIMIT 1",
+            (task_id, int(task.current_run_id)),
+        ).fetchone()
+        try:
+            claimed_payload = json.loads(claimed["payload"] or "{}") if claimed else {}
+        except (TypeError, json.JSONDecodeError):
+            claimed_payload = {}
+        if claimed_payload.get("source_status") != "review":
+            return False, "active run was not claimed from review"
+        if task.lifecycle_type and task.current_phase != "technical_review":
+            return False, "active lifecycle run is not technical_review"
+        if task.lifecycle_type and lifecycle_enforcement_enabled():
+            try:
+                owns_review = lifecycle_identities_match(
+                    task.assignee or "", task.technical_reviewer or ""
+                )
+            except Exception:
+                return False, "technical reviewer identity cannot be verified"
+            if not owns_review:
+                return False, "only the recorded technical reviewer may pass review"
+            try:
+                from hermes_cli.workforce_org import (
+                    load_organization,
+                    validate_lifecycle_assignment,
+                )
+
+                validate_lifecycle_assignment(
+                    load_organization(),
+                    receiver,
+                    "intent_review",
+                    _task_lifecycle_roles(task),
+                )
+            except Exception as exc:
+                return False, f"invalid intent validator route: {exc}"
+        _require_operational_assignee(receiver)
+        landing = _landing_status_after_parents(conn, task_id)
+        cur = conn.execute(
+            "UPDATE tasks SET status = ?, assignee = ?, "
+            "current_phase = 'intent_review', return_to = ?, "
+            "claim_lock = NULL, claim_expires = NULL, worker_pid = NULL "
+            "WHERE id = ? AND status = 'running' AND current_run_id = ?",
+            (
+                landing,
+                receiver,
+                receiver,
+                task_id,
+                int(task.current_run_id),
+            ),
+        )
+        if cur.rowcount != 1:
+            return False, "task changed during review pass"
+        run_id = _end_run(
+            conn,
+            task_id,
+            outcome="review_passed",
+            status=landing,
+            summary=summary,
+            metadata=metadata,
+        )
+        payload = {
+            "summary": summary.splitlines()[0][:400],
+            "evidence": metadata,
+            "reviewer": task.assignee,
+            "next_phase": "intent_review",
+            "next_assignee": receiver,
+            "status": landing,
+        }
+        _append_event(conn, task_id, "review_passed", payload, run_id=run_id)
+        _append_event(
+            conn,
+            task_id,
+            "assigned",
+            {
+                "assignee": receiver,
+                "phase": "intent_review",
+                "source": "review_passed",
+            },
+            run_id=run_id,
+        )
+    notify_task_updated(
+        conn, task_id, ("status", "assignee", "current_phase", "return_to")
+    )
+    return True, receiver
 
 
 def request_changes(
@@ -10063,7 +10758,9 @@ def request_changes(
         if owned_failure_incomplete_review_snapshot(conn, task_id) is not None:
             return False, "incomplete investigation must stop blocked; it cannot relaunch work"
         task_row = conn.execute(
-            "SELECT status, assignee, current_run_id FROM tasks WHERE id = ?",
+            "SELECT status, assignee, current_run_id, lifecycle_type, "
+            "current_phase, implementer, technical_reviewer, intent_validator "
+            "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
         if task_row is None:
@@ -10090,7 +10787,18 @@ def request_changes(
             claimed_payload = {}
         if not isinstance(claimed_payload, dict):
             claimed_payload = {}
-        if claimed_payload.get("source_status") != "review":
+        source_phase = (
+            claimed_payload.get("source_phase") or task_row["current_phase"]
+        )
+        lifecycle_task = bool(task_row["lifecycle_type"])
+        if lifecycle_task:
+            if source_phase not in {"technical_review", "intent_review"}:
+                return False, (
+                    "active lifecycle run is not technical_review or intent_review"
+                )
+            if lifecycle_enforcement_enabled() and len(reason) < 12:
+                return False, "reason must be concrete and actionable"
+        elif claimed_payload.get("source_status") != "review":
             return False, "active run was not claimed from review"
 
         requested_event = conn.execute(
@@ -10099,19 +10807,19 @@ def request_changes(
             "ORDER BY id DESC LIMIT 1",
             (task_id,),
         ).fetchone()
-        if requested_event is None:
+        if requested_event is None and not lifecycle_task:
             return False, "no prior review_requested event"
         try:
             requested_payload = (
                 json.loads(requested_event["payload"])
-                if requested_event["payload"]
+                if requested_event and requested_event["payload"]
                 else {}
             )
         except (json.JSONDecodeError, TypeError):
             requested_payload = {}
         if not isinstance(requested_payload, dict):
             requested_payload = {}
-        implementer = requested_payload.get("implementer")
+        implementer = task_row["implementer"] or requested_payload.get("implementer")
         if not isinstance(implementer, str) or not implementer.strip():
             return False, "review handoff has no valid implementer provenance"
         reviewer = task_row["assignee"]
@@ -10130,12 +10838,16 @@ def request_changes(
             UPDATE tasks
                SET status = ?,
                    assignee = COALESCE(?, assignee),
+                   current_phase = CASE WHEN lifecycle_type IS NOT NULL
+                                        THEN 'execution' ELSE current_phase END,
+                   return_to = CASE WHEN lifecycle_type IS NOT NULL
+                                    THEN COALESCE(?, return_to) ELSE return_to END,
                    claim_lock = NULL,
                    claim_expires = NULL,
                    worker_pid = NULL
              WHERE id = ? AND status = 'running' AND current_run_id = ?
             """,
-            (new_status, implementer, task_id, int(current_run_id)),
+            (new_status, implementer, implementer, task_id, int(current_run_id)),
         )
         if cur.rowcount != 1:
             return False, "task changed during review handoff"
@@ -10154,10 +10866,27 @@ def request_changes(
                 "reason": reason,
                 "implementer": implementer,
                 "reviewer": reviewer,
+                "validator": (
+                    reviewer if source_phase == "intent_review" else None
+                ),
+                "source_phase": source_phase,
+                "next_phase": "execution" if lifecycle_task else None,
                 "status": new_status,
             },
             run_id=run_id,
         )
+        if lifecycle_task:
+            _append_event(
+                conn,
+                task_id,
+                "assigned",
+                {
+                    "assignee": implementer,
+                    "phase": "execution",
+                    "source": "changes_requested",
+                },
+                run_id=run_id,
+            )
     return True, implementer
 
 
@@ -12050,6 +12779,12 @@ def enforce_max_runtime(
                 _append_event(
                     conn, tid, "timed_out", payload, run_id=run_id,
                 )
+                _append_lifecycle_manager_notification(
+                    conn,
+                    tid,
+                    kind="timed_out",
+                    detail=f"elapsed={int(elapsed)}s limit={int(row['max_runtime_seconds'])}s",
+                )
                 timed_out.append(tid)
         # Increment the unified failure counter. Outside the write_txn
         # above because ``_record_task_failure`` opens its own. If the
@@ -12193,6 +12928,12 @@ def detect_stale_running(
             )
             _append_event(
                 conn, tid, "stale", payload, run_id=run_id,
+            )
+            _append_lifecycle_manager_notification(
+                conn,
+                tid,
+                kind="missed_checkpoint",
+                detail=f"phase={retry_status}",
             )
             reclaimed.append(tid)
 
@@ -12534,6 +13275,13 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                     event_payload,
                     run_id=run_id,
                 )
+                if not rate_limited_exit:
+                    _append_lifecycle_manager_notification(
+                        conn,
+                        row["id"],
+                        kind="crashed",
+                        detail=error_text,
+                    )
                 exited_hook_payloads.append({
                     "task_id": row["id"],
                     "assignee": row["assignee"],
@@ -12769,6 +13517,11 @@ def _record_task_failure(
     when the breaker trips, so callers can include outcome-specific
     context (e.g. pid on crash, elapsed on timeout).
 
+    ``expected_run_id`` / ``expected_claim_lock`` optionally bind an
+    in-process worker fallback to the exact dispatcher-issued run. A stale
+    worker must not close or requeue a replacement owner's newer run. Existing
+    dispatcher/watchdog callers omit both and preserve their current behavior.
+
     Resolution order for the effective threshold:
       1. per-task ``max_retries`` if set (nothing else overrides)
       2. caller-supplied ``failure_limit`` (gateway passes the config
@@ -12797,6 +13550,16 @@ def _record_task_failure(
             "FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
         if row is None:
+            return False
+        if (
+            expected_run_id is not None
+            and row["current_run_id"] != int(expected_run_id)
+        ):
+            return False
+        if (
+            expected_claim_lock is not None
+            and row["claim_lock"] != expected_claim_lock
+        ):
             return False
         retry_status = (
             _retry_status_for_run(conn, task_id, row["current_run_id"])
@@ -12887,6 +13650,9 @@ def _record_task_failure(
             _append_event(
                 conn, task_id, "gave_up", payload, run_id=run_id,
             )
+            _append_lifecycle_manager_notification(
+                conn, task_id, kind="gave_up", detail=error
+            )
             blocked = True
         else:
             # Below threshold.
@@ -12926,6 +13692,10 @@ def _record_task_failure(
                     },
                     run_id=run_id,
                 )
+                if outcome == "spawn_failed":
+                    _append_lifecycle_manager_notification(
+                        conn, task_id, kind="crashed", detail=error
+                    )
             # Timeout/crash path's caller already emitted its own event.
     return blocked
 
@@ -13729,6 +14499,8 @@ def _dispatch_once_locked(
     if not dry_run:
         prepare_owned_failure_incomplete_reviews(conn)
     result.promoted = recompute_ready(conn, failure_limit=failure_limit)
+    if not dry_run and lifecycle_observer_enabled():
+        observe_lifecycle_handoffs(conn)
 
     # Count tasks already running so max_spawn enforces concurrency rather
     # than a per-tick spawn budget. See the docstring above for the full
@@ -14095,6 +14867,7 @@ def _dispatch_once_locked(
         if claimed.workspace_kind == "worktree":
             set_branch_name(conn, claimed.id, resolved_branch_name or (claimed.branch_name or "").strip() or f"wt/{claimed.id}")
         _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
+        claimed.skills = _worker_skills_for_task(claimed)
         _spawn = spawn_fn if spawn_fn is not None else _default_spawn
         try:
             # Back-compat: older spawn_fn signatures accept only
@@ -14145,10 +14918,11 @@ def _dispatch_once_locked(
                 result.auto_blocked.append(claimed.id)
 
     # ---- review column dispatch ----
-    # Review tasks are tasks that a worker moved to 'review' after
-    # creating a PR.  The dispatcher spawns a review agent (loading
-    # sdlc-review skill) that verifies the candidate and either approves
-    # (→ done) or requests changes (→ ready/todo for the implementer).
+    # Review tasks are tasks that a worker moved to 'review' after producing
+    # a candidate. The dispatcher spawns a review agent with the lifecycle
+    # and sdlc-review skills; that reviewer either records a PASS and routes
+    # the same card to intent validation, or requests changes from the
+    # recorded implementer.
     #
     # Same concurrency model as ready dispatch: review spawns count
     # against max_spawn alongside ready tasks, so the total number of
@@ -14251,14 +15025,9 @@ def _dispatch_once_locked(
         if claimed.workspace_kind == "worktree":
             set_branch_name(conn, claimed.id, resolved_branch_name or (claimed.branch_name or "").strip() or f"wt/{claimed.id}")
         _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
-        # Force-load the sdlc-review skill for review agents — it carries
-        # the review logic (AC verification, merge, etc.). The mandatory
-        # kanban lifecycle is already injected into every worker's system
-        # prompt via KANBAN_GUIDANCE, so this is the only extra skill the
-        # review agent needs.
-        claimed.skills = list(
-            dict.fromkeys([*(claimed.skills or []), "sdlc-review"])
-        )
+        # Review workers always receive the independent review procedure. The
+        # same-card lifecycle procedure is additive only for opted-in cards.
+        claimed.skills = _worker_skills_for_task(claimed, review=True)
         _spawn = spawn_fn if spawn_fn is not None else _default_spawn
         try:
             import inspect
@@ -14957,10 +15726,10 @@ def _default_spawn(
     # accepts both forms (action='append' + comma-split), but
     # per-name pairs are easier to read in `ps` output and avoid any
     # quoting ambiguity if a skill name ever contains unusual chars.
-    if task.skills:
-        for sk in task.skills:
-            if sk:
-                cmd.extend(["--skills", sk])
+    worker_skills = _worker_skills_for_task(task)
+    for sk in worker_skills:
+        if sk:
+            cmd.extend(["--skills", sk])
     if task.model_override:
         cmd.extend(["-m", task.model_override])
         # Pin the provider too when the override names one, so the worker
@@ -15183,6 +15952,77 @@ def build_worker_context(
     if task.body and task.body.strip():
         lines.append("## Body")
         lines.append(_cap(task.body, _CTX_MAX_BODY_BYTES))
+        lines.append("")
+
+    if task.lifecycle_type:
+        manager = _lifecycle_manager_for(task) or "(unresolved)"
+        lines.append("## Lifecycle assignment")
+        lines.append(f"Lifecycle type: {task.lifecycle_type}")
+        lines.append(f"Current phase: {task.current_phase or '(unset)'}")
+        lines.append(f"Original author: {task.original_author or '(unset)'}")
+        lines.append(f"Implementer: {task.implementer or '(unset)'}")
+        lines.append(f"Technical reviewer: {task.technical_reviewer or '(not required)'}")
+        lines.append(f"Intent validator: {task.intent_validator or '(unset)'}")
+        lines.append(f"Activation owner: {task.activation_owner or '(not required)'}")
+        lines.append(f"Closure owner: {task.closure_owner or '(unset)'}")
+        lines.append(f"Return-to owner: {task.return_to or '(unset)'}")
+        lines.append(f"Stuck route: {manager}")
+        lines.append("")
+
+        lifecycle_events, omitted_lifecycle_events = lifecycle_history_for_context(
+            conn, task_id
+        )
+        latest_handoff = next(
+            (
+                event
+                for event in reversed(lifecycle_events)
+                if event.kind in {"handoff_created", "review_passed", "review_requested"}
+            ),
+            None,
+        )
+        if latest_handoff is not None:
+            payload = latest_handoff.payload if isinstance(latest_handoff.payload, dict) else {}
+            lines.append("## Latest lifecycle handoff")
+            lines.append(f"Event: {latest_handoff.kind}")
+            if payload.get("summary"):
+                lines.append(f"Summary: {_cap(str(payload['summary']))}")
+            for label, key in (
+                ("Next assignee", "next_assignee"),
+                ("Next phase", "next_phase"),
+                ("Expected outcome", "expected_outcome"),
+                ("Recheck condition", "recheck_condition"),
+            ):
+                if payload.get(key):
+                    lines.append(f"{label}: {_cap(str(payload[key]))}")
+            if payload.get("evidence"):
+                evidence_text = json.dumps(
+                    payload["evidence"], ensure_ascii=False, sort_keys=True
+                )
+                lines.append(f"Evidence: `{_cap(evidence_text)}`")
+            lines.append("")
+
+        # Keep workflow transitions and their evidence visible without letting
+        # operational claim/heartbeat/retry churn grow the prompt forever.
+        lines.append("## Lifecycle event history")
+        if omitted_lifecycle_events:
+            omitted_total = sum(omitted_lifecycle_events.values())
+            omitted_summary = ", ".join(
+                f"{kind}={count}"
+                for kind, count in omitted_lifecycle_events.items()
+            )
+            lines.append(
+                f"_({omitted_total} earlier lifecycle events omitted: "
+                f"{omitted_summary}; showing {len(lifecycle_events)})_"
+            )
+        for event in lifecycle_events:
+            payload_text = ""
+            if event.payload:
+                payload_text = " — " + _cap(
+                    json.dumps(event.payload, ensure_ascii=False, sort_keys=True)
+                )
+            lines.append(
+                f"- #{event.id} {event.kind} (run {event.run_id or '-'}){payload_text}"
+            )
         lines.append("")
 
     # Attachments — files uploaded to this task (PDFs, source docs,

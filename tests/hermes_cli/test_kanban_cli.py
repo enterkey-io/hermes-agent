@@ -70,6 +70,22 @@ def test_kanban_create_accepts_explicit_session_id(kanban_home):
     assert task.session_id == "current-session"
 
 
+def test_kanban_create_cli_round_trips_lifecycle_fields(kanban_home):
+    raw = kc.run_slash(
+        "create 'managed card' --assignee developer --created-by author --json "
+        "--lifecycle-type software --original-author author "
+        "--implementer developer --technical-reviewer reviewer "
+        "--intent-validator author --activation-owner operator "
+        "--closure-owner author --current-phase execution --return-to developer"
+    )
+    payload = json.loads(raw)
+
+    assert payload["lifecycle_type"] == "software"
+    assert payload["original_author"] == "author"
+    assert payload["technical_reviewer"] == "reviewer"
+    assert payload["current_phase"] == "execution"
+
+
 def test_kanban_show_text_renders_graph_with_open_connection(kanban_home):
     with kb.connect_closing() as conn:
         parent_id = kb.create_task(conn, title="parent task")

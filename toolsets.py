@@ -85,7 +85,7 @@ _HERMES_CORE_TOOLS = [
     # tools/kanban_tools.py.
     "kanban_show", "kanban_list",
     "kanban_complete", "kanban_block", "kanban_request_review",
-    "kanban_request_changes",
+    "kanban_request_changes", "kanban_handoff", "kanban_pass_review",
     "kanban_heartbeat",
     "kanban_comment", "kanban_create", "kanban_link",
     "kanban_unblock",
@@ -347,13 +347,15 @@ TOOLSETS = {
             "set). The dispatcher runs inside the gateway by default; see "
             "`kanban.dispatch_in_gateway` in config.yaml. Lets workers mark "
             "tasks done with structured handoffs, enter first-class review "
-            "(request_review — not a block), return review changes, block for human input, "
+            "(request_review — not a block), pass technical review into intent validation, "
+            "handoff the same card between lifecycle owners, return review changes, block for human input, "
             "heartbeat during long ops, comment on threads, attach files, and "
             "(for orchestrators) list, unblock, and fan out tasks."
         ),
         "tools": [
             "kanban_show", "kanban_list", "kanban_complete", "kanban_block",
             "kanban_request_review", "kanban_request_changes",
+            "kanban_handoff", "kanban_pass_review",
             "kanban_heartbeat", "kanban_comment",
             "kanban_create", "kanban_link",
             "kanban_unblock",

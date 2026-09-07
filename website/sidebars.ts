@@ -199,6 +199,16 @@ const sidebars: SidebarsConfig = {
                 },
                 {
                   type: 'category',
+                  label: 'devops',
+                  key: 'skills-bundled-devops',
+                  collapsed: true,
+                  items: [
+                    'user-guide/skills/bundled/devops/devops-kanban-workflows',
+                    'user-guide/skills/bundled/devops/devops-sdlc-review',
+                  ],
+                },
+                {
+                  type: 'category',
                   label: 'email',
                   key: 'skills-bundled-email',
                   collapsed: true,

@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from agent.kanban_stop import (
     build_kanban_stop_nudge,
     kanban_stop_nudge_enabled,
+    kanban_stop_requires_failure_recovery,
+    latest_operational_failure,
     session_called_kanban_terminal,
 )
+from agent.turn_finalizer import _record_kanban_operational_failure
 
 
 @pytest.fixture
@@ -155,6 +160,25 @@ def test_env_can_disable(clear_kanban_env):
     clear_kanban_env.setenv("HERMES_KANBAN_STOP_NUDGE", "0")
     assert kanban_stop_nudge_enabled() is False
     assert build_kanban_stop_nudge(messages=[]) is None
+
+
+def test_nudge_opt_out_does_not_allow_advisory_operational_failure_exit(
+    clear_kanban_env,
+):
+    clear_kanban_env.setenv("HERMES_KANBAN_TASK", "t_abc")
+    clear_kanban_env.setenv("HERMES_KANBAN_STOP_NUDGE", "0")
+    messages = [
+        {
+            "role": "tool",
+            "name": "kanban_handoff",
+            "content": '{"error": "database is locked"}',
+        }
+    ]
+
+    assert build_kanban_stop_nudge(messages=messages) is None
+    assert kanban_stop_requires_failure_recovery(
+        messages=messages, attempts=0
+    ) is True
 
 
 def test_nudge_when_no_terminal_tool(clear_kanban_env):
