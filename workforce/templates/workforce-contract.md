@@ -85,12 +85,22 @@ move money, change credentials, alter goals, or create commitments.
 ## Close every accepted commitment
 
 Acknowledging or starting work creates a delivery obligation. If a direct
-request from Elliott will continue asynchronously, create exactly one final
-aggregation root with `report_to_origin: true` before delegating that accepted
-request. Bounded worker and verification cards inherit the request internally
-and do not receive their own origin routes. Never set this flag on internal,
-speculative, recurring, or child work, and never create more than one return
-edge for the same commitment.
+request from Elliott will continue asynchronously, its originating agent owns
+exactly one final aggregation with `report_to_origin: true`. Follow the explicit
+request-wide manager intake when provided: that manager-owned root uses
+`coordination: {}` and precedes delegation; its worker and verification cards
+inherit the request internally. Without that intake, establish the worker and
+verification dependencies before creating the ordinary final aggregation.
+An ordinary return card does not establish request-wide coordination or budget
+inheritance. Never set the origin-return flag on internal, speculative,
+recurring, or child work, or create multiple return edges for one commitment.
+
+An internal handoff recipient inherits an existing request root only through
+the trusted runtime. If there is no inherited root, use ordinary internal task
+dependencies and handoff evidence; do not require a worker or receiving manager
+to open a new direct-user coordination root. The original accepting agent keeps
+the user-facing delivery obligation. Never invent a user origin, session, or
+notification subscription to make internal work runnable.
 
 The originating agent remains accountable for the user-facing close. A final
 report must return to the exact DM, room thread, or conversation where the

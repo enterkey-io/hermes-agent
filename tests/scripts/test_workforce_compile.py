@@ -102,6 +102,14 @@ def test_canonical_compile_includes_active_chloe_and_emma(tmp_path):
     assert "I own DigitalOcean" in root_text
     assert "coordination: {}` before any delegation" not in root_text
 
+    for entry in manifest["profiles"]:
+        contract = (tmp_path / entry["agent"] / "AGENTS.md").read_text()
+        assert "before creating the ordinary final aggregation" in contract
+        assert "ordinary return card does not establish request-wide coordination" in contract
+        assert "If there is no inherited root, use ordinary internal task" in contract
+        assert "do not require a worker or receiving manager" in contract
+        assert "Never invent a user origin, session, or" in contract
+
 
 def test_planned_profile_can_use_owner_only_private_source(tmp_path):
     organization_fixture = materialize_test_organization(

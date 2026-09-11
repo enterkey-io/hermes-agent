@@ -69,6 +69,27 @@ They coexist: a kanban worker may call `delegate_task` internally during its run
 - **Dispatcher** — a long-lived loop that, every N seconds (default 60): reclaims stale claims, reclaims crashed workers (PID gone but TTL not yet expired), promotes ready tasks, atomically claims, spawns assigned profiles. Runs **inside the gateway** by default (`kanban.dispatch_in_gateway: true`). One dispatcher sweeps all boards per tick; workers are spawned with `HERMES_KANBAN_BOARD` pinned so they can't see other boards. After `kanban.failure_limit` consecutive spawn failures on the same task (default: 2) the dispatcher auto-blocks it with the last error as the reason — prevents thrashing on tasks whose profile doesn't exist, workspace can't mount, etc.
 - **Tenant** — optional string namespace *within* a board. One specialist fleet can serve multiple businesses (`--tenant business-a`) with data isolation by workspace path and memory key prefix. Tenants are a soft filter; boards are the hard isolation boundary.
 
+### Explicit creation holds
+
+Creating a task with `initial_status="blocked"` records an explicit hold, not
+just an unfinished dependency. The dispatcher leaves it blocked even when all
+parents finish. Release it with `kanban_unblock` or `hermes kanban unblock`;
+unfinished parents still prevent dispatch after that release. Retrying the
+same idempotent create does not re-block a task already released.
+
+Use ordinary parent dependencies for automatic advancement, and `scheduled`
+for a task intentionally parked until a later release time. Do not rely on
+prose such as "do not launch yet" as a scheduling control.
+
+Origin delivery is separate from these controls. A manager's explicit
+request-wide intake opens its user-origin root before delegation with both
+`report_to_origin=true` and `coordination={}`. An ordinary return aggregation
+does not create that request scope and needs its dependency graph established
+first. Internal handoffs inherit an existing root when present; without one,
+they use ordinary dependencies and return evidence to the accepting agent.
+A worker must never create or fabricate a new user origin to unblock internal
+implementation.
+
 ## Boards (multi-project)
 
 Boards let you separate unrelated streams of work — one per project, repo,

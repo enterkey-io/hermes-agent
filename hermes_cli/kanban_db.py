@@ -3947,6 +3947,15 @@ def create_task(
                         ),
                     },
                 )
+                if initial_status == "blocked":
+                    # An explicit creation hold must use the same durable
+                    # release gate as a later worker/operator block.
+                    _append_event(
+                        conn,
+                        task_id,
+                        "blocked",
+                        {"reason": "created with an explicit hold", "kind": "needs_input"},
+                    )
                 if (
                     request_root_id
                     and assignee
@@ -6670,11 +6679,12 @@ def _synthesize_ended_run(
 
 def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
     """Return True when ``task_id`` is sticky-blocked by an explicit
-    worker/operator ``kanban_block`` call (#28712).
+    creation hold or worker/operator ``kanban_block`` call (#28712).
 
     A ``blocked`` status can come from two very different sources:
 
-    * **Worker- or operator-initiated** — a worker called
+    * **Worker- or operator-initiated** — creation specified
+      ``initial_status="blocked"``, a worker called
       ``kanban_block(reason="review-required: ...")`` (or somebody ran
       ``hermes kanban block <id>``).  This is a deliberate handoff that
       should stay blocked until an operator unblocks it.  The block tool
@@ -6748,8 +6758,8 @@ def recompute_ready(
     blocked purely by a parent dependency unblocks itself when the
     parent completes), *except* in two cases:
 
-    1. The most recent block event was a worker-initiated
-       ``kanban_block`` — those stay blocked until an explicit
+    1. The most recent block event was an explicit creation hold or
+       worker/operator ``kanban_block`` — those stay blocked until an explicit
        ``kanban_unblock`` (#28712).
 
     2. The task's ``consecutive_failures`` has reached the effective

@@ -2797,8 +2797,9 @@ KANBAN_CREATE_SCHEMA = {
                 "enum": ["running", "blocked"],
                 "description": (
                     "Initial card status. Use 'blocked' for tasks that "
-                    "require immediate human ops (R3 gate) to skip the "
-                    "brief running-to-blocked transition. Defaults to "
+                    "require an explicit release gate to skip the "
+                    "brief running-to-blocked transition. These stay held "
+                    "until explicitly unblocked even if parents finish. Defaults to "
                     "'running', which preserves the usual dispatch path."
                 ),
             },
@@ -2847,8 +2848,11 @@ KANBAN_CREATE_SCHEMA = {
                     "conversation so the agent can verify the outcome and deliver "
                     "a final report. Never set it on internal work, speculative "
                     "tasks, or multiple child cards for the same commitment. Create "
-                    "this root before worker cards; later coordinated worker and "
-                    "verification cards inherit its request scope internally."
+                    "a coordination root before worker cards only with the "
+                    "manager intake's coordination object; those children inherit "
+                    "its request scope internally. An ordinary return aggregation "
+                    "without coordination needs its worker/verification dependencies "
+                    "established first. Internal handoffs never require a new user root."
                 ),
             },
             "coordination": {
