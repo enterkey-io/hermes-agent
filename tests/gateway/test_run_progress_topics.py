@@ -1183,6 +1183,82 @@ async def test_display_streaming_does_not_enable_gateway_streaming(monkeypatch, 
     assert [call["content"] for call in adapter.sent] == ["I'll inspect the repo first."]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform_name", ["telegram", "matrix", "photon", "buzz"])
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_contextual_commentary_is_visible_during_work_without_tool_logs(
+    monkeypatch, tmp_path, platform_name, enabled,
+):
+    events = []
+
+    class TimedAdapter(ProgressCaptureAdapter):
+        async def send(self, chat_id, content, reply_to=None, metadata=None):
+            events.append(("visible", content))
+            return await super().send(chat_id, content, reply_to, metadata)
+
+    class WorkingAgent(CommentaryAgent):
+        def run_conversation(self, message, conversation_history=None, task_id=None):
+            if self.interim_assistant_callback:
+                self.interim_assistant_callback("I'll check the stalled import and its current schedule.")
+            if self.tool_progress_callback:
+                self.tool_progress_callback("tool.started", "terminal", "private command")
+            time.sleep(0.5)
+            events.append(("work_finished", None))
+            return {"final_response": "The import is paused.", "messages": [], "api_calls": 1}
+
+    adapter, result = await _run_with_agent(
+        monkeypatch, tmp_path, WorkingAgent,
+        session_id=f"contextual-{platform_name}-{enabled}",
+        platform=Platform(platform_name),
+        chat_id="original-chat", chat_type="dm", thread_id=None,
+        adapter_cls=TimedAdapter,
+        config_data={
+            "display": {
+                "tool_progress": False,
+                "show_reasoning": False,
+                "interim_assistant_messages": False,
+                "platforms": {platform_name: {"interim_assistant_messages": enabled}},
+            },
+            "streaming": {"enabled": False},
+        },
+    )
+
+    assert result["final_response"] == "The import is paused."
+    assert result.get("already_sent") is not True
+    if enabled:
+        assert events == [
+            ("visible", "I'll check the stalled import and its current schedule."),
+            ("work_finished", None),
+        ]
+        assert len(adapter.sent) == 1
+        assert adapter.sent[0]["chat_id"] == "original-chat"
+    else:
+        assert events == [("work_finished", None)]
+        assert adapter.sent == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform_name", ["telegram", "matrix", "photon", "buzz"])
+async def test_contextual_commentary_opt_in_does_not_add_a_quick_reply_preamble(
+    monkeypatch, tmp_path, platform_name,
+):
+    class QuickAgent(CommentaryAgent):
+        def run_conversation(self, message, conversation_history=None, task_id=None):
+            return {"final_response": "Yes.", "messages": [], "api_calls": 1}
+
+    adapter, result = await _run_with_agent(
+        monkeypatch, tmp_path, QuickAgent,
+        session_id=f"quick-{platform_name}", platform=Platform(platform_name),
+        config_data={
+            "display": {"tool_progress": False, "interim_assistant_messages": True},
+            "streaming": {"enabled": False},
+        },
+    )
+    assert adapter.sent == []
+    assert result["final_response"] == "Yes."
+    assert result.get("already_sent") is not True
+
+
 class TransformedStreamAgent:
     """Streams a response, then signals the gateway that a plugin hook
     (``transform_llm_output``) modified the final text after streaming

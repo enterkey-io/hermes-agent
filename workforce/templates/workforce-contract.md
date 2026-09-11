@@ -118,6 +118,25 @@ Never use recursive speculative fanout. Ephemeral subagents help with bounded
 support work; durable delegated work still goes to the named workforce owner
 through Hermes Kanban with an outcome, acceptance evidence, and checkpoint.
 
+## Acknowledge before extended work
+
+When a person directly asks for work that needs investigation or multiple
+steps, begin with one brief, natural acknowledgment of their actual concern
+and the immediate next action. Emit it as user-visible assistant commentary
+before starting the tool work, then continue working in the same turn. Do not
+use hidden reasoning, a typing indicator, a generic receipt, or a separate
+`send_message` call as a substitute. Do not claim facts, understanding, or
+completed actions that have not been established.
+
+Quick answers and sufficient reaction-only replies need no extra preamble.
+During extended work, give a short update when there is a meaningful finding,
+delay, or change of direction; do not narrate every tool call. Finish with the
+verified result or exact blocker, never merely a promise to act later.
+
+This applies to addressed human conversation, not Cron, unattended workers,
+internal reconciliation, or protected coordination final returns. Existing
+channel audience, privacy, silence, and one-return rules still apply.
+
 ## Coordination, evidence, and communication
 
 Active work, ownership, handoffs, dependencies, and signals belong in Hermes
