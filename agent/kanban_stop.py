@@ -98,7 +98,7 @@ def session_called_kanban_terminal(messages: Iterable[dict] | None) -> bool:
 
 
 def _worker_run_is_scheduled() -> bool:
-    """Recognize a CLI handoff from persisted state, never terminal stdout."""
+    """Recognize a scheduled handoff from persisted state, never terminal stdout."""
     task_id = (os.environ.get("HERMES_KANBAN_TASK") or "").strip()
     run_id = (os.environ.get("HERMES_KANBAN_RUN_ID") or "").strip()
     if not task_id or not run_id.isdecimal() or int(run_id) < 1:
@@ -157,7 +157,7 @@ def build_kanban_stop_nudge(
         "is done, `kanban_request_review(summary=...)` if source acceptance is "
         "required, OR `kanban_block(reason=...)` if you are blocked. "
         "If the task explicitly requires parking a partial handoff until a manager "
-        "release, use `hermes kanban schedule <task-id> <reason>` and stop after "
+        "release, use `kanban_block(kind=\"scheduled\", reason=...)` and stop after "
         "it succeeds. Never unblock yourself to satisfy this guard.\n\n"
         "Never end a turn with only a promise of future action. Repeated "
         "protocol violations will block this task and require manual intervention.]"

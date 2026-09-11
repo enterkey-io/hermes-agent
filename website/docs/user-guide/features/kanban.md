@@ -436,8 +436,11 @@ guard is active only for dispatcher-spawned workers (`HERMES_KANBAN_TASK` is
 set) and can be disabled with `HERMES_KANBAN_STOP_NUDGE=0`.
 
 When a task explicitly calls for parking a partial handoff until a manager
-release, a local worker can use `hermes kanban schedule <id> <reason>` after
-recording its evidence. This ends the current run without completing the
+release, the worker can use `kanban_block(kind="scheduled", reason="...")`
+after recording its evidence. This runs on the host even when terminal tools
+use Docker, SSH, or Modal, or `hermes` is absent from `PATH`. Goal-mode tasks
+cannot use this to bypass their completion judge. Local operators can also
+use `hermes kanban schedule <id> <reason>`. This ends the current run without completing the
 overall task or releasing dependent work. The stop guard checks the pinned
 board's persisted task and run: both must be scheduled, the exact worker run
 must have ended, and no newer run may exist. CLI output or narrative claims
