@@ -7,10 +7,13 @@ or final promise that substitutes for execution.
 
 Use Hermes' existing `display.platforms.<platform>.interim_assistant_messages`
 setting for human text channels. An explicit `false` overrides Hermes' defaults
-and suppresses real commentary even when token streaming is enabled. Keep
-`show_reasoning` and `tool_progress` unchanged; neither enables contextual
-assistant commentary. Do not broaden voice, webhook, or programmatic delivery
-capabilities by changing a global setting merely to repair text chat.
+and disables the dedicated interim callback, including native structured Codex
+commentary. It does not disable token streaming: a Chat Completions provider's
+plain-text preamble can still arrive through the independent delta callback.
+The gateway regression tests disable token streaming to isolate the interim
+setting. Keep `show_reasoning` and `tool_progress` unchanged; neither enables
+contextual assistant commentary. Do not broaden voice, webhook, or programmatic
+delivery capabilities by changing a global setting merely to repair text chat.
 
 For the maintained workforce, the text-channel rollout covers Telegram, Matrix,
 Photon, and Buzz where configured. Preserve channel audience rules: this does
