@@ -391,7 +391,11 @@ class GatewayKanbanWatchersMixin:
                 f"{delivery['request_root_id']} (root task {delivery['task_id']}). "
                 "Inspect the recorded cohort outcomes and evidence. Resolve the root "
                 "as done or blocked before returning one concise final response to "
-                "the original conversation. Do not create or delegate new work."
+                "the original conversation. If the host already marked the root "
+                "blocked at its execution limit, report that incomplete outcome "
+                "without trying to block or claim it again. Preserve the last "
+                "reserved model call for the final text, not another tool round. "
+                "Do not create or delegate new work."
             ),
             session_id=delivery["origin_session_id"], source=source,
             coordination_context=envelope,

@@ -5672,6 +5672,22 @@ def _mark_coordination_guardrail_in_txn(
         "updated_at = ? WHERE id = ? AND status = 'active'",
         (timestamp, request_root_id),
     )
+    if request.kind == "origin_request" and request.status in {"active", "return_pending"}:
+        # The idle aggregation root has no worker that can close it. Record
+        # the host-enforced failure in this transaction, without claiming a
+        # worker or invoking block_task's post-commit hooks inside the lock.
+        stopped = conn.execute(
+            "UPDATE tasks SET status = 'blocked', block_kind = 'capability' "
+            "WHERE id = ? AND request_root_id = ? AND status IN ('todo', 'ready') "
+            "AND current_run_id IS NULL AND worker_pid IS NULL AND claim_lock IS NULL",
+            (request.root_task_id, request.id),
+        )
+        if stopped.rowcount == 1:
+            _append_event(conn, request.root_task_id, "blocked", {
+                "kind": "capability", "reason": str(reason)[:300],
+                "host_disposition": "coordination_guardrail",
+                "request_root_id": request.id,
+            })
     if changed.rowcount != 1:
         return _prepare_owned_failure_incomplete_review_in_txn(conn, request_root_id, timestamp)
     _append_event(
