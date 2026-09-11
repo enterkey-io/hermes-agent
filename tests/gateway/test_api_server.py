@@ -1405,8 +1405,9 @@ class TestChatCompletionsEndpoint:
         assert response.status == 401
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("failed", [False, True])
     async def test_authenticated_loopback_final_return_header_reconstructs_turn_context(
-        self, tmp_path
+        self, tmp_path, failed
     ):
         """The privileged context is header-only and reaches the actual turn.
 
@@ -1435,7 +1436,8 @@ class TestChatCompletionsEndpoint:
         async def _mock_run_agent(**kwargs):
             assert kwargs["final_return_context"] == context
             return (
-                {"final_response": "final", "messages": [], "api_calls": 1},
+                {"final_response": "final", "messages": [], "api_calls": 1,
+                 "failed": failed, "completed": not failed},
                 {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
             )
 
@@ -1475,6 +1477,9 @@ class TestChatCompletionsEndpoint:
                 )
                 assert response.status == 200
                 assert response.headers["X-Hermes-Final-Return-Receipt"] == "session-message:api-session:9"
+                payload = await response.json()
+                assert payload["choices"][0]["message"]["content"] == "final"
+                assert payload["choices"][0]["finish_reason"] == ("error" if failed else "stop")
 
     @pytest.mark.asyncio
     async def test_client_body_cannot_create_final_return_context(self, adapter):

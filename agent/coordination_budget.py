@@ -428,6 +428,16 @@ def charge_provider_attempt() -> int | None:
             scope.provisional_model_calls += 1
             return None
         with kanban_db.connect_closing(scope.db_path) as conn:
-            return kanban_db.charge_coordination_model_call(
-                conn, root_id, purpose=scope.purpose, task_id=scope.task_id or None,
-            )
+            try:
+                return kanban_db.charge_coordination_model_call(
+                    conn, root_id, purpose=scope.purpose, task_id=scope.task_id or None,
+                )
+            except kanban_db.CoordinationBudgetExceeded as exc:
+                request = kanban_db.get_coordination_request(conn, root_id)
+                if (scope.purpose == "final_return" and request is not None
+                    and request.status == "return_pending" and request.kind == "origin_request"
+                    and request.root_task_id == scope.task_id):
+                    kanban_db.mark_coordination_guardrail(
+                        conn, root_id, task_id=scope.task_id, reason=exc.reason,
+                    )
+                raise

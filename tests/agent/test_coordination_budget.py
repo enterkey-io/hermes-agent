@@ -44,6 +44,65 @@ def used(budget_request):
         return kb.get_coordination_request(conn, budget_request.root).model_calls_used
 
 
+def test_guardrail_closes_unstarted_aggregation_without_claiming_it(budget_request):
+    with kb.connect_closing(budget_request.db) as conn:
+        conn.execute("UPDATE tasks SET status='todo' WHERE id=?", (budget_request.task,))
+        conn.commit()
+        assert kb.mark_coordination_guardrail(
+            conn, budget_request.root, task_id=budget_request.task, reason="work budget exhausted",
+        )
+        root = kb.get_task(conn, budget_request.task)
+        assert root.status == "blocked"
+        assert root.worker_pid is None
+        assert root.block_kind == "capability"
+        event = next(e for e in kb.list_events(conn, root.id) if e.kind == "coordination_guardrail_reached")
+        kb.validate_coordination_final_return_authority(
+            conn, request_root_id=budget_request.root, task_id=root.id,
+            event_id=event.id, responsible_agent="coordinator", require_terminal=True,
+        )
+        assert not kb.mark_coordination_guardrail(
+            conn, budget_request.root, task_id=root.id, reason="same exhausted budget",
+        )
+        assert sum(e.kind == "blocked" for e in kb.list_events(conn, root.id)) == 1
+
+
+def test_final_budget_denial_closes_pending_root_without_spending_more(budget_request):
+    with kb.connect_closing(budget_request.db) as conn:
+        conn.execute("UPDATE tasks SET status='todo' WHERE id=?", (budget_request.task,))
+        conn.execute("UPDATE coordination_requests SET status='return_pending', model_calls_used=6 WHERE id=?",
+                     (budget_request.root,))
+        conn.commit()
+    with scope(budget_request, purpose="final_return"):
+        with pytest.raises(kb.CoordinationBudgetExceeded):
+            budget.charge_provider_attempt()
+    assert used(budget_request) == 6
+    with kb.connect_closing(budget_request.db) as conn:
+        assert kb.get_task(conn, budget_request.task).status == "blocked"
+
+
+@pytest.mark.parametrize("status", ["active", "cancelled", "completed"])
+def test_invalid_final_return_cannot_change_request_or_root(budget_request, status):
+    with kb.connect_closing(budget_request.db) as conn:
+        conn.execute("UPDATE tasks SET status='todo' WHERE id=?", (budget_request.task,))
+        conn.execute("UPDATE coordination_requests SET status=? WHERE id=?", (status, budget_request.root))
+        conn.commit()
+    with scope(budget_request, purpose="final_return"):
+        with pytest.raises(kb.CoordinationBudgetExceeded):
+            budget.charge_provider_attempt()
+    with kb.connect_closing(budget_request.db) as conn:
+        assert kb.get_task(conn, budget_request.task).status == "todo"
+        assert kb.get_coordination_request(conn, budget_request.root).status == status
+
+
+def test_ordinary_todo_task_is_not_newly_blockable(budget_request):
+    with kb.connect_closing(budget_request.db) as conn:
+        task = kb.create_task(conn, title="ordinary unstarted task")
+        conn.execute("UPDATE tasks SET status='todo' WHERE id=?", (task,))
+        conn.commit()
+        assert not kb.block_task(conn, task, reason="not a final return", kind="capability")
+        assert kb.get_task(conn, task).status == "todo"
+
+
 def test_sync_async_and_stream_admit_before_provider(budget_request):
     seen = []
 

@@ -662,6 +662,76 @@ def test_coordination_budget_denial_ends_real_turn_without_retry_or_summary(monk
     assert physical_calls == []
 
 
+@pytest.mark.parametrize("allowed_calls", [0, 2])
+def test_final_return_budget_exhaustion_persists_failure_without_extra_call(
+    monkeypatch, tmp_path, allowed_calls,
+):
+    from agent.coordination_budget import scoped_coordination_budget
+    from hermes_cli.kanban_db import CoordinationBudgetExceeded
+    from hermes_state import SessionDB
+    from gateway.run import _record_final_return_persisted_receipt
+    from gateway.wake import FinalReturnDeliveryState
+    import asyncio
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr("agent.title_generator.generate_title", lambda *a, **k: None)
+    agent = _build_agent(monkeypatch)
+    agent._persist_session = run_agent.AIAgent._persist_session.__get__(agent)
+    agent._session_db = SessionDB()
+    agent._ensure_db_session()
+    agent.skip_background_review = True
+    attempts = []
+
+    def request(_kwargs):
+        attempts.append(True)
+        if len(attempts) > allowed_calls:
+            raise CoordinationBudgetExceeded("cr_test", "aggregate model-call budget exhausted")
+        response = _codex_tool_call_response()
+        response.output[0].call_id = f"call_{len(attempts)}"
+        return response
+
+    def execute(message, messages, task_id, api_call_count=0, **kwargs):
+        for call in message.tool_calls:
+            messages.append({"role": "tool", "tool_call_id": call.id,
+                             "name": "terminal", "content": "recorded outcome inspected"})
+
+    monkeypatch.setattr(agent, "_interruptible_api_call", request)
+    monkeypatch.setattr(agent, "_execute_tool_calls", execute)
+    monkeypatch.setattr(agent, "_handle_max_iterations", lambda *a: pytest.fail("extra summary call"))
+    try:
+        with scoped_coordination_budget(
+            request_root_id="cr_test", task_id="t_test", purpose="final_return",
+            db_path=tmp_path / "kanban.db",
+        ):
+            result = agent.run_conversation("Return the accepted request outcome")
+        assert len(attempts) == allowed_calls + 1
+        assert result["failed"] is True
+        assert result["completed"] is False
+        assert "could not finish" in result["final_response"]
+        rows = agent._session_db.get_messages(agent.session_id)
+        assert rows[-1]["role"] == "assistant"
+        assert rows[-1]["content"] == result["final_response"]
+        assert sum(row["content"] == result["final_response"] for row in rows) == 1
+
+        async def verify_receipt():
+            state = FinalReturnDeliveryState(
+                context={"request_root_id": "cr_test", "task_id": "t_test",
+                         "event_id": "7", "responsible_agent": "coordinator"},
+                completion=asyncio.get_running_loop().create_future(),
+            )
+            assert await _record_final_return_persisted_receipt(
+                delivery_state=state, session_db=agent._session_db,
+                session_id=agent.session_id, watermark=0,
+                expected_user_content="Return the accepted request outcome",
+                final_response=result["final_response"],
+            )
+            assert state.returned_message_id == f"session-message:{agent.session_id}:{rows[-1]['id']}"
+
+        asyncio.run(verify_receipt())
+    finally:
+        agent._session_db.close()
+
+
 def test_consume_codex_stream_routes_commentary_phase_deltas_to_reasoning(monkeypatch):
     from agent.codex_runtime import _consume_codex_event_stream
 

@@ -102,6 +102,19 @@ from utils import base_url_host_matches, env_var_enabled
 logger = logging.getLogger(__name__)
 
 
+def _final_return_budget_failure(error):
+    from agent.coordination_budget import current_coordination_execution
+
+    execution = current_coordination_execution()
+    if not execution or execution[0] != error.request_root_id or execution[2] != "final_return":
+        raise error
+    return (
+        "I could not finish the accepted request's final report before "
+        "its execution limit was reached. The recorded work and evidence "
+        "are retained, but I cannot claim the request completed."
+    )
+
+
 # Scaffold marker used by _apply_active_turn_redirect and the ghost-row filter
 # in the api_messages loop. Module-level so both sites can never drift.
 _INTERRUPT_SCAFFOLD_MARKER = "[This response was interrupted by a user correction.]"
@@ -4338,7 +4351,11 @@ def run_conversation(
                 from hermes_cli.kanban_db import CoordinationBudgetExceeded
 
                 if isinstance(api_error, CoordinationBudgetExceeded):
-                    raise
+                    final_response = _final_return_budget_failure(api_error)
+                    failed = True
+                    _turn_exit_reason = "coordination_final_return_budget_exhausted"
+                    append_message(messages, {"role": "assistant", "content": final_response})
+                    break
 
                 # -----------------------------------------------------------
                 # UnicodeEncodeError recovery.  Two common causes:
@@ -6435,6 +6452,9 @@ def run_conversation(
                     # stale request.
                     break
         
+        if _turn_exit_reason == "coordination_final_return_budget_exhausted":
+            break
+
         if _retry.restart_with_redirected_messages:
             # The cancelled request produced no valid assistant item. Reuse the
             # same logical iteration after the outer loop appends the displayed
@@ -8194,7 +8214,14 @@ def run_conversation(
             from hermes_cli.kanban_db import CoordinationBudgetExceeded
 
             if isinstance(e, CoordinationBudgetExceeded):
-                raise
+                # A final-return turn has no later worker to report its failure.
+                # Persist a terminal reply through the ordinary finalizer; the
+                # gateway still validates current origin/task/send authority.
+                failed = True
+                _turn_exit_reason = "coordination_final_return_budget_exhausted"
+                final_response = _final_return_budget_failure(e)
+                append_message(messages, {"role": "assistant", "content": final_response})
+                break
             # Phase-aware error classification. The huge outer try/except spans
             # both the actual API request and all local post-processing of the
             # returned assistant message. Deterministic local bugs (e.g.
