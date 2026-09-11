@@ -6670,11 +6670,12 @@ def _synthesize_ended_run(
 
 def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
     """Return True when ``task_id`` is sticky-blocked by an explicit
-    worker/operator ``kanban_block`` call (#28712).
+    creation hold or worker/operator ``kanban_block`` call (#28712).
 
     A ``blocked`` status can come from two very different sources:
 
-    * **Worker- or operator-initiated** — a worker called
+    * **Worker- or operator-initiated** — creation specified
+      ``initial_status="blocked"``, a worker called
       ``kanban_block(reason="review-required: ...")`` (or somebody ran
       ``hermes kanban block <id>``).  This is a deliberate handoff that
       should stay blocked until an operator unblocks it.  The block tool
@@ -6686,24 +6687,32 @@ def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
       automatically once the underlying conditions change (e.g. parents
       finish, transient infra error clears).
 
-    The cheapest signal that distinguishes the two is the most recent
-    ``"blocked"`` / ``"unblocked"`` event for the task.  If the most
-    recent one is ``"blocked"`` (or there is a ``"blocked"`` event and
-    no ``"unblocked"`` event has fired since), the task is sticky and
-    ``recompute_ready`` must *not* auto-promote it.
+    The most recent ``"blocked"`` / ``"unblocked"`` event owns the
+    release decision. Without either, the original ``"created"`` payload
+    records whether the caller explicitly requested a blocked initial state.
+    Reading that existing evidence also preserves pre-upgrade holds, without
+    a migration or a second marker written at creation.
 
-    Returns ``False`` when there is no such event at all (e.g. the task
+    Returns ``False`` when there is no explicit hold evidence (e.g. the task
     was set to ``status='blocked'`` by the circuit breaker or by direct
     DB manipulation) — preserves the pre-#28712 auto-recover semantics
     for that path.
     """
     row = conn.execute(
-        "SELECT kind FROM task_events "
-        "WHERE task_id = ? AND kind IN ('blocked', 'unblocked') "
+        "SELECT kind, payload FROM task_events "
+        "WHERE task_id = ? AND kind IN ('created', 'blocked', 'unblocked') "
         "ORDER BY id DESC LIMIT 1",
         (task_id,),
     ).fetchone()
-    return bool(row) and row["kind"] == "blocked"
+    if not row or row["kind"] == "unblocked":
+        return False
+    if row["kind"] == "blocked":
+        return True
+    try:
+        created = json.loads(row["payload"] or "{}")
+    except (TypeError, ValueError):
+        return False
+    return isinstance(created, dict) and created.get("status") == "blocked"
 
 
 def _resume_status_from_events(conn: sqlite3.Connection, task_id: str) -> str:
@@ -6748,8 +6757,8 @@ def recompute_ready(
     blocked purely by a parent dependency unblocks itself when the
     parent completes), *except* in two cases:
 
-    1. The most recent block event was a worker-initiated
-       ``kanban_block`` — those stay blocked until an explicit
+    1. An explicit creation hold or worker/operator ``kanban_block``
+       has not been released — those stay blocked until an explicit
        ``kanban_unblock`` (#28712).
 
     2. The task's ``consecutive_failures`` has reached the effective

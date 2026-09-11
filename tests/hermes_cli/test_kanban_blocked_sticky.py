@@ -48,6 +48,84 @@ def kanban_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return home
 
 
+@pytest.mark.parametrize("has_parent", [False, True])
+def test_created_blocked_requires_explicit_release(kanban_home: Path, has_parent: bool) -> None:
+    with kb.connect_closing() as conn:
+        parent = kb.create_task(conn, title="prerequisite") if has_parent else None
+        tid = kb.create_task(
+            conn, title="held for review", initial_status="blocked",
+            parents=(parent,) if parent else (),
+        )
+        if parent:
+            assert kb.claim_task(conn, parent) is not None
+            assert kb.complete_task(conn, parent, result="prerequisite verified")
+        for _ in range(3):
+            assert kb.recompute_ready(conn) == 0
+            assert kb.get_task(conn, tid).status == "blocked"
+            assert kb.claim_task(conn, tid) is None
+        assert conn.execute("SELECT COUNT(*) FROM task_runs WHERE task_id = ?", (tid,)).fetchone()[0] == 0
+        assert kb.unblock_task(conn, tid)
+        assert kb.get_task(conn, tid).status == "ready"
+        assert kb.claim_task(conn, tid) is not None
+
+
+def test_created_blocked_release_keeps_unfinished_dependency_gate(kanban_home: Path) -> None:
+    with kb.connect_closing() as conn:
+        parent = kb.create_task(conn, title="prerequisite")
+        tid = kb.create_task(conn, title="held child", initial_status="blocked", parents=(parent,))
+        assert kb.unblock_task(conn, tid)
+        assert kb.get_task(conn, tid).status == "todo"
+        assert kb.claim_task(conn, tid) is None
+        assert kb.claim_task(conn, parent) is not None
+        assert kb.complete_task(conn, parent, result="prerequisite verified")
+        kb.recompute_ready(conn)
+        assert kb.get_task(conn, tid).status == "ready"
+
+
+def test_repeated_create_does_not_restore_released_initial_hold(kanban_home: Path) -> None:
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(conn, title="held", initial_status="blocked", idempotency_key="held-candidate")
+        assert kb.unblock_task(conn, tid)
+        assert kb.create_task(
+            conn, title="held", initial_status="blocked", idempotency_key="held-candidate",
+        ) == tid
+        kb.recompute_ready(conn)
+        assert kb.get_task(conn, tid).status == "ready"
+
+
+@pytest.mark.parametrize("released", [False, True])
+def test_persisted_creation_hold_survives_upgrade(kanban_home: Path, released: bool) -> None:
+    with kb.connect_closing() as conn:
+        parent = kb.create_task(conn, title="unfinished prerequisite")
+        tid = kb.create_task(conn, title="pre-upgrade hold", initial_status="blocked", parents=(parent,))
+        # Pre-upgrade boards have the created payload but no blocked event.
+        with kb.write_txn(conn):
+            conn.execute("DELETE FROM task_events WHERE task_id = ? AND kind = 'blocked'", (tid,))
+        if released:
+            assert kb.unblock_task(conn, tid)
+    with kb.connect_closing() as conn:
+        assert kb.claim_task(conn, parent) is not None
+        assert kb.complete_task(conn, parent, result="prerequisite verified after upgrade")
+        for _ in range(3):
+            kb.recompute_ready(conn)
+            assert kb.get_task(conn, tid).status == ("ready" if released else "blocked")
+        if not released:
+            assert kb.claim_task(conn, tid) is None
+            assert kb.unblock_task(conn, tid)
+            assert kb.get_task(conn, tid).status == "ready"
+
+
+@pytest.mark.parametrize("payload", [None, "{}", "[]", "not-json", '{"status":"ready"}', '{"status":"todo"}'])
+def test_non_hold_creation_does_not_make_legacy_soft_block_sticky(kanban_home: Path, payload) -> None:
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(conn, title="legacy soft block")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'blocked' WHERE id = ?", (tid,))
+            conn.execute("UPDATE task_events SET payload = ? WHERE task_id = ? AND kind = 'created'", (payload, tid))
+        assert kb.recompute_ready(conn) == 1
+        assert kb.get_task(conn, tid).status == "ready"
+
+
 # ---------------------------------------------------------------------------
 # Worker-initiated kanban_block must be sticky
 # ---------------------------------------------------------------------------

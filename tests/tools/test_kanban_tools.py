@@ -41,14 +41,16 @@ def test_kanban_tools_hidden_without_env_var(monkeypatch, tmp_path):
     )
 
 
-def test_coordination_schema_requires_root_before_worker_cards():
+def test_schema_distinguishes_coordination_from_ordinary_return():
     from tools.kanban_tools import KANBAN_CREATE_SCHEMA
 
     description = KANBAN_CREATE_SCHEMA["parameters"]["properties"][
         "report_to_origin"
     ]["description"]
-    assert "Create this root before worker cards" in description
-    assert "Build worker cards first" not in description
+    assert "coordination root before worker cards only with the manager intake" in description
+    assert "ordinary return aggregation without coordination" in description
+    assert "dependencies established first" in description
+    assert "Internal handoffs never require a new user root" in description
 
 
 # ---------------------------------------------------------------------------
@@ -567,6 +569,26 @@ def test_create_happy_path(worker_env):
         assert child.assignee == "peer"
     finally:
         conn.close()
+
+
+def test_create_explicit_hold_survives_parent_completion(worker_env):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    result = json.loads(kt._handle_create({
+        "title": "candidate awaiting release", "assignee": "peer",
+        "parents": [worker_env], "initial_status": "blocked",
+    }))
+    assert result["ok"] is True
+    assert result["status"] == "blocked"
+    with kb.connect_closing() as conn:
+        assert kb.complete_task(conn, worker_env, result="prerequisite verified")
+        for _ in range(3):
+            kb.recompute_ready(conn)
+            assert kb.get_task(conn, result["task_id"]).status == "blocked"
+            assert kb.claim_task(conn, result["task_id"]) is None
+        assert kb.unblock_task(conn, result["task_id"])
+        assert kb.get_task(conn, result["task_id"]).status == "ready"
 
 
 def test_create_binds_task_local_gateway_session_for_wake(
