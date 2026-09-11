@@ -951,7 +951,7 @@ def _handle_complete(args: dict, **kw) -> str:
 
 
 def _handle_block(args: dict, **kw) -> str:
-    """Transition the task to blocked with a reason a human will read."""
+    """Stop work with a blocker or an explicitly requested scheduled handoff."""
     delegated_err = _reject_delegated_child_mutation("kanban_block")
     if delegated_err:
         return delegated_err
@@ -971,10 +971,11 @@ def _handle_block(args: dict, **kw) -> str:
     board = args.get("board")
     try:
         kb, conn = _connect(board=board)
-        if kind is not None and kind not in kb.VALID_BLOCK_KINDS:
+        allowed_kinds = kb.VALID_BLOCK_KINDS | {"scheduled"}
+        if kind is not None and kind not in allowed_kinds:
             conn.close()
             return tool_error(
-                f"kind must be one of {sorted(kb.VALID_BLOCK_KINDS)} (or omit it)"
+                f"kind must be one of {sorted(allowed_kinds)} (or omit it)"
             )
         # Goal-mode block gate (Issue #38696, sibling of the kanban_complete
         # judge gate in #38367). kanban_block is a second exit path out of
@@ -1001,14 +1002,28 @@ def _handle_block(args: dict, **kw) -> str:
                 f"completion judge will evaluate it."
             )
         try:
-            ok = kb.block_task(
-                conn, tid,
-                reason=reason,
-                kind=kind,
-                expected_run_id=_worker_run_id(tid),
-                **({"decision_review": args["decision_review"]} if "decision_review" in args else {}),
-            )
+            if kind == "scheduled":
+                run_id = _worker_run_id(tid)
+                if os.environ.get("HERMES_KANBAN_TASK") == tid and (
+                    run_id is None or run_id < 1
+                ):
+                    return tool_error("scheduled worker handoffs require a valid run id")
+                ok = kb.schedule_task(
+                    conn, tid, reason=reason, expected_run_id=run_id,
+                )
+            else:
+                ok = kb.block_task(
+                    conn, tid,
+                    reason=reason,
+                    kind=kind,
+                    expected_run_id=_worker_run_id(tid),
+                    **({"decision_review": args["decision_review"]} if "decision_review" in args else {}),
+                )
             if not ok:
+                if kind == "scheduled":
+                    return tool_error(
+                        f"could not schedule {tid} (unknown id, invalid state, or stale run)"
+                    )
                 return tool_error(
                     f"could not block {tid} (unknown id or not in "
                     f"running/ready)"
@@ -2362,12 +2377,15 @@ KANBAN_BLOCK_SCHEMA = {
         "Set ``kind`` to say which: 'dependency' (waiting on another task — "
         "goes to todo and auto-resumes when that task finishes, no human "
         "needed), 'needs_input' (you need a human decision/answer), "
+        "'scheduled' (an explicitly requested partial handoff waiting for "
+        "authorized release; parks without completion or auto-resume), "
         "'capability' (a hard wall: no access, missing credentials, an action "
         "no agent can do), or 'transient' (a flaky failure that may clear). "
         "``reason`` is shown to the human on the board. If a task keeps "
         "getting unblocked and re-blocked for the same reason, it is "
-        "auto-escalated to triage. Use for genuine blockers only — don't "
-        "block on things you can resolve yourself."
+        "auto-escalated to triage. Use ordinary kinds for genuine blockers only — don't "
+        "block on things you can resolve yourself. Scheduled handoffs are "
+        "host-side and do not need a local terminal or CLI."
     ),
     "parameters": {
         "type": "object",
@@ -2386,10 +2404,12 @@ KANBAN_BLOCK_SCHEMA = {
             },
             "kind": {
                 "type": "string",
-                "enum": ["dependency", "needs_input", "capability", "transient"],
+                "enum": ["dependency", "needs_input", "capability", "transient", "scheduled"],
                 "description": (
                     "Why you're blocked. 'dependency' waits in todo and "
-                    "resumes automatically; the others surface to a human. "
+                    "resumes automatically; 'scheduled' parks an explicitly "
+                    "requested handoff until authorized release (not for goal-mode tasks); "
+                    "the others surface to a human. "
                     "Omit only if none apply."
                 ),
             },

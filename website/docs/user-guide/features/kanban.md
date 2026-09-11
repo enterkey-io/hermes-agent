@@ -435,6 +435,18 @@ reminds the model to call `kanban_complete` or `kanban_block` immediately. This
 guard is active only for dispatcher-spawned workers (`HERMES_KANBAN_TASK` is
 set) and can be disabled with `HERMES_KANBAN_STOP_NUDGE=0`.
 
+When a task explicitly calls for parking a partial handoff until a manager
+release, the worker can use `kanban_block(kind="scheduled", reason="...")`
+after recording its evidence. This runs on the host even when terminal tools
+use Docker, SSH, or Modal, or `hermes` is absent from `PATH`. Goal-mode tasks
+cannot use this to bypass their completion judge. Local operators can also
+use `hermes kanban schedule <id> <reason>`. This ends the current run without completing the
+overall task or releasing dependent work. The stop guard checks the pinned
+board's persisted task and run: both must be scheduled, the exact worker run
+must have ended, and no newer run may exist. CLI output or narrative claims
+alone do not count. After a successful park, stop; do not unblock yourself to
+satisfy the stop guard. A manager or authorized automation releases later work.
+
 **Dispatcher-side recovery:** If the nudges are exhausted or the worker crashes
 before reaching the nudge, the dispatcher gives the violation a **bounded retry**
 (up to `_PROTOCOL_VIOLATION_FAILURE_LIMIT` consecutive violations, default 3)

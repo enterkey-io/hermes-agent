@@ -383,6 +383,79 @@ def test_block_happy_path(worker_env):
         conn.close()
 
 
+@pytest.mark.parametrize("backend", ["local", "docker", "ssh", "modal"])
+def test_scheduled_handoff_uses_host_tool_without_cli(worker_env, monkeypatch, tmp_path, backend):
+    from agent.kanban_stop import build_kanban_stop_nudge
+    from hermes_cli import kanban_db as kb
+    from model_tools import handle_function_call
+
+    with kb.connect_closing() as conn:
+        run_id = kb.latest_run(conn, worker_env).id
+        child = kb.create_task(conn, title="Later acceptance", parents=[worker_env])
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(run_id))
+    monkeypatch.setenv("TERMINAL_ENV", backend)
+    monkeypatch.setenv("PATH", str(tmp_path / "no-cli"))
+
+    def no_subprocess(*args, **kwargs):
+        raise AssertionError("A host-side handoff must not launch a terminal command")
+
+    monkeypatch.setattr("subprocess.Popen", no_subprocess)
+    result = json.loads(handle_function_call(
+        "kanban_block",
+        {"kind": "scheduled", "reason": "Await authorized manager release"},
+        enabled_tools=["kanban_block"],
+    ))
+    assert result.get("ok") is True, result
+    assert result["status"] == "scheduled"
+    assert result["run_id"] == run_id
+    with kb.connect_closing() as conn:
+        task = kb.get_task(conn, worker_env)
+        run = kb.get_run(conn, run_id)
+        assert task.status == "scheduled"
+        assert task.current_run_id is None
+        assert run.status == run.outcome == "scheduled"
+        assert run.ended_at is not None
+        kb.recompute_ready(conn)
+        assert kb.get_task(conn, child).status == "todo"
+    assert build_kanban_stop_nudge(messages=[]) is None
+
+
+@pytest.mark.parametrize("run_id", ["", "invalid", "0", "-1", "999999"])
+def test_scheduled_handoff_rejects_missing_or_stale_run(worker_env, monkeypatch, run_id):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", run_id)
+    result = json.loads(kt._handle_block({"kind": "scheduled", "reason": "Await release"}))
+    assert result.get("ok") is not True
+    with kb.connect_closing() as conn:
+        assert kb.get_task(conn, worker_env).status == "running"
+
+
+def test_scheduled_handoff_rejects_foreign_task_and_delegated_child(worker_env, monkeypatch):
+    from agent.delegation_context import delegated_child_context
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    with kb.connect_closing() as conn:
+        run_id = kb.latest_run(conn, worker_env).id
+        other = kb.create_task(conn, title="Other", assignee="test-worker")
+        kb.claim_task(conn, other)
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(run_id))
+    foreign = json.loads(kt._handle_block({
+        "task_id": other, "kind": "scheduled", "reason": "Unauthorized sibling park",
+    }))
+    assert foreign.get("ok") is not True
+    with delegated_child_context("child"):
+        delegated = json.loads(kt._handle_block({
+            "task_id": worker_env, "kind": "scheduled", "reason": "Unauthorized child park",
+        }))
+    assert delegated.get("ok") is not True
+    with kb.connect_closing() as conn:
+        assert kb.get_task(conn, worker_env).status == "running"
+        assert kb.get_task(conn, other).status == "running"
+
+
 def _make_goal_mode_worker_env(monkeypatch, tmp_path):
     """Set up an isolated HERMES_HOME with one claimed goal_mode task,
     matching the pattern used by the kanban_complete judge gate tests."""
@@ -438,7 +511,7 @@ def test_block_goal_mode_rejects_disallowed_kind(monkeypatch, tmp_path):
     from hermes_cli import kanban_db as kb
 
     tid = _make_goal_mode_worker_env(monkeypatch, tmp_path)
-    for kind in ("capability", "transient"):
+    for kind in ("capability", "transient", "scheduled"):
         out = kt._handle_block({"reason": "blocked", "kind": kind})
         d = json.loads(out)
         assert "error" in d, f"kind={kind} should be rejected for goal_mode"
