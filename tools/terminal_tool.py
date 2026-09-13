@@ -3509,6 +3509,7 @@ def terminal_tool(
             # fixes the root cause on the next call instead of spending
             # turns on re-diagnosis. See tools/terminal_hints.py.
             failure_hint = None
+            masked_failure_detected = False
             if returncode != 0 and not exit_note:
                 try:
                     from tools.terminal_hints import annotate_failure
@@ -3526,6 +3527,7 @@ def terminal_tool(
                 try:
                     from tools.terminal_hints import annotate_masked_success
                     failure_hint = annotate_masked_success(command, output)
+                    masked_failure_detected = bool(failure_hint)
                 except Exception:
                     failure_hint = None
 
@@ -3624,6 +3626,8 @@ def terminal_tool(
                 result_dict["exit_code_meaning"] = exit_note
             if failure_hint:
                 result_dict["hint"] = failure_hint
+            if masked_failure_detected:
+                result_dict["masked_failure_detected"] = True
             if sudo_auth_failed:
                 result_dict["sudo_auth_failed"] = True
             if sudo_cache_cleared:
@@ -3981,6 +3985,8 @@ def _handle_terminal(args, **kw):
         # process tool has a separate lifecycle that this dependency cannot
         # authoritatively join to the eventual exit result.
         mark_failure(attempt, "pending", sticky=True)
+    elif payload.get("masked_failure_detected") is True:
+        mark_failure(attempt, "masked_exit", sticky=True)
     elif exit_code != 0 and not expected_nonzero:
         interrupted = (
             exit_code == 130

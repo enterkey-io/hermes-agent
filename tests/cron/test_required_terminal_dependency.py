@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 
 import pytest
 
@@ -261,6 +262,97 @@ def test_required_background_terminal_stays_unverified(monkeypatch):
 
     assert summary["successful"] == []
     assert summary["failed"] == [{"tool": "terminal", "reasons": ["pending"]}]
+
+
+def test_masked_terminal_failure_is_not_accepted_as_exit_zero(monkeypatch):
+    from tools.required_dependency_runtime import activate, reset
+    import tools.terminal_tool as terminal_module
+
+    monkeypatch.setattr(
+        terminal_module,
+        "terminal_tool",
+        lambda **_kwargs: json.dumps({
+            "output": "1 failed",
+            "exit_code": 0,
+            "error": None,
+            "hint": "The pipeline masked an upstream failure.",
+            "masked_failure_detected": True,
+        }),
+    )
+    token, state = activate(["terminal"])
+    try:
+        _handle_terminal({"command": "pytest tests/ | tee output.log"})
+        summary = state.finalize()
+    finally:
+        reset(token)
+
+    assert summary["successful"] == []
+    assert summary["failed"] == [{"tool": "terminal", "reasons": ["masked_exit"]}]
+
+
+def test_real_terminal_masked_pipeline_is_a_required_failure(workflow):
+    from tools.required_dependency_runtime import activate, reset
+
+    failing_suite = workflow / "failing-suite"
+    failing_suite.write_text("#!/bin/sh\nprintf '1 failed\\n'\nexit 1\n")
+    failing_suite.chmod(0o700)
+    output = workflow / "pipeline-output.txt"
+    command = f"{shlex.quote(str(failing_suite))} | tee {shlex.quote(str(output))}"
+
+    token, state = activate(["terminal"])
+    try:
+        result = json.loads(
+            _handle_terminal({
+                "command": command,
+                "workdir": str(workflow),
+            })
+        )
+        summary = state.finalize()
+    finally:
+        reset(token)
+
+    assert result["exit_code"] == 0
+    assert result["masked_failure_detected"] is True
+    assert output.read_text() == "1 failed\n"
+    assert summary["successful"] == []
+    assert summary["failed"] == [{"tool": "terminal", "reasons": ["masked_exit"]}]
+
+
+def test_registry_budget_rejection_overrides_completed_workflow(
+    monkeypatch,
+    workflow,
+):
+    from tools.registry import registry as tool_registry
+    import tools.registry as registry_module
+
+    def reject_budget(_name):
+        raise registry_module.RuntimeToolBudgetError("limit reached")
+
+    monkeypatch.setattr(registry_module, "charge_runtime_tool_attempt", reject_budget)
+
+    def run_job(_job, **_kwargs):
+        result = json.loads(
+            tool_registry.dispatch(
+                "terminal",
+                {"command": "/usr/bin/true", "workdir": str(workflow)},
+            )
+        )
+        assert result["error_type"] == "runtime_tool_budget_exceeded"
+        return True, "raw output", "[SILENT]\n[WORKFLOW_STATUS:completed]", None
+
+    marked, delivered = _run(monkeypatch, workflow, run_job)
+
+    error = (
+        "Required tool dependency degraded: unsuccessful: terminal "
+        "(runtime_budget_rejected)"
+    )
+    assert delivered == [f"⚠️ Cron 'Required terminal job' failed: {error}"]
+    assert marked[0][1:3] == (False, error)
+    assert marked[0][3]["workflow_status"] == "failed"
+    assert marked[0][3]["dependency_outcome"]["failed"] == [
+        {"tool": "terminal", "reasons": ["runtime_budget_rejected"]}
+    ]
+    assert latest_execution("required-terminal-job")["status"] == "failed"
 
 
 @pytest.mark.parametrize(
