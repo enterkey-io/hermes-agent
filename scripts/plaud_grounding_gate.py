@@ -8,8 +8,10 @@ commitment signals, and has no provider, registry, or delivery surface.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import hashlib
 import json
+import math
 import os
 import re
 import stat
@@ -68,8 +70,7 @@ CONDITIONAL_OR_WEAK_RE = re.compile(
 DECISION_RE = re.compile(
     r"\b(?:we\s+(?:decided|agreed)|the\s+decision\s+is|"
     r"we(?:['\u2019]re|\s+are)\s+(?:going\s+with|keeping|maintaining)|"
-    r"we\s+will\s+(?:keep|use|maintain|move|proceed)|"
-    r"(?:stays?|remains?)\s+(?:in|on|with|unchanged)|maintaining\s+as)\b",
+    r"we\s+will\s+(?:keep|use|maintain|move|proceed)|maintaining\s+as)\b",
     re.IGNORECASE,
 )
 UNDECIDED_RE = re.compile(
@@ -131,8 +132,8 @@ def _list(value: Any, label: str) -> list[Any]:
 def _text(value: Any, label: str, *, minimum: int = 1, maximum: int = 800) -> str:
     if not isinstance(value, str) or value != value.strip() or not (minimum <= len(value) <= maximum):
         raise GroundingError(f"{label} must be trimmed text of length {minimum}..{maximum}")
-    if "\x00" in value or "\r" in value or "\n" in value:
-        raise GroundingError(f"{label} must be one line")
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise GroundingError(f"{label} must be one line without control characters")
     return value
 
 
@@ -495,9 +496,15 @@ def _selected_title(envelope: Any, recording_id: str) -> str:
     if recording.get("id") != recording_id:
         raise GroundingError("selected envelope recording_id does not match")
     duration = recording.get("duration_ms")
-    if isinstance(duration, bool) or not isinstance(duration, (int, float)) or duration <= 0:
+    if isinstance(duration, bool) or not isinstance(duration, (int, float)) or not math.isfinite(duration) or duration <= 0:
         raise GroundingError("selected envelope duration_ms must be positive")
-    _text(recording.get("recorded_at"), "selected envelope.recorded_at", maximum=80)
+    recorded_at = _text(recording.get("recorded_at"), "selected envelope.recorded_at", maximum=80)
+    try:
+        parsed_recorded_at = datetime.fromisoformat(recorded_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise GroundingError("selected envelope recorded_at must be timezone-aware ISO 8601") from exc
+    if parsed_recorded_at.tzinfo is None or parsed_recorded_at.utcoffset() is None:
+        raise GroundingError("selected envelope recorded_at must be timezone-aware ISO 8601")
     return _text(recording.get("title"), "selected envelope.title", maximum=300)
 
 

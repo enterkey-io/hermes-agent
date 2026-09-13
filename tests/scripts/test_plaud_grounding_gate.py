@@ -171,6 +171,16 @@ def test_undecided_statement_is_not_an_explicit_decision() -> None:
         gate.validate(transcript(), candidate, RECORDING)
 
 
+def test_status_remaining_in_question_is_not_a_decision() -> None:
+    source = transcript()
+    source["segments"][5]["content"] = "The replacement decision remains in question."
+    candidate = draft()
+    candidate["decisions"] = [6]
+    candidate["open_questions"] = []
+    with pytest.raises(gate.GroundingError, match="non-negated decision"):
+        gate.validate(source, candidate, RECORDING)
+
+
 def test_render_then_finalize_actions_binds_exact_source_receipt_and_note(tmp_path: Path) -> None:
     source_path, metadata_path = private_source_files(tmp_path)
     source_index_path = private_source_index(tmp_path)
@@ -292,6 +302,16 @@ def test_selected_envelope_mismatch_blocks_both_final_outputs(tmp_path: Path) ->
         gate.finalize_actions(finalize_args)
     assert not finalize_args.plan_output.exists()
     assert not finalize_args.delivery_output.exists()
+
+
+def test_selected_envelope_requires_timezone_aware_recorded_at(tmp_path: Path) -> None:
+    path = private_selected_envelope(tmp_path)
+    value = json.loads(path.read_text())
+    value["recording"]["recorded_at"] = "2026-09-10T19:00:32"
+    path.write_text(json.dumps(value))
+    path.chmod(0o600)
+    with pytest.raises(gate.GroundingError, match="timezone-aware"):
+        gate._selected_title(value, RECORDING)
 
 
 def test_index_source_is_private_complete_and_refuses_overwrite(tmp_path: Path) -> None:
