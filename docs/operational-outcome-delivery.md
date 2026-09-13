@@ -29,11 +29,12 @@ runtime budget is an observed failure rather than an uncalled conditional
 branch. Exit-zero terminal results carrying the
 host's conservative masked-failure detection also fail required dependency
 health; ordinary terminal calls retain the advisory result and exit code.
-Explicit non-error codes for the grep, diff, and test command families remain
-successful only for simple bare commands or standard system executables whose
-status is unambiguous; custom paths, PATH overrides, conditional chains, and
-active redirections are treated as failures. Explanatory notes for signals and
-network failures do not. The
+Ordinary terminal results retain advisory notes for explicit non-error codes in
+the grep, diff, and test command families. Required dependency health accepts
+those codes only for simple `/bin` or `/usr/bin` executables whose status is
+unambiguous; bare names, custom paths, PATH overrides, conditional chains, and
+active redirections fail closed. Explanatory notes for signals and network
+failures do not. The
 runtime persists only the tool name and bounded failure class, never command
 text or arguments.
 Background launches remain pending because spawning a process does not prove

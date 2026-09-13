@@ -203,7 +203,7 @@ def test_expected_nonzero_terminal_meaning_is_not_a_failure(monkeypatch, workflo
     try:
         result = json.loads(
             _handle_terminal({
-                "command": "grep absent /dev/null",
+                "command": "/usr/bin/grep absent /dev/null",
                 "workdir": str(workflow),
             })
         )
@@ -277,6 +277,39 @@ def test_custom_grep_basename_is_a_real_terminal_failure(workflow):
 
     assert result["exit_code"] == 1
     assert "exit_code_meaning" not in result
+    assert summary["successful"] == []
+    assert summary["failed"] == [{"tool": "terminal", "reasons": ["nonzero_exit"]}]
+
+
+def test_inherited_path_custom_grep_is_a_real_terminal_failure(
+    workflow,
+):
+    from tools.required_dependency_runtime import activate, reset
+
+    executable = workflow / "grep"
+    executable.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    executable.chmod(0o700)
+    task_id = "required-path-shadow"
+    setup = json.loads(_handle_terminal(
+        {
+            "command": f"export PATH={shlex.quote(str(workflow))}:$PATH",
+            "workdir": str(workflow),
+        },
+        task_id=task_id,
+    ))
+    assert setup["exit_code"] == 0
+    token, state = activate(["terminal"])
+    try:
+        result = json.loads(_handle_terminal(
+            {"command": "grep", "workdir": str(workflow)},
+            task_id=task_id,
+        ))
+        summary = state.finalize()
+    finally:
+        reset(token)
+
+    assert result["exit_code"] == 1
+    assert result["exit_code_meaning"] == "No matches found (not an error)"
     assert summary["successful"] == []
     assert summary["failed"] == [{"tool": "terminal", "reasons": ["nonzero_exit"]}]
 
@@ -416,6 +449,41 @@ def test_registry_budget_rejection_overrides_completed_workflow(
     assert marked[0][3]["workflow_status"] == "failed"
     assert marked[0][3]["dependency_outcome"]["failed"] == [
         {"tool": "terminal", "reasons": ["runtime_budget_rejected"]}
+    ]
+    assert latest_execution("required-terminal-job")["status"] == "failed"
+
+
+def test_registry_malformed_handler_result_overrides_completed_workflow(
+    monkeypatch,
+    workflow,
+):
+    from tools.registry import registry as tool_registry
+
+    entry = tool_registry.get_entry("terminal")
+    assert entry is not None
+    monkeypatch.setattr(entry, "handler", lambda _args, **_kwargs: {"ok": True})
+
+    def run_job(_job, **_kwargs):
+        result = json.loads(
+            tool_registry.dispatch(
+                "terminal",
+                {"command": "/usr/bin/true", "workdir": str(workflow)},
+            )
+        )
+        assert result["error_type"] == "tool_result_contract"
+        return True, "raw output", "[SILENT]\n[WORKFLOW_STATUS:completed]", None
+
+    marked, delivered = _run(monkeypatch, workflow, run_job)
+
+    error = (
+        "Required tool dependency degraded: unsuccessful: terminal "
+        "(malformed_result)"
+    )
+    assert delivered == [f"⚠️ Cron 'Required terminal job' failed: {error}"]
+    assert marked[0][1:3] == (False, error)
+    assert marked[0][3]["workflow_status"] == "failed"
+    assert marked[0][3]["dependency_outcome"]["failed"] == [
+        {"tool": "terminal", "reasons": ["malformed_result"]}
     ]
     assert latest_execution("required-terminal-job")["status"] == "failed"
 

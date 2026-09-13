@@ -2400,7 +2400,11 @@ def _has_active_shell_composition(command: str) -> bool:
     return False
 
 
-def _simple_status_command(command: str) -> str | None:
+def _simple_status_command(
+    command: str,
+    *,
+    require_trusted_executable: bool = False,
+) -> str | None:
     """Return the base executable only when it unambiguously owns the status."""
     if not command or _has_active_shell_composition(command):
         return None
@@ -2414,7 +2418,7 @@ def _simple_status_command(command: str) -> str | None:
                 return None
             continue
         if "/" not in word:
-            return word
+            return None if require_trusted_executable else word
         executable = Path(word)
         if not executable.is_absolute() or str(executable.parent) not in {
             "/bin",
@@ -2502,7 +2506,10 @@ def _is_expected_nonzero_exit(command: str, exit_code: int) -> bool:
     if exit_code != 1:
         return False
 
-    base_cmd = _simple_status_command(command)
+    base_cmd = _simple_status_command(
+        command,
+        require_trusted_executable=True,
+    )
 
     return base_cmd in {
         "grep", "egrep", "fgrep", "rg", "ag", "ack",

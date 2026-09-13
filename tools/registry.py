@@ -1459,6 +1459,14 @@ class ToolRegistry:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _handler_result_is_supported(result) -> bool:
+        return isinstance(result, str) or (
+            isinstance(result, dict)
+            and result.get("_multimodal") is True
+            and isinstance(result.get("content"), list)
+        )
+
+    @staticmethod
     def _normalize_handler_result(name: str, result):
         """Enforce the result shapes supported by the agent tool pipeline.
 
@@ -1469,11 +1477,7 @@ class ToolRegistry:
         """
         if isinstance(result, str):
             return _bound_json_error_result(result)
-        if (
-            isinstance(result, dict)
-            and result.get("_multimodal") is True
-            and isinstance(result.get("content"), list)
-        ):
+        if ToolRegistry._handler_result_is_supported(result):
             return result
 
         result_type = type(result).__name__
@@ -1688,7 +1692,10 @@ class ToolRegistry:
             )
         if error is not None:
             return reject_required_dependency(error, "dispatch_error")
-        return self._normalize_handler_result(name, result)
+        normalized = self._normalize_handler_result(name, result)
+        if not self._handler_result_is_supported(result):
+            return reject_required_dependency(normalized, "malformed_result")
+        return normalized
 
     # ------------------------------------------------------------------
     # Query helpers  (replace redundant dicts in model_tools.py)

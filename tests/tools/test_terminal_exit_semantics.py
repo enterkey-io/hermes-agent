@@ -96,6 +96,12 @@ class TestInterpretExitCode:
         )
         assert _is_expected_nonzero_exit("/usr/bin/grep x file", 1) is True
 
+    def test_bare_executable_is_advisory_but_not_required_health_evidence(self):
+        assert _interpret_exit_code("grep x file", 1) == (
+            "No matches found (not an error)"
+        )
+        assert _is_expected_nonzero_exit("grep x file", 1) is False
+
     @pytest.mark.parametrize(
         "command",
         [
@@ -126,4 +132,4 @@ class TestInterpretExitCode:
     )
     def test_quoted_or_escaped_literals_keep_simple_exit_semantics(self, command):
         assert _interpret_exit_code(command, 1) == "No matches found (not an error)"
-        assert _is_expected_nonzero_exit(command, 1) is True
+        assert _is_expected_nonzero_exit(command, 1) is False
