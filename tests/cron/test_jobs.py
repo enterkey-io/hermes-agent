@@ -971,6 +971,28 @@ class TestEnabledToolsets:
                     "tool_call_limits": {"workforce_signal": 1, " workforce_signal ": 1},
                 },
             )
+        with pytest.raises(ValueError, match="only string names"):
+            create_job(
+                prompt="bad",
+                schedule="every 1h",
+                runtime_tool_budget={
+                    **budget,
+                    "allowed_tools": ["1"],
+                    "write_tools": [1],
+                    "tool_call_limits": {},
+                },
+            )
+        with pytest.raises(ValueError, match="keys must be string names"):
+            create_job(
+                prompt="bad",
+                schedule="every 1h",
+                runtime_tool_budget={
+                    **budget,
+                    "allowed_tools": ["1"],
+                    "write_tools": [],
+                    "tool_call_limits": {1: 1},
+                },
+            )
 
 
 class TestMarkJobRunConcurrency:

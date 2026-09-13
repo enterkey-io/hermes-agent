@@ -106,8 +106,12 @@ def activate_runtime_tool_budget(
     raw_write_tools = config.get("write_tools", [])
     if not isinstance(raw_write_tools, list):
         raise ValueError("runtime_tool_budget.write_tools must be a list")
+    if not all(isinstance(item, str) for item in raw_write_tools):
+        raise ValueError(
+            "runtime_tool_budget.write_tools must contain only string names"
+        )
     write_tools = frozenset(
-        str(item).strip() for item in raw_write_tools if str(item).strip()
+        item.strip() for item in raw_write_tools if item.strip()
     )
     if len(write_tools) != len(raw_write_tools):
         raise ValueError(
@@ -122,7 +126,11 @@ def activate_runtime_tool_budget(
         raise ValueError("runtime_tool_budget.tool_call_limits must be a mapping")
     tool_call_limits: dict[str, int] = {}
     for raw_name, raw_limit in raw_tool_limits.items():
-        name = str(raw_name).strip()
+        if not isinstance(raw_name, str):
+            raise ValueError(
+                "runtime_tool_budget.tool_call_limits keys must be string names"
+            )
+        name = raw_name.strip()
         if not name or name not in allowed:
             raise ValueError(
                 "runtime_tool_budget.tool_call_limits keys must be allowed tools"

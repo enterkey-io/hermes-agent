@@ -403,6 +403,18 @@ class TestRegisterAndDispatch:
                 },
             })
 
+        base = {
+            "max_calls": 2,
+            "max_writes": 1,
+            "max_detail_reads": 1,
+            "max_list_items": 1,
+            "allowed_tools": ["1"],
+        }
+        with pytest.raises(ValueError, match="only string names"):
+            activate_runtime_tool_budget({**base, "write_tools": [1]})
+        with pytest.raises(ValueError, match="keys must be string names"):
+            activate_runtime_tool_budget({**base, "tool_call_limits": {1: 1}})
+
     def test_cross_mcp_toolsets_do_not_overwrite_atomically(self, caplog):
         """Parallel MCP registrations with one name leave exactly one owner."""
         reg = ToolRegistry()

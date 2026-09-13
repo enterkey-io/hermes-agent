@@ -1998,8 +1998,12 @@ def _normalize_runtime_tool_budget(value: Any) -> Optional[Dict[str, Any]]:
     write_tools = value.get("write_tools", [])
     if not isinstance(write_tools, list):
         raise ValueError("runtime_tool_budget.write_tools must be a list")
+    if not all(isinstance(item, str) for item in write_tools):
+        raise ValueError(
+            "runtime_tool_budget.write_tools must contain only string names"
+        )
     normalized_write_tools = [
-        str(item).strip() for item in write_tools if str(item).strip()
+        item.strip() for item in write_tools if item.strip()
     ]
     if (
         len(normalized_write_tools) != len(write_tools)
@@ -2019,7 +2023,11 @@ def _normalize_runtime_tool_budget(value: Any) -> Optional[Dict[str, Any]]:
         raise ValueError("runtime_tool_budget.tool_call_limits must be a mapping")
     normalized_limits: Dict[str, int] = {}
     for raw_name, raw_limit in tool_call_limits.items():
-        name = str(raw_name).strip()
+        if not isinstance(raw_name, str):
+            raise ValueError(
+                "runtime_tool_budget.tool_call_limits keys must be string names"
+            )
+        name = raw_name.strip()
         if not name or name not in normalized_allowed:
             raise ValueError(
                 "runtime_tool_budget.tool_call_limits keys must be allowed tools"
