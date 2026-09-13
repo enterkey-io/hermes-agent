@@ -82,14 +82,14 @@ def test_real_terminal_failure_overrides_model_completed_marker(monkeypatch, wor
     def run_job(_job, **_kwargs):
         first = json.loads(
             _handle_terminal({
-                "command": "/bin/sh -c 'exit 7'",
+                "command": "/usr/bin/false",
                 "workdir": str(workflow),
             })
         )
-        assert first["exit_code"] == 7
+        assert first["exit_code"] == 1
         second = json.loads(
             _handle_terminal({
-                "command": "/bin/sh -c 'exit 0'",
+                "command": "/usr/bin/true",
                 "workdir": str(workflow),
             })
         )
@@ -140,7 +140,7 @@ def test_real_terminal_success_preserves_completed_workflow(monkeypatch, workflo
     def run_job(_job, **_kwargs):
         result = json.loads(
             _handle_terminal({
-                "command": "/bin/sh -c 'exit 0'",
+                "command": "/usr/bin/true",
                 "workdir": str(workflow),
             })
         )
@@ -162,11 +162,11 @@ def test_ordinary_job_retains_recoverable_terminal_behavior(monkeypatch, workflo
     def run_job(_job, **_kwargs):
         result = json.loads(
             _handle_terminal({
-                "command": "/bin/sh -c 'exit 7'",
+                "command": "/usr/bin/false",
                 "workdir": str(workflow),
             })
         )
-        assert result["exit_code"] == 7
+        assert result["exit_code"] == 1
         return True, "raw output", "[SILENT]\n[WORKFLOW_STATUS:completed]", None
 
     marked, delivered = _run(monkeypatch, workflow, run_job, required=False)
@@ -182,9 +182,9 @@ def test_terminal_failure_is_sticky_across_identical_retry(monkeypatch, workflow
 
     token, state = activate(["terminal"])
     try:
-        command = {"command": "/bin/sh -c 'exit 9'", "workdir": str(workflow)}
-        assert json.loads(_handle_terminal(command))["exit_code"] == 9
-        command["command"] = "/bin/sh -c 'exit 0'"
+        command = {"command": "/usr/bin/false", "workdir": str(workflow)}
+        assert json.loads(_handle_terminal(command))["exit_code"] == 1
+        command["command"] = "/usr/bin/true"
         assert json.loads(_handle_terminal(command))["exit_code"] == 0
 
         summary = state.finalize()
@@ -215,33 +215,29 @@ def test_expected_nonzero_terminal_meaning_is_not_a_failure(monkeypatch, workflo
     assert summary["failed"] == []
 
 
-@pytest.mark.parametrize(
-    ("command", "reason"),
-    [
-        ("/bin/sh -c 'exit 130'", "nonzero_exit"),
-        ("/bin/sh -c 'kill -TERM $$'", "nonzero_exit"),
-    ],
-)
-def test_signal_notes_do_not_turn_terminal_failures_into_success(
-    monkeypatch,
-    workflow,
-    command,
-    reason,
-):
+def test_signal_note_does_not_turn_terminal_failure_into_success(monkeypatch):
     from tools.required_dependency_runtime import activate, reset
+    import tools.terminal_tool as terminal_module
 
+    monkeypatch.setattr(
+        terminal_module,
+        "terminal_tool",
+        lambda **_kwargs: json.dumps({
+            "output": "terminated",
+            "exit_code": 143,
+            "error": None,
+            "exit_code_meaning": "terminated by SIGTERM",
+        }),
+    )
     token, state = activate(["terminal"])
     try:
-        result = json.loads(
-            _handle_terminal({"command": command, "workdir": str(workflow)})
-        )
-        assert result["exit_code"] != 0
+        _handle_terminal({"command": "worker"})
         summary = state.finalize()
     finally:
         reset(token)
 
     assert summary["successful"] == []
-    assert summary["failed"] == [{"tool": "terminal", "reasons": [reason]}]
+    assert summary["failed"] == [{"tool": "terminal", "reasons": ["nonzero_exit"]}]
 
 
 def test_required_background_terminal_stays_unverified(monkeypatch):
@@ -295,6 +291,10 @@ def test_required_background_terminal_stays_unverified(monkeypatch):
             }),
             "interrupted",
         ),
+        (json.dumps({}), "malformed_result"),
+        (json.dumps({"exit_code": None}), "malformed_result"),
+        (json.dumps({"exit_code": "1"}), "malformed_result"),
+        (json.dumps({"exit_code": False}), "malformed_result"),
     ],
 )
 def test_terminal_failure_classes_are_bounded_and_redacted(

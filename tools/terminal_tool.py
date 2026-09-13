@@ -3959,10 +3959,10 @@ def _handle_terminal(args, **kw):
         return result
 
     exit_code = payload.get("exit_code") if isinstance(payload, dict) else None
+    valid_exit_code = isinstance(exit_code, int) and not isinstance(exit_code, bool)
     command = args.get("command") if isinstance(args.get("command"), str) else ""
-    expected_nonzero = (
-        isinstance(exit_code, int)
-        and _is_expected_nonzero_exit(command, exit_code)
+    expected_nonzero = valid_exit_code and _is_expected_nonzero_exit(
+        command, exit_code
     )
     if not isinstance(payload, dict):
         mark_failure(attempt, "malformed_result", sticky=True)
@@ -3972,20 +3972,22 @@ def _handle_terminal(args, **kw):
         "blocked", "disabled", "error", "pending_approval",
     }:
         mark_failure(attempt, "tool_error", sticky=True)
+    elif payload.get("error"):
+        mark_failure(attempt, "tool_error", sticky=True)
+    elif not valid_exit_code:
+        mark_failure(attempt, "malformed_result", sticky=True)
     elif args.get("background"):
         # Starting a detached process is not evidence that it completed. The
         # process tool has a separate lifecycle that this dependency cannot
         # authoritatively join to the eventual exit result.
         mark_failure(attempt, "pending", sticky=True)
-    elif isinstance(exit_code, int) and exit_code != 0 and not expected_nonzero:
+    elif exit_code != 0 and not expected_nonzero:
         interrupted = (
             exit_code == 130
             and "[Command interrupted]" in str(payload.get("output") or "")
         )
         reason = "interrupted" if interrupted else "nonzero_exit"
         mark_failure(attempt, reason, sticky=True)
-    elif payload.get("error"):
-        mark_failure(attempt, "tool_error", sticky=True)
     else:
         mark_success(attempt)
     return result
