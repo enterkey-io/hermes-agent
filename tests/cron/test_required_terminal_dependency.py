@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shlex
+from types import SimpleNamespace
 
 import pytest
 
@@ -216,6 +217,27 @@ def test_expected_nonzero_terminal_meaning_is_not_a_failure(monkeypatch, workflo
     assert summary["failed"] == []
 
 
+def test_short_circuited_grep_is_a_real_terminal_failure(workflow):
+    from tools.required_dependency_runtime import activate, reset
+
+    missing = workflow / "missing-directory"
+    command = f"cd {shlex.quote(str(missing))} && grep absent /dev/null"
+    token, state = activate(["terminal"])
+    try:
+        result = json.loads(_handle_terminal({
+            "command": command,
+            "workdir": str(workflow),
+        }))
+        summary = state.finalize()
+    finally:
+        reset(token)
+
+    assert result["exit_code"] == 1
+    assert "exit_code_meaning" not in result
+    assert summary["successful"] == []
+    assert summary["failed"] == [{"tool": "terminal", "reasons": ["nonzero_exit"]}]
+
+
 def test_signal_note_does_not_turn_terminal_failure_into_success(monkeypatch):
     from tools.required_dependency_runtime import activate, reset
     import tools.terminal_tool as terminal_module
@@ -353,6 +375,61 @@ def test_registry_budget_rejection_overrides_completed_workflow(
         {"tool": "terminal", "reasons": ["runtime_budget_rejected"]}
     ]
     assert latest_execution("required-terminal-job")["status"] == "failed"
+
+
+def test_executor_plugin_block_overrides_completed_workflow(monkeypatch, workflow):
+    import agent.tool_executor as tool_executor
+
+    agent = SimpleNamespace(
+        session_id="required-terminal-session",
+        _current_turn_id="turn",
+        _current_api_request_id="request",
+        _tool_guardrails=SimpleNamespace(
+            before_call=lambda *_args: pytest.fail("guardrail ran after plugin block")
+        ),
+    )
+
+    monkeypatch.setattr(
+        "hermes_cli.plugins._dispatch_pre_tool_call_hooks",
+        lambda *_args, **_kwargs: ("blocked by test policy", None),
+    )
+    monkeypatch.setattr(
+        "agent.relay_tools.execute",
+        lambda name, args, callback, **_kwargs: (callback(args), args),
+    )
+    monkeypatch.setattr(
+        tool_executor,
+        "_emit_terminal_post_tool_call",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def run_job(_job, **_kwargs):
+        managed = tool_executor._run_agent_tool_execution_middleware(
+            agent,
+            function_name="terminal",
+            function_args={"command": "/usr/bin/true", "workdir": str(workflow)},
+            effective_task_id="task",
+            tool_call_id="tool-call",
+            execute=lambda _args: pytest.fail("blocked call reached dispatch"),
+        )
+        assert managed.blocked is True
+        # The existing executor flag means its authorization callback was
+        # entered; plugin policy can still block before the tool dispatch.
+        assert managed.dispatched is True
+        return True, "raw output", "[SILENT]\n[WORKFLOW_STATUS:completed]", None
+
+    marked, delivered = _run(monkeypatch, workflow, run_job)
+
+    error = (
+        "Required tool dependency degraded: unsuccessful: terminal "
+        "(executor_blocked)"
+    )
+    assert delivered == [f"⚠️ Cron 'Required terminal job' failed: {error}"]
+    assert marked[0][1:3] == (False, error)
+    assert marked[0][3]["workflow_status"] == "failed"
+    assert marked[0][3]["dependency_outcome"]["failed"] == [
+        {"tool": "terminal", "reasons": ["executor_blocked"]}
+    ]
 
 
 @pytest.mark.parametrize(

@@ -564,7 +564,13 @@ def _run_agent_tool_execution_middleware(
         apply_tool_request_middleware,
         run_tool_execution_middleware,
     )
+    from tools.required_dependency_runtime import (
+        mark_failure,
+        mark_pending,
+        mark_success,
+    )
 
+    required_attempt = mark_pending(function_name, function_args)
     trace = middleware_trace if middleware_trace is not None else []
     state = {
         "args": function_args,
@@ -766,13 +772,22 @@ def _run_agent_tool_execution_middleware(
             "tool_call_id": tool_call_id or "",
         },
     )
-    return _ManagedToolResult(
+    managed = _ManagedToolResult(
         result=result,
         args=state["args"],
         middleware_trace=state["middleware_trace"],
         blocked=bool(state["blocked"]),
         dispatched=bool(state["dispatched"]),
     )
+    if managed.blocked:
+        mark_failure(required_attempt, "executor_blocked", sticky=True)
+    elif managed.dispatched:
+        # The handler or registry records the semantic result. This observation
+        # only proves that middleware did not swallow the attempted call.
+        mark_success(required_attempt)
+    else:
+        mark_failure(required_attempt, "executor_short_circuit", sticky=True)
+    return managed
 
 
 # How often the sequential-tool wait loop wakes to check for a user

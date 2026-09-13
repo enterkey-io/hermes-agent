@@ -154,3 +154,9 @@ def mark_failure(
             str(reason or "tool_error")[:80],
             sticky=sticky,
         )
+
+
+def mark_rejection(tool_name: str, args: Any, reason: str) -> None:
+    """Record a bounded sticky failure for a host-rejected tool attempt."""
+    attempt = mark_pending(tool_name, args)
+    mark_failure(attempt, reason, sticky=True)

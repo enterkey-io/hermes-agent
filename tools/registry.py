@@ -1508,13 +1508,9 @@ class ToolRegistry:
         def reject_required_dependency(result, reason: str):
             """Record host-side rejection before returning the tool error."""
             try:
-                from tools.required_dependency_runtime import (
-                    mark_failure,
-                    mark_pending,
-                )
+                from tools.required_dependency_runtime import mark_rejection
 
-                attempt = mark_pending(name, args)
-                mark_failure(attempt, reason, sticky=True)
+                mark_rejection(name, args, reason)
             except Exception:
                 logger.debug(
                     "Could not record required dependency rejection for %s",

@@ -2368,6 +2368,53 @@ def _interpret_signal_exit(exit_code: int) -> str | None:
     return None
 
 
+def _has_active_shell_composition(command: str) -> bool:
+    """Detect shell composition outside single quotes and escaped literals."""
+    quote: str | None = None
+    escaped = False
+    for index, char in enumerate(command):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and quote != "'":
+            escaped = True
+            continue
+        if char == "'":
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+            continue
+        if char == '"':
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+            continue
+        if quote == "'":
+            continue
+        if char == "`" or (char == "$" and command[index : index + 2] == "$("):
+            return True
+        if quote is None and char in "|;&\n\r":
+            return True
+    return False
+
+
+def _simple_status_command(command: str) -> str | None:
+    """Return the base executable only when it unambiguously owns the status."""
+    if not command or _has_active_shell_composition(command):
+        return None
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return None
+    for word in words:
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", word):
+            continue
+        return word.split("/")[-1]
+    return None
+
+
 def _interpret_exit_code(command: str, exit_code: int) -> str | None:
     """Return a human-readable note when a non-zero exit code is non-erroneous.
 
@@ -2393,22 +2440,10 @@ def _interpret_exit_code(command: str, exit_code: int) -> str | None:
     if signal_note is not None:
         return signal_note
 
-    # Extract the last command in a pipeline/chain — that determines the
-    # exit code.  Handles  `cmd1 && cmd2`, `cmd1 | cmd2`, `cmd1; cmd2`.
-    # Deliberately simple: split on shell operators and take the last piece.
-    segments = re.split(r'\s*(?:\|\||&&|[|;])\s*', command)
-    last_segment = (segments[-1] if segments else command).strip()
-
-    # Get base command name (first word), stripping env var assignments
-    # like  VAR=val cmd ...
-    words = last_segment.split()
-    base_cmd = ""
-    for w in words:
-        if "=" in w and not w.startswith("-"):
-            continue  # skip VAR=val
-        base_cmd = w.split("/")[-1]  # handle /usr/bin/grep -> grep
-        break
-
+    # Conditional chains can short-circuit before the final command. Accept
+    # command-specific non-error codes only when one simple executable
+    # unambiguously determines the shell status.
+    base_cmd = _simple_status_command(command)
     if not base_cmd:
         return None
 
@@ -2457,14 +2492,7 @@ def _is_expected_nonzero_exit(command: str, exit_code: int) -> bool:
     if exit_code != 1:
         return False
 
-    segments = re.split(r'\s*(?:\|\||&&|[|;])\s*', command)
-    last_segment = (segments[-1] if segments else command).strip()
-    base_cmd = ""
-    for word in last_segment.split():
-        if "=" in word and not word.startswith("-"):
-            continue
-        base_cmd = word.split("/")[-1]
-        break
+    base_cmd = _simple_status_command(command)
 
     return base_cmd in {
         "grep", "egrep", "fgrep", "rg", "ag", "ack",
