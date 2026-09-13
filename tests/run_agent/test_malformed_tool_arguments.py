@@ -38,11 +38,11 @@ def _make_agent() -> AIAgent:
     return agent
 
 
-def _tool_call(call_id: str, arguments: str):
+def _tool_call(call_id: str, arguments, *, name: str = "web_search"):
     return SimpleNamespace(
         id=call_id,
         type="function",
-        function=SimpleNamespace(name="web_search", arguments=arguments),
+        function=SimpleNamespace(name=name, arguments=arguments),
     )
 
 
@@ -95,3 +95,34 @@ def test_malformed_arguments_are_rejected_without_blocking_valid_sibling(
     assert '"error": "Invalid tool arguments"' in messages[0]["content"]
     assert "JSON object" in messages[0]["content"]
     assert json.loads(messages[1]["content"]) == {"ok": "valid"}
+
+
+@pytest.mark.parametrize("dispatch_mode", ["sequential", "concurrent"])
+@pytest.mark.parametrize("bad_arguments", ["not-json", '"scalar"', "[]", None])
+def test_malformed_required_call_records_failure_in_both_executor_paths(
+    dispatch_mode: str,
+    bad_arguments,
+):
+    from tools.required_dependency_runtime import activate, reset
+
+    agent = _make_agent()
+    assistant_message = SimpleNamespace(
+        content="",
+        tool_calls=[_tool_call("call-bad", bad_arguments, name="terminal")],
+    )
+    messages = []
+    token, state = activate(["terminal"])
+    try:
+        execute = getattr(agent, f"_execute_tool_calls_{dispatch_mode}")
+        execute(assistant_message, messages, "task-1")
+        summary = state.finalize()
+    finally:
+        reset(token)
+
+    assert len(messages) == 1
+    assert "tool was not executed" in messages[0]["content"].lower()
+    assert summary["successful"] == []
+    assert summary["missing"] == []
+    assert summary["failed"] == [
+        {"tool": "terminal", "reasons": ["invalid_arguments"]}
+    ]

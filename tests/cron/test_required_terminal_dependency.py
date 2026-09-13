@@ -238,6 +238,27 @@ def test_short_circuited_grep_is_a_real_terminal_failure(workflow):
     assert summary["failed"] == [{"tool": "terminal", "reasons": ["nonzero_exit"]}]
 
 
+def test_failed_redirection_is_a_real_terminal_failure(workflow):
+    from tools.required_dependency_runtime import activate, reset
+
+    missing = workflow / "missing-directory" / "output"
+    command = f"grep absent /dev/null > {shlex.quote(str(missing))}"
+    token, state = activate(["terminal"])
+    try:
+        result = json.loads(_handle_terminal({
+            "command": command,
+            "workdir": str(workflow),
+        }))
+        summary = state.finalize()
+    finally:
+        reset(token)
+
+    assert result["exit_code"] == 1
+    assert "exit_code_meaning" not in result
+    assert summary["successful"] == []
+    assert summary["failed"] == [{"tool": "terminal", "reasons": ["nonzero_exit"]}]
+
+
 def test_signal_note_does_not_turn_terminal_failure_into_success(monkeypatch):
     from tools.required_dependency_runtime import activate, reset
     import tools.terminal_tool as terminal_module
@@ -430,6 +451,37 @@ def test_executor_plugin_block_overrides_completed_workflow(monkeypatch, workflo
     assert marked[0][3]["dependency_outcome"]["failed"] == [
         {"tool": "terminal", "reasons": ["executor_blocked"]}
     ]
+
+
+def test_invalid_arguments_override_completed_workflow(monkeypatch, workflow):
+    import agent.tool_executor as tool_executor
+
+    agent = SimpleNamespace(execution_context=None)
+
+    def run_job(_job, **_kwargs):
+        args, malformed, admission = tool_executor._parse_tool_arguments(
+            "not-json",
+            function_name="terminal",
+            agent=agent,
+        )
+        assert args == {}
+        assert malformed is not None
+        assert admission is None
+        return True, "raw output", "[SILENT]\n[WORKFLOW_STATUS:completed]", None
+
+    marked, delivered = _run(monkeypatch, workflow, run_job)
+
+    error = (
+        "Required tool dependency degraded: unsuccessful: terminal "
+        "(invalid_arguments)"
+    )
+    assert delivered == [f"⚠️ Cron 'Required terminal job' failed: {error}"]
+    assert marked[0][1:3] == (False, error)
+    assert marked[0][3]["workflow_status"] == "failed"
+    assert marked[0][3]["dependency_outcome"]["failed"] == [
+        {"tool": "terminal", "reasons": ["invalid_arguments"]}
+    ]
+    assert latest_execution("required-terminal-job")["status"] == "failed"
 
 
 @pytest.mark.parametrize(

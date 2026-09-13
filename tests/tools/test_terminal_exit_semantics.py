@@ -87,6 +87,8 @@ class TestInterpretExitCode:
             "false || grep x file",
             "printf x | grep y",
             "true; grep x file",
+            "grep x file > /missing/out",
+            "grep x file < /missing/in",
             "grep `false` file",
             "grep $(false) file",
         ],
@@ -100,6 +102,8 @@ class TestInterpretExitCode:
         [
             "grep 'a|b;c' file",
             r"grep a\|b file",
+            "grep 'a>b' file",
+            r"grep a\>b file",
             "grep '$(' file",
             'grep "a;b" file',
         ],

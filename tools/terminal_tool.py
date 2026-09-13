@@ -2395,7 +2395,7 @@ def _has_active_shell_composition(command: str) -> bool:
             continue
         if char == "`" or (char == "$" and command[index : index + 2] == "$("):
             return True
-        if quote is None and char in "|;&\n\r":
+        if quote is None and char in "|;&<>\n\r":
             return True
     return False
 

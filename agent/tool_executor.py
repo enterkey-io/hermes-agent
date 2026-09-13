@@ -154,12 +154,27 @@ def _parse_tool_arguments(
     """Parse model-emitted arguments without repairing or coercing them."""
     from tools.registry import registry
 
-    return registry.parse_inbound_json_arguments(
+    parsed = registry.parse_inbound_json_arguments(
         function_name,
         raw_arguments,
         execution_context=getattr(agent, "execution_context", None),
         execution_owner=agent,
     )
+    if parsed[1] is not None:
+        try:
+            from tools.required_dependency_runtime import mark_rejection
+
+            # Malformed arguments may contain private or non-serializable
+            # values. The dependency result needs only the attempted tool and
+            # bounded failure class, so use an inert invocation identity.
+            mark_rejection(function_name, {}, "invalid_arguments")
+        except Exception:
+            logger.debug(
+                "Could not record required dependency argument rejection for %s",
+                function_name,
+                exc_info=True,
+            )
+    return parsed
 
 
 def _resolve_concurrent_tool_timeout() -> float | None:
