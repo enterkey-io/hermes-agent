@@ -114,6 +114,12 @@ def private_selected_envelope(tmp_path: Path) -> Path:
     return path
 
 
+def test_owner_check_tolerates_platform_without_getuid(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    metadata = tmp_path.stat()
+    monkeypatch.delattr(gate.os, "getuid")
+    assert gate._owned_by_current_user(metadata)
+
+
 def test_valid_zero_action_draft_renders_only_complete_source_segments() -> None:
     validated = gate.validate(transcript(), draft(), RECORDING)
     summary = gate.render_summary(validated)

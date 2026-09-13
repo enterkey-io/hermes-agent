@@ -143,6 +143,11 @@ def _integer(value: Any, label: str, *, minimum: int = 0) -> int:
     return value
 
 
+def _owned_by_current_user(metadata: os.stat_result) -> bool:
+    getuid = getattr(os, "getuid", None)
+    return getuid is None or metadata.st_uid == getuid()
+
+
 def _read_private(path: Path, label: str) -> bytes:
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -151,7 +156,7 @@ def _read_private(path: Path, label: str) -> bytes:
             if (
                 not stat.S_ISREG(metadata.st_mode)
                 or stat.S_IMODE(metadata.st_mode) != 0o600
-                or metadata.st_uid != os.getuid()
+                or not _owned_by_current_user(metadata)
             ):
                 raise GroundingError(f"{label} must be an owner-only regular file")
             return handle.read()
@@ -586,7 +591,7 @@ def _validate_cli_paths(args: argparse.Namespace) -> None:
     if work.parent != root:
         raise GroundingError("artifacts must be in one direct Plaud processing work directory")
     metadata = work.stat(follow_symlinks=False)
-    if not stat.S_ISDIR(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o700 or metadata.st_uid != os.getuid():
+    if not stat.S_ISDIR(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o700 or not _owned_by_current_user(metadata):
         raise GroundingError("Plaud processing work directory must be owner-only")
     for attribute, name in expected.items():
         path = getattr(args, attribute)
