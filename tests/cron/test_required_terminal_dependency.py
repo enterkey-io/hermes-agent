@@ -160,6 +160,97 @@ def test_real_terminal_success_preserves_completed_workflow(monkeypatch, workflo
     assert latest_execution("required-terminal-job")["status"] == "completed"
 
 
+def test_execute_code_call_limit_overrides_completed_workflow(
+    monkeypatch,
+    workflow,
+):
+    from tools import code_execution_tool
+
+    monkeypatch.setattr(
+        code_execution_tool,
+        "_load_config",
+        lambda: {"timeout": 30, "max_tool_calls": 0},
+    )
+
+    def run_job(_job, **_kwargs):
+        result = json.loads(
+            code_execution_tool.execute_code(
+                "from hermes_tools import terminal\n"
+                "terminal('true')\n"
+                "print('continued after ignored nested error')\n",
+                task_id="required-terminal-execute-code",
+                enabled_tools=["terminal"],
+            )
+        )
+        assert result["status"] == "success"
+        assert result["exit_code"] == 0
+        assert "continued after ignored nested error" in result["output"]
+        return True, "raw output", "[SILENT]\n[WORKFLOW_STATUS:completed]", None
+
+    marked, delivered = _run(monkeypatch, workflow, run_job)
+
+    error = (
+        "Required tool dependency degraded: unsuccessful: terminal "
+        "(execute_code_tool_limit)"
+    )
+    assert delivered == [f"⚠️ Cron 'Required terminal job' failed: {error}"]
+    assert marked[0][1:3] == (False, error)
+    assert marked[0][3]["workflow_status"] == "failed"
+    assert marked[0][3]["dependency_outcome"]["failed"] == [
+        {"tool": "terminal", "reasons": ["execute_code_tool_limit"]}
+    ]
+    assert latest_execution("required-terminal-job")["status"] == "failed"
+
+
+def test_execute_code_plugin_block_overrides_completed_workflow(
+    monkeypatch,
+    workflow,
+):
+    from tools import code_execution_tool
+
+    def block_terminal(hook_name, **_kwargs):
+        if hook_name == "pre_tool_call":
+            return [{"action": "block", "message": "blocked by nested policy"}]
+        return []
+
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", block_terminal)
+    monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda _name: False)
+    monkeypatch.setattr(
+        code_execution_tool,
+        "_load_config",
+        lambda: {"timeout": 30, "max_tool_calls": 5},
+    )
+
+    def run_job(_job, **_kwargs):
+        result = json.loads(
+            code_execution_tool.execute_code(
+                "from hermes_tools import terminal\n"
+                "terminal('true')\n"
+                "print('continued after ignored plugin block')\n",
+                task_id="required-terminal-plugin-block",
+                enabled_tools=["terminal"],
+            )
+        )
+        assert result["status"] == "success"
+        assert result["exit_code"] == 0
+        assert "continued after ignored plugin block" in result["output"]
+        return True, "raw output", "[SILENT]\n[WORKFLOW_STATUS:completed]", None
+
+    marked, delivered = _run(monkeypatch, workflow, run_job)
+
+    error = (
+        "Required tool dependency degraded: unsuccessful: terminal "
+        "(executor_blocked)"
+    )
+    assert delivered == [f"⚠️ Cron 'Required terminal job' failed: {error}"]
+    assert marked[0][1:3] == (False, error)
+    assert marked[0][3]["workflow_status"] == "failed"
+    assert marked[0][3]["dependency_outcome"]["failed"] == [
+        {"tool": "terminal", "reasons": ["executor_blocked"]}
+    ]
+    assert latest_execution("required-terminal-job")["status"] == "failed"
+
+
 def test_ordinary_job_retains_recoverable_terminal_behavior(monkeypatch, workflow):
     def run_job(_job, **_kwargs):
         result = json.loads(

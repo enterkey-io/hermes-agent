@@ -186,6 +186,44 @@ class TestHandleFunctionCall:
         assert pre_call[1]["middleware_trace"] == expected_trace
         assert post_call[1]["middleware_trace"] == expected_trace
 
+    def test_execution_middleware_short_circuit_records_required_rejection(
+        self,
+        monkeypatch,
+    ):
+        from tools.required_dependency_runtime import activate, reset
+
+        def short_circuit(**_kwargs):
+            return json.dumps({"error": "blocked before dispatch"})
+
+        manager = type(
+            "Manager",
+            (),
+            {"_middleware": {"tool_execution": [short_circuit]}},
+        )()
+        monkeypatch.setattr("hermes_cli.plugins.get_plugin_manager", lambda: manager)
+        monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_k: [])
+        monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda _name: False)
+        monkeypatch.setattr(
+            "model_tools.registry.dispatch",
+            lambda *_a, **_k: (_ for _ in ()).throw(
+                AssertionError("short-circuited call reached registry")
+            ),
+        )
+
+        token, state = activate(["terminal"])
+        try:
+            result = json.loads(
+                handle_function_call("terminal", {"command": "true"})
+            )
+            dependency = state.finalize()
+        finally:
+            reset(token)
+
+        assert result == {"error": "blocked before dispatch"}
+        assert dependency["failed"] == [
+            {"tool": "terminal", "reasons": ["executor_short_circuit"]}
+        ]
+
     def test_registry_exception_emits_terminal_tool_hook(self, monkeypatch):
         from hermes_cli import lifecycle
 
@@ -280,6 +318,8 @@ class TestPreToolCallBlocking:
     """Verify that pre_tool_call hooks can block tool execution."""
 
     def test_blocked_tool_returns_error_and_skips_dispatch(self, monkeypatch):
+        from tools.required_dependency_runtime import activate, reset
+
         hook_calls = []
 
         def fake_invoke_hook(hook_name, **kwargs):
@@ -300,9 +340,24 @@ class TestPreToolCallBlocking:
         monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda name: True)
         monkeypatch.setattr("model_tools.registry.dispatch", fake_dispatch)
 
-        result = json.loads(handle_function_call("read_file", {"path": "test.txt"}, task_id="t1"))
+        token, state = activate(["read_file"])
+        try:
+            result = json.loads(
+                handle_function_call(
+                    "read_file",
+                    {"path": "test.txt"},
+                    task_id="t1",
+                )
+            )
+            dependency = state.finalize()
+        finally:
+            reset(token)
+
         assert result == {"error": "Blocked by policy"}
         assert not dispatch_called
+        assert dependency["failed"] == [
+            {"tool": "read_file", "reasons": ["executor_blocked"]}
+        ]
         post_call = next(call for call in hook_calls if call[0] == "post_tool_call")
         assert post_call[1]["status"] == "blocked"
         assert post_call[1]["error_type"] == "plugin_block"

@@ -649,6 +649,54 @@ def _call(tool_name, args):
 _TERMINAL_BLOCKED_PARAMS = {"background", "pty", "notify_on_complete", "watch_patterns"}
 
 
+def _record_sandbox_tool_rejection(
+    tool_name: str,
+    tool_args: Any,
+    reason: str,
+) -> None:
+    """Best-effort required-dependency attribution for a sandbox proxy."""
+    try:
+        from tools.required_dependency_runtime import mark_rejection
+
+        mark_rejection(tool_name, tool_args, reason)
+    except Exception:
+        logger.debug(
+            "Could not record execute_code rejection for %s",
+            tool_name,
+            exc_info=True,
+        )
+
+
+def _sandbox_tool_preflight_error(
+    tool_name: str,
+    tool_args: Any,
+    *,
+    allowed_tools: frozenset,
+    calls_used: int,
+    max_tool_calls: int,
+) -> str | None:
+    """Reject an authenticated sandbox call before dispatch, with attribution."""
+    reason = None
+    if tool_name not in allowed_tools:
+        available = ", ".join(sorted(allowed_tools))
+        result = tool_error(
+            f"Tool '{tool_name}' is not available in execute_code. "
+            f"Available: {available}"
+        )
+        reason = "execute_code_tool_unavailable"
+    elif calls_used >= max_tool_calls:
+        result = tool_error(
+            f"Tool call limit reached ({max_tool_calls}). "
+            "No more tool calls allowed in this execution."
+        )
+        reason = "execute_code_tool_limit"
+    else:
+        return None
+
+    _record_sandbox_tool_rejection(tool_name, tool_args, reason)
+    return result
+
+
 def _rpc_server_loop(
     server_sock: socket.socket,
     task_id: str,
@@ -716,22 +764,14 @@ def _rpc_server_loop(
                 tool_name = request.get("tool", "")
                 tool_args = request.get("args", {})
 
-                # Enforce the allow-list
-                if tool_name not in allowed_tools:
-                    available = ", ".join(sorted(allowed_tools))
-                    resp = tool_error(
-                        f"Tool '{tool_name}' is not available in execute_code. "
-                        f"Available: {available}"
-                    )
-                    conn.sendall((resp + "\n").encode())
-                    continue
-
-                # Enforce tool call limit
-                if tool_call_counter[0] >= max_tool_calls:
-                    resp = tool_error(
-                        f"Tool call limit reached ({max_tool_calls}). "
-                        "No more tool calls allowed in this execution."
-                    )
+                resp = _sandbox_tool_preflight_error(
+                    tool_name,
+                    tool_args,
+                    allowed_tools=allowed_tools,
+                    calls_used=tool_call_counter[0],
+                    max_tool_calls=max_tool_calls,
+                )
+                if resp is not None:
                     conn.sendall((resp + "\n").encode())
                     continue
 
@@ -750,6 +790,11 @@ def _rpc_server_loop(
                         )
                 except Exception as exc:
                     logger.error("Tool call failed in sandbox: %s", exc, exc_info=True)
+                    _record_sandbox_tool_rejection(
+                        tool_name,
+                        tool_args,
+                        "execute_code_dispatch_error",
+                    )
                     result = tool_error(str(exc))
 
                 tool_call_counter[0] += 1
@@ -998,20 +1043,14 @@ def _rpc_poll_loop(
                 res_file = f"{rpc_dir}/res_{seq_str}"
                 quoted_res_file = shlex.quote(res_file)
 
-                # Enforce allow-list
-                if tool_name not in allowed_tools:
-                    available = ", ".join(sorted(allowed_tools))
-                    tool_result = tool_error(
-                        f"Tool '{tool_name}' is not available in execute_code. "
-                        f"Available: {available}"
-                    )
-                # Enforce tool call limit
-                elif tool_call_counter[0] >= max_tool_calls:
-                    tool_result = tool_error(
-                        f"Tool call limit reached ({max_tool_calls}). "
-                        "No more tool calls allowed in this execution."
-                    )
-                else:
+                tool_result = _sandbox_tool_preflight_error(
+                    tool_name,
+                    tool_args,
+                    allowed_tools=allowed_tools,
+                    calls_used=tool_call_counter[0],
+                    max_tool_calls=max_tool_calls,
+                )
+                if tool_result is None:
                     # Strip forbidden terminal parameters
                     if tool_name == "terminal" and isinstance(tool_args, dict):
                         for param in _TERMINAL_BLOCKED_PARAMS:
@@ -1026,6 +1065,11 @@ def _rpc_poll_loop(
                     except Exception as exc:
                         logger.error("Tool call failed in remote sandbox: %s",
                                      exc, exc_info=True)
+                        _record_sandbox_tool_rejection(
+                            tool_name,
+                            tool_args,
+                            "execute_code_dispatch_error",
+                        )
                         tool_result = tool_error(str(exc))
 
                     tool_call_counter[0] += 1
