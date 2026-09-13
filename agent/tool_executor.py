@@ -1019,6 +1019,11 @@ def _run_sequential_tool_execution_middleware(
                 error_message="Tool execution cancelled by user interrupt",
                 middleware_trace=list(trace),
             )
+            _record_required_dependency_rejection(
+                function_name,
+                function_args,
+                "executor_cancelled",
+            )
             return _ManagedToolResult(
                 result=_ToolCancelledResult(message),
                 args=function_args,
@@ -1055,6 +1060,11 @@ def _run_sequential_tool_execution_middleware(
             error_type="tool_timeout",
             error_message=message,
             middleware_trace=list(trace),
+        )
+        _record_required_dependency_rejection(
+            function_name,
+            function_args,
+            "executor_timeout",
         )
         return _ManagedToolResult(
             result=_ToolTimeoutResult(message),
