@@ -270,6 +270,61 @@ def _retirement_request(proposed_runbook) -> tuple[ActivationRequest, str]:
     )
 
 
+def _same_status_update_request(
+    proposed_runbook, status: str, *, current_status: str | None = None
+) -> tuple[ActivationRequest, str]:
+    existing_status = current_status or status
+    current = _markdown(title=f"{existing_status.title()} Daily Brief").replace(
+        "status: active", f"status: {existing_status}"
+    )
+    active = runbook_store.save_runbook_markdown(
+        current, approved_by="elliott"
+    )
+    candidate = current.replace(
+        "purpose: Prepare a concise daily operating brief.",
+        "purpose: Prepare a reviewed concise daily operating brief.",
+    ).replace(
+        f"status: {existing_status}", f"status: {status}", 1
+    )
+    proposal = runbook_store.propose_edit(
+        "daily-brief",
+        candidate,
+        proposed_by="sloane",
+        summary=f"Reviewed {status} revision",
+    )
+    canonical_root = Path(active.path).parents[2]
+    data = {
+        "slug": "daily-brief",
+        "proposal_id": proposal.stem,
+        "proposal_sha256": _sha256(candidate),
+        "expected_active_revision": active.revision,
+        "operator": "alina",
+        "canonical_root": str(canonical_root.resolve()),
+        "registry_path": str(canonical_root / "workflow_registry.db"),
+    }
+    evidence = {
+        "scope": "runbook_proposal_activation",
+        "review_id": f"daily-brief-{status}-review",
+        "reviewed_by": "reese",
+        "reviewed_at": "2026-08-16T22:30:00Z",
+        "review_reference": "kanban:t_3c6ac575",
+        "change_class": "routine_internal_repair",
+        **data,
+    }
+    _sign_internal_review(evidence, proposed_runbook["reviewer_private_key"])
+    request_data = {
+        key: data[key]
+        for key in (
+            "slug",
+            "proposal_id",
+            "proposal_sha256",
+            "expected_active_revision",
+            "operator",
+        )
+    }
+    return ActivationRequest(**request_data, approval_evidence=evidence), candidate
+
+
 def _activation_events() -> list[dict]:
     with registry.connect_closing() as conn:
         return [
@@ -406,16 +461,51 @@ def test_internal_reviewer_attestation_retires_existing_canonical_runbook(propos
         assert registry.get_definition(conn, "wf_daily_brief").status == "retired"
 
 
+@pytest.mark.parametrize("status", ["paused", "degraded"])
+def test_internal_reviewer_attestation_updates_existing_non_active_runbook(
+    proposed_runbook, status
+):
+    request, candidate = _same_status_update_request(proposed_runbook, status)
+
+    result = activate_reviewed_proposal(request)
+
+    assert result.replayed is False
+    assert result.runbook.status == status
+    assert result.runbook.source_hash == _sha256(candidate)
+    with registry.connect_closing() as conn:
+        assert registry.get_definition(conn, "wf_daily_brief").status == status
+
+
+@pytest.mark.parametrize("status", ["paused", "degraded"])
+def test_internal_reviewer_attestation_rejects_new_runtime_status(
+    proposed_runbook, status
+):
+    request, _ = _same_status_update_request(
+        proposed_runbook, status, current_status="active"
+    )
+
+    with pytest.raises(PermissionError, match="must preserve status"):
+        activate_reviewed_proposal(request)
+
+
 def test_create_activation_rejects_reviewed_retirement_candidate(proposed_runbook):
     request, _ = _create_request(proposed_runbook, status="retired")
 
-    with pytest.raises(PermissionError, match="requires an existing canonical runbook"):
+    with pytest.raises(PermissionError, match="creation requires status active"):
+        activate_reviewed_proposal(request)
+
+
+@pytest.mark.parametrize("status", ["paused", "degraded"])
+def test_create_activation_rejects_non_active_candidate(proposed_runbook, status):
+    request, _ = _create_request(proposed_runbook, status=status)
+
+    with pytest.raises(PermissionError, match="creation requires status active"):
         activate_reviewed_proposal(request)
 
 
 def test_create_activation_rejects_draft_candidate_and_non_absent_precondition(proposed_runbook):
     draft_request, _ = _create_request(proposed_runbook, status="draft")
-    with pytest.raises(PermissionError, match="status active"):
+    with pytest.raises(PermissionError, match="status draft"):
         activate_reviewed_proposal(draft_request)
 
     stale_request, _ = _create_request(
