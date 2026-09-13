@@ -7002,6 +7002,14 @@ def _run_one_job_body(
                 )
             dependency_error = "Required tool dependency degraded: " + "; ".join(parts)
 
+        # Required dependency health is host-observed control data. A model's
+        # useful partial response or completed marker cannot convert a missing,
+        # pending, or failed required tool into a successful Cron outcome.
+        dependency_failure = success and dependency_degraded
+        if dependency_failure:
+            success = False
+            error = dependency_error
+
         workforce_signal_failure = None
         if _required_signal_state is not None and (
             _required_signal_state.failure
@@ -7081,14 +7089,17 @@ def _run_one_job_body(
             workflow_status, final_response = _extract_workflow_status(
                 final_response
             )
+            if dependency_failure:
+                workflow_status = "failed"
             if workflow_status == "failed" or workforce_signal_failure:
                 success = False
-                error = (
-                    "Workforce factual record failed: "
-                    f"{workforce_signal_failure}"
-                    if workforce_signal_failure
-                    else "Workflow reported failed outcome."
-                )
+                if workforce_signal_failure:
+                    error = (
+                        "Workforce factual record failed: "
+                        f"{workforce_signal_failure}"
+                    )
+                elif not dependency_failure:
+                    error = "Workflow reported failed outcome."
                 workflow_status = "failed"
         side_effect_ownership_lost = False
         try:
@@ -7129,22 +7140,20 @@ def _run_one_job_body(
                 with _side_effect_fence() as owns_intake:
                     if not owns_intake:
                         raise _FireClaimLostDuringSideEffect
-                    if not success or dependency_degraded:
+                    if not success:
                         from cron.operational_failures import append_profile_failure
 
                         try:
                             operational_failure_event = append_profile_failure(
                                 _get_hermes_home(), job,
-                                error if not success else dependency_error,
+                                error,
                                 execution_id=execution_id,
                                 failure_type=(
-                                    "execution"
-                                    if not success
-                                    else "required_tool_dependency"
+                                    "required_tool_dependency"
+                                    if dependency_failure
+                                    else "execution"
                                 ),
-                                dependency_outcome=(
-                                    dependency_outcome if success else None
-                                ),
+                                dependency_outcome=dependency_outcome,
                             )
                         except Exception:
                             logger.error(

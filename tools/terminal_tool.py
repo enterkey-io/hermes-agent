@@ -2447,6 +2447,31 @@ def _interpret_exit_code(command: str, exit_code: int) -> str | None:
     return None
 
 
+def _is_expected_nonzero_exit(command: str, exit_code: int) -> bool:
+    """Return whether a nonzero code is an explicit non-error result.
+
+    ``exit_code_meaning`` is broader than this: it also explains signals,
+    connectivity failures, and other genuine errors. Required Cron dependency
+    health must accept only commands whose documented result is non-erroneous.
+    """
+    if exit_code != 1:
+        return False
+
+    segments = re.split(r'\s*(?:\|\||&&|[|;])\s*', command)
+    last_segment = (segments[-1] if segments else command).strip()
+    base_cmd = ""
+    for word in last_segment.split():
+        if "=" in word and not word.startswith("-"):
+            continue
+        base_cmd = word.split("/")[-1]
+        break
+
+    return base_cmd in {
+        "grep", "egrep", "fgrep", "rg", "ag", "ack",
+        "diff", "colordiff", "test", "[",
+    }
+
+
 def _command_requires_pipe_stdin(command: str) -> bool:
     """Return True when PTY mode would break stdin-driven commands.
 
@@ -3896,28 +3921,74 @@ TERMINAL_SCHEMA = {
 
 
 def _handle_terminal(args, **kw):
+    from tools.required_dependency_runtime import (
+        mark_failure,
+        mark_pending,
+        mark_success,
+    )
+
+    attempt = mark_pending("terminal", args)
     # Mirror of execute_code's misplaced-argument recovery: models sometimes
     # send execute_code's ``code`` argument here. Without this, the call
     # falls through to command=None and fails with "Invalid command:
     # expected string, got NoneType" — naming neither the stray argument
     # nor the right tool.
     if "command" not in args and "code" in args:
-        return tool_error(
+        result = tool_error(
             "terminal received a 'code' parameter, but it requires a shell "
             "command in 'command'. Use execute_code(code=...) for Python; "
             "for shell, retry as terminal(command=...)."
         )
-    return terminal_tool(
-        command=args.get("command"),
-        background=args.get("background", False),
-        timeout=args.get("timeout"),
-        task_id=kw.get("task_id"),
-        session_id=kw.get("session_id"),
-        workdir=args.get("workdir"),
-        pty=args.get("pty", False),
-        notify_on_complete=args.get("notify_on_complete", False),
-        watch_patterns=args.get("watch_patterns"),
+    else:
+        result = terminal_tool(
+            command=args.get("command"),
+            background=args.get("background", False),
+            timeout=args.get("timeout"),
+            task_id=kw.get("task_id"),
+            session_id=kw.get("session_id"),
+            workdir=args.get("workdir"),
+            pty=args.get("pty", False),
+            notify_on_complete=args.get("notify_on_complete", False),
+            watch_patterns=args.get("watch_patterns"),
+        )
+
+    try:
+        payload = json.loads(result)
+    except (TypeError, json.JSONDecodeError):
+        mark_failure(attempt, "malformed_result", sticky=True)
+        return result
+
+    exit_code = payload.get("exit_code") if isinstance(payload, dict) else None
+    command = args.get("command") if isinstance(args.get("command"), str) else ""
+    expected_nonzero = (
+        isinstance(exit_code, int)
+        and _is_expected_nonzero_exit(command, exit_code)
     )
+    if not isinstance(payload, dict):
+        mark_failure(attempt, "malformed_result", sticky=True)
+    elif payload.get("status") == "degraded":
+        mark_failure(attempt, "backend_degraded", sticky=True)
+    elif payload.get("status") in {
+        "blocked", "disabled", "error", "pending_approval",
+    }:
+        mark_failure(attempt, "tool_error", sticky=True)
+    elif args.get("background"):
+        # Starting a detached process is not evidence that it completed. The
+        # process tool has a separate lifecycle that this dependency cannot
+        # authoritatively join to the eventual exit result.
+        mark_failure(attempt, "pending", sticky=True)
+    elif isinstance(exit_code, int) and exit_code != 0 and not expected_nonzero:
+        interrupted = (
+            exit_code == 130
+            and "[Command interrupted]" in str(payload.get("output") or "")
+        )
+        reason = "interrupted" if interrupted else "nonzero_exit"
+        mark_failure(attempt, reason, sticky=True)
+    elif payload.get("error"):
+        mark_failure(attempt, "tool_error", sticky=True)
+    else:
+        mark_success(attempt)
+    return result
 
 
 registry.register(

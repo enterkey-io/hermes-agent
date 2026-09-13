@@ -2012,11 +2012,15 @@ def _normalize_required_tool_dependencies(value: Any) -> Optional[List[str]]:
         raise ValueError("required_tool_dependencies must contain at most 32 names")
     if any(
         len(item) > 256
-        or re.fullmatch(r"mcp__[A-Za-z0-9_]+__[A-Za-z0-9_]+", item) is None
+        or (
+            item != "terminal"
+            and re.fullmatch(r"mcp__[A-Za-z0-9_]+__[A-Za-z0-9_]+", item) is None
+        )
         for item in normalized
     ):
         raise ValueError(
-            "required_tool_dependencies entries must be exact mcp__server__tool names"
+            "required_tool_dependencies entries must be 'terminal' or exact "
+            "mcp__server__tool names"
         )
     return normalized
 

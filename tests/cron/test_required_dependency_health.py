@@ -110,7 +110,7 @@ def _run_cron(monkeypatch, tmp_path, run_job, job=None):
 
 
 @pytest.mark.parametrize("mode", [None, "always", "when_invoked"])
-def test_caught_mcp_401_keeps_partial_artifact_and_records_dependency_failure(
+def test_caught_mcp_401_fails_closed_and_records_dependency_failure(
     monkeypatch, tmp_path, mcp_runtime, mode,
 ):
     handler = mcp_runtime("nirvana", _result("Unauthorized 401 raw-provider", error=True))
@@ -124,10 +124,12 @@ def test_caught_mcp_401_keeps_partial_artifact_and_records_dependency_failure(
         _job(required_tool_dependency_mode=mode),
     )
 
-    assert marked[0][1] is True
-    assert delivered and delivered[0].startswith("Useful partial daily note")
-    assert "repair intake was recorded" in delivered[0]
-    assert "owner acceptance is not yet verified here" in delivered[0]
+    assert marked[0][1] is False
+    assert marked[0][2] == (
+        "Required tool dependency degraded: unsuccessful: "
+        "mcp__nirvana__get_tasks (tool_error)"
+    )
+    assert delivered == []
     assert events[0]["failure_type"] == "required_tool_dependency"
     assert events[0]["dependency_outcome"]["failed"] == [
         {"tool": REQUIRED, "reasons": ["tool_error"]}
@@ -144,10 +146,10 @@ def test_missing_required_call_cannot_emit_false_recovery(
         lambda _job, **_kwargs: (True, "out", "Partial result", None),
     )
 
-    assert marked[0][1] is True
+    assert marked[0][1] is False
     assert events[0]["status"] == "failure"
     assert events[0]["dependency_outcome"]["missing"] == [REQUIRED]
-    assert "degraded" in delivered[0]
+    assert delivered == []
 
 
 @pytest.mark.parametrize("branch", ["preserve_nonempty_next_things", "same_day_noop"])
@@ -224,7 +226,7 @@ def test_silent_model_response_cannot_hide_missing_dependency(
         lambda _job, **_kwargs: (True, "out", "[SILENT]", None),
     )
 
-    assert marked[0][1] is True
+    assert marked[0][1] is False
     assert len(events) == 1
     assert delivered == []
 
@@ -284,8 +286,8 @@ def test_success_for_distinct_arguments_does_not_clear_failed_invocation(
 
     delivered, marked, events = _run_cron(monkeypatch, tmp_path, run_job)
 
-    assert marked[0][1] is True
-    assert "degraded" in delivered[0]
+    assert marked[0][1] is False
+    assert delivered == []
     assert events[0]["dependency_outcome"]["failed"] == [
         {"tool": REQUIRED, "reasons": ["tool_error"]}
     ]
@@ -337,8 +339,8 @@ def test_detached_pending_distinct_call_keeps_completed_artifact_degraded(
         monkeypatch, tmp_path, run_job, _job(required_tool_dependency_mode=mode),
     )
     try:
-        assert marked[0][1] is True
-        assert "degraded" in delivered[0]
+        assert marked[0][1] is False
+        assert delivered == []
         assert events[0]["dependency_outcome"]["failed"] == [
             {"tool": REQUIRED, "reasons": ["pending"]}
         ]
@@ -461,7 +463,7 @@ def test_transport_and_circuit_failures_are_authoritative_dependency_failures(
         assert reasons == [
             "circuit_open" if failure_mode == "circuit" else "transport_unavailable"
         ]
-        assert marked[0][1] is True
+        assert marked[0][1] is False
     finally:
         mcp_tool._server_error_counts.pop("nirvana", None)
         mcp_tool._server_breaker_opened_at.pop("nirvana", None)
@@ -521,7 +523,9 @@ def test_dependency_health_is_persisted_with_native_job_run_lock(
         assert scheduler.run_one_job(job) is True
         stored = jobs_mod.get_job(job["id"])
 
-    assert stored["last_status"] == "ok"
+    assert stored["last_status"] == (
+        "ok" if invoked or mode == "when_invoked" else "error"
+    )
     expected_status = (
         "healthy" if invoked else "not_observed" if mode == "when_invoked" else "degraded"
     )

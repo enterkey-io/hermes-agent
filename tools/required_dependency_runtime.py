@@ -13,6 +13,7 @@ from typing import Any, Iterable
 class RequiredDependencyState:
     required: tuple[str, ...]
     outcomes: dict[str, dict[str, dict[int, str]]] = field(default_factory=dict)
+    sticky_failures: dict[str, set[str]] = field(default_factory=dict)
     _lock: Lock = field(default_factory=Lock, repr=False)
     _finalized: dict[str, object] | None = field(default=None, repr=False)
     _generation: int = field(default=0, repr=False)
@@ -35,6 +36,8 @@ class RequiredDependencyState:
         invocation: str,
         generation: int,
         outcome: str,
+        *,
+        sticky: bool = False,
     ) -> None:
         with self._lock:
             if self._finalized is not None:
@@ -42,6 +45,8 @@ class RequiredDependencyState:
             attempts = self.outcomes.get(tool_name, {}).get(invocation, {})
             if generation in attempts:
                 attempts[generation] = outcome
+                if sticky and outcome != "success":
+                    self.sticky_failures.setdefault(tool_name, set()).add(outcome)
 
     def _summary_locked(self) -> dict[str, object]:
         successful = []
@@ -52,7 +57,7 @@ class RequiredDependencyState:
             if not by_argument:
                 missing.append(name)
                 continue
-            unresolved = set()
+            unresolved = set(self.sticky_failures.get(name, ()))
             for attempts in by_argument.values():
                 if "pending" in attempts.values():
                     unresolved.add("pending")
@@ -135,11 +140,17 @@ def mark_pending(tool_name: str, args: Any) -> InvocationAttempt | None:
     return InvocationAttempt(state, tool_name, invocation, generation)
 
 
-def mark_failure(attempt: InvocationAttempt | None, reason: str) -> None:
+def mark_failure(
+    attempt: InvocationAttempt | None,
+    reason: str,
+    *,
+    sticky: bool = False,
+) -> None:
     if attempt is not None:
         attempt.state.complete(
             attempt.tool_name,
             attempt.invocation,
             attempt.generation,
             str(reason or "tool_error")[:80],
+            sticky=sticky,
         )

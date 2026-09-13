@@ -885,9 +885,12 @@ class TestEnabledToolsets:
     def test_dependency_mode_operator_create_update_and_preservation(self, tmp_cron_dir, mode):
         job = create_job(
             prompt="conditional", schedule="every 1h",
-            required_tool_dependencies=["mcp__nirvana__get_tasks"],
+            required_tool_dependencies=["mcp__nirvana__get_tasks", "terminal"],
             required_tool_dependency_mode=mode,
         )
+        assert job["required_tool_dependencies"] == [
+            "mcp__nirvana__get_tasks", "terminal"
+        ]
         assert job["required_tool_dependency_mode"] == mode
         assert update_job(job["id"], {"name": "renamed"})["required_tool_dependency_mode"] == mode
         other = "when_invoked" if mode == "always" else "always"
