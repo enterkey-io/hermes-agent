@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Validate Plaud summary claims before any provider-facing workflow step.
+"""Render source-extractive Plaud summaries before provider-facing workflow steps.
 
-The model writes a structured draft whose claims cite exact transcript excerpts.
-This tool validates that draft and deterministically renders the summary and
-action candidates.  It intentionally has no provider, registry, or delivery
-surface.
+The model selects whole transcript segments and semantic sections in a strict
+draft. This tool owns all rendered prose, validates conservative decision and
+commitment signals, and has no provider, registry, or delivery surface.
 """
 from __future__ import annotations
 
@@ -14,7 +13,7 @@ import json
 import os
 import re
 import stat
-import sys
+import textwrap
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -31,7 +30,7 @@ ALLOWED_TYPES = {
 }
 ALLOWED_STATES = {"inbox", "next", "waiting", "scheduled", "someday", "later"}
 WORK_ROOT = Path("/home/elliott/.hermes/profiles/milena/cache/plaud-processing")
-CLAIM_SECTIONS = (
+SELECTOR_SECTIONS = (
     "highlights",
     "decisions",
     "open_questions",
@@ -43,7 +42,7 @@ TOP_LEVEL_KEYS = {
     "version",
     "recording_id",
     "classification",
-    "purpose",
+    "purpose_segment",
     "highlights",
     "chapters",
     "decisions",
@@ -53,26 +52,31 @@ TOP_LEVEL_KEYS = {
     "uncertainties",
     "transcript_quality",
 }
-STOPWORDS = {
-    "a", "about", "after", "again", "all", "also", "an", "and", "any", "are", "as", "at",
-    "be", "because", "been", "before", "being", "between", "both", "but", "by", "can", "could",
-    "did", "do", "does", "during", "each", "for", "from", "had", "has", "have", "he", "her",
-    "here", "him", "his", "how", "i", "if", "in", "into", "is", "it", "its", "just", "may",
-    "more", "most", "no", "not", "of", "on", "one", "only", "or", "other", "our", "out", "said",
-    "she", "so", "some", "than", "that", "the", "their", "them", "there", "they", "this", "those",
-    "through", "to", "up", "was", "we", "were", "what", "when", "where", "which", "while", "who",
-    "will", "with", "would", "you", "your",
-}
 COMMITMENT_RE = re.compile(
-    r"\b(?:i\s+will|i['\u2019]ll|i\s+am\s+going\s+to|i['\u2019]m\s+going\s+to|let\s+me|i\s+can)\b",
+    r"\b(?:i\s+will|i['\u2019]ll|i\s+am\s+going\s+to|i['\u2019]m\s+going\s+to)\b",
     re.IGNORECASE,
 )
-WEAK_COMMITMENT_RE = re.compile(
-    r"\b(?:maybe|might|perhaps|probably|possibly|if)\b(?:\W+\w+){0,5}\W+"
-    r"(?:i\s+will|i['\u2019]ll|i\s+am\s+going\s+to|i['\u2019]m\s+going\s+to|let\s+me|i\s+can)\b",
+NEGATED_COMMITMENT_RE = re.compile(
+    r"\b(?:i\s+will\s+(?:not|never)|i\s+won['\u2019]t|"
+    r"i\s+am\s+not\s+going\s+to|i['\u2019]m\s+not\s+going\s+to)\b",
     re.IGNORECASE,
 )
-WORD_RE = re.compile(r"[A-Za-z0-9]+(?:['\u2019][A-Za-z0-9]+)?")
+CONDITIONAL_OR_WEAK_RE = re.compile(
+    r"\b(?:if|maybe|might|perhaps|probably|possibly|could|would|try|hope|want)\b",
+    re.IGNORECASE,
+)
+DECISION_RE = re.compile(
+    r"\b(?:we\s+(?:decided|agreed)|the\s+decision\s+is|"
+    r"we(?:['\u2019]re|\s+are)\s+(?:going\s+with|keeping|maintaining)|"
+    r"we\s+will\s+(?:keep|use|maintain|move|proceed)|"
+    r"(?:stays?|remains?)\s+(?:in|on|with|unchanged)|maintaining\s+as)\b",
+    re.IGNORECASE,
+)
+UNDECIDED_RE = re.compile(
+    r"\b(?:not|haven['\u2019]t|hasn['\u2019]t|hadn['\u2019]t)\b(?:\W+\w+){0,3}\W+"
+    r"(?:decided|agreed|decision)|\b(?:no|without)\s+(?:final\s+)?decision\b",
+    re.IGNORECASE,
+)
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 
 
@@ -163,11 +167,7 @@ def _load_json(path: Path, label: str) -> tuple[Any, bytes]:
 
 
 def _normalize(value: str) -> str:
-    return " ".join(value.split()).casefold()
-
-
-def _tokens(value: str) -> set[str]:
-    return {token.casefold() for token in WORD_RE.findall(value) if token.casefold() not in STOPWORDS and len(token) > 1}
+    return " ".join(value.split())
 
 
 def _timestamp(milliseconds: int) -> str:
@@ -226,66 +226,62 @@ def _fallback_segments(transcript_bytes: bytes) -> tuple[Segment, ...]:
         text = transcript_bytes.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise GroundingError("fallback transcript is not UTF-8") from exc
-    blocks = [" ".join(block.split()) for block in re.split(r"\n\s*\n|(?<=\.)\s*\n", text) if block.strip()]
+    blocks = [_normalize(block) for block in re.split(r"\n\s*\n|(?<=\.)\s*\n", text) if block.strip()]
     if not blocks or any(len(block) > 10000 for block in blocks):
         raise GroundingError("fallback transcript has no bounded source blocks")
     return tuple(Segment(index, "Unknown", block, 0, 0, False) for index, block in enumerate(blocks, 1))
 
 
-def _evidence(raw: Any, segments: Sequence[Segment], label: str) -> tuple[tuple[Segment, str], ...]:
-    rows = _list(raw, f"{label}.evidence")
-    if not 1 <= len(rows) <= 8:
-        raise GroundingError(f"{label}.evidence must contain 1..8 excerpts")
-    result: list[tuple[Segment, str]] = []
-    seen: set[tuple[int, str]] = set()
-    for index, item in enumerate(rows):
-        item = _mapping(item, f"{label}.evidence[{index}]")
-        _require_exact_keys(item, {"segment", "quote"}, f"{label}.evidence[{index}]")
-        number = _integer(item.get("segment"), f"{label}.evidence[{index}].segment", minimum=1)
-        if number > len(segments):
-            raise GroundingError(f"{label}.evidence[{index}] references a missing segment")
-        quote = _text(item.get("quote"), f"{label}.evidence[{index}].quote", minimum=8, maximum=1200)
-        segment = segments[number - 1]
-        if _normalize(quote) not in _normalize(segment.content):
-            raise GroundingError(f"{label}.evidence[{index}] is not an exact excerpt of segment {number}")
-        key = number, _normalize(quote)
-        if key in seen:
-            raise GroundingError(f"{label}.evidence contains a duplicate excerpt")
-        seen.add(key)
-        result.append((segment, quote))
-    return tuple(result)
+def _load_segments(transcript_bytes: bytes, metadata: Any, recording_id: str) -> tuple[Segment, ...]:
+    schema, kind = _source_metadata(metadata, transcript_bytes, recording_id)
+    if kind == "fallback_transcript":
+        return _fallback_segments(transcript_bytes)
+    try:
+        transcript = json.loads(transcript_bytes)
+    except json.JSONDecodeError as exc:
+        raise GroundingError("official transcript is malformed") from exc
+    segments = _segments(transcript, recording_id)
+    if transcript["schema"] != schema:
+        raise GroundingError("official transcript schema differs from source metadata")
+    return segments
 
 
-def _validate_lexical_grounding(text: str, evidence: Sequence[tuple[Segment, str]], label: str) -> None:
-    claim_tokens = _tokens(text)
-    evidence_tokens = _tokens(" ".join(quote for _segment, quote in evidence))
-    overlap = claim_tokens & evidence_tokens
-    required = min(4, max(2, (len(claim_tokens) + 2) // 3))
-    if len(overlap) < required:
-        raise GroundingError(f"{label} is not lexically grounded in its cited excerpts")
-    numbers = {token for token in WORD_RE.findall(text) if token.isdigit()}
-    if not numbers.issubset({token for token in WORD_RE.findall(" ".join(q for _s, q in evidence)) if token.isdigit()}):
-        raise GroundingError(f"{label} adds a number absent from its cited excerpts")
+def _segment_number(value: Any, segments: Sequence[Segment], label: str) -> int:
+    number = _integer(value, label, minimum=1)
+    if number > len(segments):
+        raise GroundingError(f"{label} references a missing segment")
+    return number
 
 
-def _claim(raw: Any, segments: Sequence[Segment], label: str) -> tuple[Mapping[str, Any], tuple[tuple[Segment, str], ...]]:
-    raw = _mapping(raw, label)
-    _require_exact_keys(raw, {"text", "evidence"}, label)
-    text = _text(raw.get("text"), f"{label}.text", minimum=8, maximum=800)
-    evidence = _evidence(raw.get("evidence"), segments, label)
-    _validate_lexical_grounding(text, evidence, label)
-    return raw, evidence
+def _selector_list(
+    value: Any,
+    segments: Sequence[Segment],
+    label: str,
+    *,
+    minimum: int = 0,
+    maximum: int = 12,
+) -> list[int]:
+    rows = _list(value, label)
+    if not minimum <= len(rows) <= maximum:
+        raise GroundingError(f"{label} must contain {minimum}..{maximum} segment numbers")
+    result = [_segment_number(row, segments, f"{label}[{index}]") for index, row in enumerate(rows)]
+    if len(result) != len(set(result)):
+        raise GroundingError(f"{label} contains a duplicate segment")
+    return result
 
 
-def _validate_classification(raw: Any, segments: Sequence[Segment]) -> tuple[int, int]:
+def _validate_classification(raw: Any, segments: Sequence[Segment]) -> int:
     raw = _mapping(raw, "classification")
-    _require_exact_keys(raw, {"type", "confidence", "alternatives", "review_flag", "basis"}, "classification")
+    _require_exact_keys(raw, {"type", "confidence", "alternatives", "review_flag", "basis_segment"}, "classification")
     kind = _text(raw.get("type"), "classification.type", maximum=40)
     confidence = raw.get("confidence")
     if kind not in ALLOWED_TYPES or isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1:
         raise GroundingError("classification type or confidence is invalid")
     alternatives = _list(raw.get("alternatives"), "classification.alternatives")
+    if len(alternatives) > 3:
+        raise GroundingError("classification has too many alternatives")
     seen = {kind}
+    confidence_total = float(confidence)
     for index, item in enumerate(alternatives):
         item = _mapping(item, f"classification.alternatives[{index}]")
         _require_exact_keys(item, {"type", "confidence"}, f"classification.alternatives[{index}]")
@@ -294,52 +290,70 @@ def _validate_classification(raw: Any, segments: Sequence[Segment]) -> tuple[int
         if alt_kind not in ALLOWED_TYPES or alt_kind in seen or isinstance(alt_confidence, bool) or not isinstance(alt_confidence, (int, float)) or not 0 <= alt_confidence <= 1:
             raise GroundingError("classification alternative is invalid")
         seen.add(alt_kind)
+        confidence_total += float(alt_confidence)
+    if confidence_total > 1.000001:
+        raise GroundingError("classification confidence total exceeds 1")
     if not isinstance(raw.get("review_flag"), bool):
         raise GroundingError("classification.review_flag must be boolean")
-    _claim(raw.get("basis"), segments, "classification.basis")
-    return 1, len(raw["basis"]["evidence"])
+    return _segment_number(raw.get("basis_segment"), segments, "classification.basis_segment")
 
 
-def _validate_action(raw: Any, segments: Sequence[Segment], label: str) -> tuple[int, int]:
+def _validate_decision(segment: Segment, label: str) -> None:
+    content = _normalize(segment.content)
+    if not DECISION_RE.search(content) or UNDECIDED_RE.search(content):
+        raise GroundingError(f"{label} lacks an explicit, non-negated decision signal")
+
+
+def _validate_action(raw: Any, segments: Sequence[Segment], label: str) -> None:
     raw = _mapping(raw, label)
-    _require_exact_keys(raw, {"name", "state", "explicit_elliott_owned", "claim"}, label)
-    name = _text(raw.get("name"), f"{label}.name", minimum=3, maximum=240)
+    _require_exact_keys(raw, {"segment", "state", "explicit_elliott_owned"}, label)
     state = _text(raw.get("state"), f"{label}.state", maximum=20)
     if state not in ALLOWED_STATES or raw.get("explicit_elliott_owned") is not True:
         raise GroundingError(f"{label} state or ownership marker is invalid")
-    _raw_claim, evidence = _claim(raw.get("claim"), segments, f"{label}.claim")
-    owner_quotes = [quote for segment, quote in evidence if segment.speaker.casefold() == "elliott"]
-    if not owner_quotes:
+    number = _segment_number(raw.get("segment"), segments, f"{label}.segment")
+    segment = segments[number - 1]
+    content = _normalize(segment.content)
+    if segment.speaker.casefold() != "elliott":
         raise GroundingError(f"{label} has no Elliott-spoken evidence")
-    explicit = [quote for quote in owner_quotes if COMMITMENT_RE.search(quote) and not WEAK_COMMITMENT_RE.search(quote)]
-    if not explicit:
+    if (
+        not COMMITMENT_RE.search(content)
+        or NEGATED_COMMITMENT_RE.search(content)
+        or CONDITIONAL_OR_WEAK_RE.search(content)
+        or "?" in content
+    ):
         raise GroundingError(f"{label} has no unconditional first-person Elliott commitment")
-    _validate_lexical_grounding(name, [(segments[0], quote) for quote in explicit], f"{label}.name")
-    return 1, len(evidence)
 
 
 def _validate_draft(draft: Any, recording_id: str, segments: tuple[Segment, ...]) -> ValidatedDraft:
     draft = _mapping(draft, "draft")
     _require_exact_keys(draft, TOP_LEVEL_KEYS, "draft")
-    if draft.get("version") != 1 or draft.get("recording_id") != recording_id:
+    if draft.get("version") != 2 or draft.get("recording_id") != recording_id:
         raise GroundingError("draft version or recording_id is invalid")
 
-    claim_count, evidence_count = _validate_classification(draft.get("classification"), segments)
-    _claim(draft.get("purpose"), segments, "purpose")
-    claim_count += 1
-    evidence_count += len(draft["purpose"]["evidence"])
+    _validate_classification(draft.get("classification"), segments)
+    _segment_number(draft.get("purpose_segment"), segments, "purpose_segment")
+    claim_count = 2
 
-    highlights = _list(draft.get("highlights"), "highlights")
-    if not 3 <= len(highlights) <= 5:
-        raise GroundingError("highlights must contain 3..5 claims")
-    for section in CLAIM_SECTIONS:
-        rows = _list(draft.get(section), section)
-        if section in {"uncertainties", "transcript_quality"} and not rows:
-            raise GroundingError(f"{section} must contain at least one claim")
-        for index, item in enumerate(rows):
-            _claim(item, segments, f"{section}[{index}]")
-            claim_count += 1
-            evidence_count += len(item["evidence"])
+    selected: dict[str, list[int]] = {}
+    for section in SELECTOR_SECTIONS:
+        selected[section] = _selector_list(
+            draft.get(section),
+            segments,
+            section,
+            minimum=3 if section == "highlights" else 0,
+            maximum=5 if section == "highlights" else 12,
+        )
+        claim_count += len(selected[section])
+
+    selected_numbers = [number for section in SELECTOR_SECTIONS for number in selected[section]]
+    if len(selected_numbers) != len(set(selected_numbers)):
+        raise GroundingError("a source segment may appear in only one summary section")
+    selected_characters = sum(len(_normalize(segments[number - 1].content)) for number in selected_numbers)
+    if selected_characters > 5000:
+        raise GroundingError("selected summary source exceeds the 5000-character limit")
+
+    for index, number in enumerate(selected["decisions"]):
+        _validate_decision(segments[number - 1], f"decisions[{index}]")
 
     chapters = _list(draft.get("chapters"), "chapters")
     if not chapters:
@@ -347,22 +361,24 @@ def _validate_draft(draft: Any, recording_id: str, segments: tuple[Segment, ...]
     previous = 0
     for index, raw in enumerate(chapters):
         raw = _mapping(raw, f"chapters[{index}]")
-        _require_exact_keys(raw, {"title", "first_segment", "last_segment"}, f"chapters[{index}]")
-        title = _text(raw.get("title"), f"chapters[{index}].title", minimum=3, maximum=160)
-        first = _integer(raw.get("first_segment"), f"chapters[{index}].first_segment", minimum=1)
-        last = _integer(raw.get("last_segment"), f"chapters[{index}].last_segment", minimum=first)
-        if first <= previous or last > len(segments):
-            raise GroundingError(f"chapters[{index}] is overlapping, unordered, or out of range")
+        _require_exact_keys(raw, {"first_segment", "last_segment"}, f"chapters[{index}]")
+        first = _segment_number(raw.get("first_segment"), segments, f"chapters[{index}].first_segment")
+        last = _segment_number(raw.get("last_segment"), segments, f"chapters[{index}].last_segment")
+        if first <= previous or last < first:
+            raise GroundingError(f"chapters[{index}] is overlapping, unordered, or invalid")
         previous = last
-        span = " ".join(segment.content for segment in segments[first - 1:last])
-        _validate_lexical_grounding(title, [(segments[first - 1], span)], f"chapters[{index}].title")
 
     actions = _list(draft.get("actions"), "actions")
+    if len(actions) > 12:
+        raise GroundingError("actions must contain at most 12 entries")
+    action_segments: list[int] = []
     for index, action in enumerate(actions):
-        claims, excerpts = _validate_action(action, segments, f"actions[{index}]")
-        claim_count += claims
-        evidence_count += excerpts
-    return ValidatedDraft(draft, segments, claim_count, evidence_count)
+        _validate_action(action, segments, f"actions[{index}]")
+        action_segments.append(action["segment"])
+    if len(action_segments) != len(set(action_segments)):
+        raise GroundingError("actions contains a duplicate segment")
+    claim_count += len(actions)
+    return ValidatedDraft(draft, segments, claim_count, claim_count)
 
 
 def validate(transcript: Any, draft: Any, recording_id: str) -> ValidatedDraft:
@@ -371,47 +387,33 @@ def validate(transcript: Any, draft: Any, recording_id: str) -> ValidatedDraft:
     return _validate_draft(draft, recording_id, _segments(transcript, recording_id))
 
 
-def validate_source(
-    transcript_bytes: bytes,
-    metadata: Any,
-    draft: Any,
-    recording_id: str,
-) -> ValidatedDraft:
-    """Validate either collector-approved source representation."""
+def validate_source(transcript_bytes: bytes, metadata: Any, draft: Any, recording_id: str) -> ValidatedDraft:
+    """Validate either collector-approved source representation and its selector draft."""
     recording_id = _text(recording_id, "recording_id", minimum=8, maximum=160)
-    schema, kind = _source_metadata(metadata, transcript_bytes, recording_id)
-    if kind == "official_transcript":
-        try:
-            transcript = json.loads(transcript_bytes)
-        except json.JSONDecodeError as exc:
-            raise GroundingError("official transcript is malformed") from exc
-        segments = _segments(transcript, recording_id)
-        if transcript["schema"] != schema:
-            raise GroundingError("official transcript schema differs from source metadata")
-    else:
-        segments = _fallback_segments(transcript_bytes)
-    return _validate_draft(draft, recording_id, segments)
+    return _validate_draft(draft, recording_id, _load_segments(transcript_bytes, metadata, recording_id))
 
 
-def _citation(evidence: Iterable[tuple[Segment, str]]) -> str:
-    parts = []
-    for segment, _quote in evidence:
-        if segment.timed:
-            parts.append(f"{segment.speaker}, {_timestamp(segment.start_ms)}-{_timestamp(segment.end_ms)}, segment {segment.number}")
-        else:
-            parts.append(f"unattributed source block {segment.number}")
-    return "; ".join(parts)
+def _citation(segment: Segment) -> str:
+    if segment.timed:
+        return f"{segment.speaker}, {_timestamp(segment.start_ms)}-{_timestamp(segment.end_ms)}, segment {segment.number}"
+    return f"unattributed source block {segment.number}"
 
 
-def _render_claim(raw: Mapping[str, Any], validated: ValidatedDraft) -> str:
-    evidence = _evidence(raw["evidence"], validated.segments, "render")
-    return f"{raw['text']} ({_citation(evidence)})"
+def _render_segment(segment: Segment) -> str:
+    return f"{_normalize(segment.content)} ({_citation(segment)})"
+
+
+def _selected(validated: ValidatedDraft, section: str) -> Iterable[Segment]:
+    for number in validated.raw[section]:
+        yield validated.segments[number - 1]
 
 
 def render_summary(validated: ValidatedDraft) -> bytes:
     draft = validated.raw
     classification = draft["classification"]
     alternatives = ", ".join(f"`{row['type']}` ({row['confidence']:.2f})" for row in classification["alternatives"]) or "none"
+    basis = validated.segments[classification["basis_segment"] - 1]
+    purpose = validated.segments[draft["purpose_segment"] - 1]
     lines = [
         "**Classification**",
         "",
@@ -419,16 +421,20 @@ def render_summary(validated: ValidatedDraft) -> bytes:
         f"- Confidence: {classification['confidence']:.2f}",
         f"- Alternatives: {alternatives}",
         f"- Review flag: {'true' if classification['review_flag'] else 'false'}",
-        f"- Basis: {_render_claim(classification['basis'], validated)}",
+        f"- Source basis: {_render_segment(basis)}",
         "",
-        "**Purpose / Gist**",
+        "**Purpose / Gist Source Excerpt**",
         "",
-        _render_claim(draft["purpose"], validated),
+        (
+            f"See the classification source basis above (segment {purpose.number})."
+            if purpose.number == basis.number
+            else _render_segment(purpose)
+        ),
         "",
-        "**Highlights**",
+        "**Highlights (Source Excerpts)**",
         "",
     ]
-    lines.extend(f"- {_render_claim(row, validated)}" for row in draft["highlights"])
+    lines.extend(f"- {_render_segment(segment)}" for segment in _selected(validated, "highlights"))
     lines.extend(["", "**Topic Chapters**", ""])
     for chapter in draft["chapters"]:
         first = validated.segments[chapter["first_segment"] - 1]
@@ -436,42 +442,64 @@ def render_summary(validated: ValidatedDraft) -> bytes:
         if first.timed and last.timed:
             prefix = f"{_timestamp(first.start_ms)}-{_timestamp(last.end_ms)}"
         else:
-            prefix = f"source blocks {first.number}-{last.number}"
-        lines.append(f"- {prefix} - {chapter['title']} (segments {first.number}-{last.number})")
+            prefix = "unattributed source"
+        lines.append(f"- {prefix} - segments {first.number}-{last.number}")
     section_titles = {
-        "decisions": "Explicit Decisions",
-        "open_questions": "Open Questions / Blockers",
-        "risks": "Risks",
-        "uncertainties": "Uncertainty",
-        "transcript_quality": "Transcript Quality Notes",
+        "decisions": "Explicit Decision Excerpts",
+        "open_questions": "Open Question / Blocker Excerpts",
+        "risks": "Risk / Concern Excerpts",
+        "uncertainties": "Uncertainty Excerpts",
+        "transcript_quality": "Transcript Quality Excerpts",
     }
     for section, title in section_titles.items():
         lines.extend(["", f"**{title}**", ""])
-        rows = draft[section]
-        if rows:
-            lines.extend(f"- {_render_claim(row, validated)}" for row in rows)
-        else:
-            lines.append("- None explicitly stated in the transcript.")
-    lines.extend(["", "**Explicit Commitments / Actions**", ""])
+        rows = list(_selected(validated, section))
+        lines.extend(f"- {_render_segment(segment)}" for segment in rows)
+        if not rows:
+            lines.append("- None selected from the transcript.")
+    lines.extend(["", "**Explicit Elliott Commitments / Actions**", ""])
     if draft["actions"]:
-        lines.extend(f"- {_render_claim(row['claim'], validated)}" for row in draft["actions"])
+        for row in draft["actions"]:
+            lines.append(f"- {_render_segment(validated.segments[row['segment'] - 1])}")
     else:
         lines.append("- No explicit Elliott-owned commitment was identified in the transcript.")
     return ("\n".join(lines) + "\n").encode()
 
 
+def _action_name(segment: Segment) -> str:
+    prefix = "Plaud follow-up: "
+    content = _normalize(segment.content)
+    limit = 240 - len(prefix)
+    if len(content) > limit:
+        content = content[: limit - 3].rsplit(" ", 1)[0] + "..."
+    return prefix + content
+
+
 def render_grounded_actions(validated: ValidatedDraft) -> bytes:
     actions = []
     for row in validated.raw["actions"]:
-        evidence = _evidence(row["claim"]["evidence"], validated.segments, "action-render")
+        segment = validated.segments[row["segment"] - 1]
         actions.append({
-            "name": row["name"],
+            "name": _action_name(segment),
             "state": row["state"],
             "explicit_elliott_owned": True,
-            "claim": row["claim"]["text"],
-            "citation": _citation(evidence),
+            "claim": _normalize(segment.content),
+            "citation": _citation(segment),
         })
-    return _canonical({"version": 1, "recording_id": validated.raw["recording_id"], "actions": actions})
+    return _canonical({"version": 2, "recording_id": validated.raw["recording_id"], "actions": actions})
+
+
+def render_source_index(segments: Sequence[Segment]) -> bytes:
+    lines = ["Source-extractive Plaud grounding index", ""]
+    for segment in segments:
+        if segment.timed:
+            label = f"segment {segment.number} | {segment.speaker} | {_timestamp(segment.start_ms)}-{_timestamp(segment.end_ms)}"
+        else:
+            label = f"source block {segment.number} | Unknown"
+        lines.append(f"[{label}]")
+        lines.extend(textwrap.wrap(_normalize(segment.content), width=100, break_long_words=False, break_on_hyphens=False))
+        lines.append("")
+    return ("\n".join(lines) + "\n").encode()
 
 
 def _write_new(path: Path, payload: bytes) -> None:
@@ -500,16 +528,24 @@ def _validate_cli_paths(args: argparse.Namespace) -> None:
     expected = {
         "transcript_file": "raw-transcript",
         "source_metadata_file": "source-metadata.json",
-        "draft_file": "grounding-draft.json",
     }
-    if args.command == "render":
+    if args.command == "index-source":
+        expected["source_output"] = "grounding-source.txt"
+    elif args.command == "render":
         expected.update({
+            "source_index_file": "grounding-source.txt",
+            "draft_file": "grounding-draft.json",
             "summary_output": "summary.md",
             "actions_output": "grounded-actions.json",
             "receipt_output": "grounding-receipt.json",
         })
     else:
-        expected.update({"receipt_file": "grounding-receipt.json", "plan_output": "action-plan.json"})
+        expected.update({
+            "source_index_file": "grounding-source.txt",
+            "draft_file": "grounding-draft.json",
+            "receipt_file": "grounding-receipt.json",
+            "plan_output": "action-plan.json",
+        })
     work = args.transcript_file.parent.resolve(strict=True)
     root = WORK_ROOT.resolve(strict=True)
     if work.parent != root:
@@ -523,28 +559,52 @@ def _validate_cli_paths(args: argparse.Namespace) -> None:
             raise GroundingError(f"{attribute} must be exact work artifact {name}")
 
 
+def index_source(args: argparse.Namespace) -> dict[str, Any]:
+    transcript_bytes = _read_private(args.transcript_file, "transcript")
+    source_metadata, source_metadata_bytes = _load_json(args.source_metadata_file, "source metadata")
+    recording_id = _text(args.recording_id, "recording_id", minimum=8, maximum=160)
+    segments = _load_segments(transcript_bytes, source_metadata, recording_id)
+    index = render_source_index(segments)
+    _write_new(args.source_output, index)
+    return {
+        "schema": "plaud-grounding-source-index-v1",
+        "status": "indexed",
+        "recording_id": recording_id,
+        "transcript_sha256": _sha(transcript_bytes),
+        "source_metadata_sha256": _sha(source_metadata_bytes),
+        "source_index_sha256": _sha(index),
+        "segment_count": len(segments),
+        "provider_operations": 0,
+    }
+
+
 def render(args: argparse.Namespace) -> dict[str, Any]:
     transcript_bytes = _read_private(args.transcript_file, "transcript")
     source_metadata, source_metadata_bytes = _load_json(args.source_metadata_file, "source metadata")
     draft, draft_bytes = _load_json(args.draft_file, "draft")
     validated = validate_source(transcript_bytes, source_metadata, draft, args.recording_id)
+    source_index = _read_private(args.source_index_file, "source index")
+    if source_index != render_source_index(validated.segments):
+        raise GroundingError("source index does not bind the current transcript")
     summary = render_summary(validated)
     actions = render_grounded_actions(validated)
     for path in (args.summary_output, args.actions_output, args.receipt_output):
         if path.exists():
             raise GroundingError(f"refusing to overwrite {path.name}")
     receipt = {
-        "schema": "plaud-grounding-gate-v1",
+        "schema": "plaud-grounding-gate-v2",
         "status": "validated",
         "recording_id": args.recording_id,
         "transcript_sha256": _sha(transcript_bytes),
         "source_metadata_sha256": _sha(source_metadata_bytes),
+        "source_index_sha256": _sha(source_index),
         "draft_sha256": _sha(draft_bytes),
         "summary_sha256": _sha(summary),
         "grounded_actions_sha256": _sha(actions),
         "segment_count": len(validated.segments),
         "claim_count": validated.claim_count,
         "evidence_excerpt_count": validated.evidence_count,
+        "rendering": "whole-source-segments",
         "provider_operations": 0,
     }
     _write_new(args.summary_output, summary)
@@ -559,20 +619,25 @@ def finalize_actions(args: argparse.Namespace) -> dict[str, Any]:
     draft, draft_bytes = _load_json(args.draft_file, "draft")
     receipt, _receipt_bytes = _load_json(args.receipt_file, "grounding receipt")
     validated = validate_source(transcript_bytes, source_metadata, draft, args.recording_id)
+    source_index = _read_private(args.source_index_file, "source index")
+    if source_index != render_source_index(validated.segments):
+        raise GroundingError("source index does not bind the current transcript")
     summary = render_summary(validated)
     actions = render_grounded_actions(validated)
     expected = {
-        "schema": "plaud-grounding-gate-v1",
+        "schema": "plaud-grounding-gate-v2",
         "status": "validated",
         "recording_id": args.recording_id,
         "transcript_sha256": _sha(transcript_bytes),
         "source_metadata_sha256": _sha(source_metadata_bytes),
+        "source_index_sha256": _sha(source_index),
         "draft_sha256": _sha(draft_bytes),
         "summary_sha256": _sha(summary),
         "grounded_actions_sha256": _sha(actions),
         "segment_count": len(validated.segments),
         "claim_count": validated.claim_count,
         "evidence_excerpt_count": validated.evidence_count,
+        "rendering": "whole-source-segments",
         "provider_operations": 0,
     }
     if receipt != expected:
@@ -585,7 +650,7 @@ def finalize_actions(args: argparse.Namespace) -> dict[str, Any]:
             "name": row["name"],
             "note": (
                 f"Evernote note: {args.note_id}. Plaud recording: {args.recording_id}. "
-                f"Grounded commitment: {row['claim']} ({row['citation']})."
+                f"Exact source commitment: {row['claim']} ({row['citation']})."
             ),
             "state": row["state"],
             "explicit_elliott_owned": True,
@@ -606,12 +671,16 @@ def finalize_actions(args: argparse.Namespace) -> dict[str, Any]:
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     commands = result.add_subparsers(dest="command", required=True)
+    index_parser = commands.add_parser("index-source")
     render_parser = commands.add_parser("render")
     finalize_parser = commands.add_parser("finalize-actions")
-    for command in (render_parser, finalize_parser):
+    for command in (index_parser, render_parser, finalize_parser):
         command.add_argument("--recording-id", required=True)
         command.add_argument("--transcript-file", type=Path, required=True)
         command.add_argument("--source-metadata-file", type=Path, required=True)
+    index_parser.add_argument("--source-output", type=Path, required=True)
+    for command in (render_parser, finalize_parser):
+        command.add_argument("--source-index-file", type=Path, required=True)
         command.add_argument("--draft-file", type=Path, required=True)
     render_parser.add_argument("--summary-output", type=Path, required=True)
     render_parser.add_argument("--actions-output", type=Path, required=True)
@@ -627,7 +696,12 @@ def main() -> int:
     args = parser().parse_args()
     try:
         _validate_cli_paths(args)
-        value = render(args) if args.command == "render" else finalize_actions(args)
+        if args.command == "index-source":
+            value = index_source(args)
+        elif args.command == "render":
+            value = render(args)
+        else:
+            value = finalize_actions(args)
     except GroundingError as exc:
         print(json.dumps({"ok": False, "error": "GroundingError", "message": str(exc)}, sort_keys=True))
         return 2
