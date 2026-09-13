@@ -646,8 +646,8 @@ def activate_reviewed_proposal(request: ActivationRequest) -> ActivationResult:
                         runbook_dir, slug, normalized.proposal_id, normalized.proposal_sha256, target
                     )
                     candidate_record, _ = _record_from_bytes(target, candidate)
-                    if candidate_record.status not in {"active", "retired"}:
-                        raise PermissionError("reviewed candidate must declare status active or retired")
+                    if candidate_record.status == "draft":
+                        raise PermissionError("reviewed candidate must not declare status draft")
                     audit_dir = secure_io.open_descendant(
                         runbook_dir, (".activations",), owner_uid=secure_io.current_uid(), create=True
                     )
@@ -704,9 +704,9 @@ def activate_reviewed_proposal(request: ActivationRequest) -> ActivationResult:
                                 raise PermissionError(
                                     "missing canonical runbook requires expected active revision 'absent'"
                                 )
-                            if candidate_record.status == "retired":
+                            if candidate_record.status != "active":
                                 raise PermissionError(
-                                    "reviewed retirement requires an existing canonical runbook"
+                                    "reviewed runbook creation requires status active"
                                 )
                             current_record = None
                         else:
@@ -715,6 +715,13 @@ def activate_reviewed_proposal(request: ActivationRequest) -> ActivationResult:
                                 raise PermissionError("expected active revision 'absent' requires no canonical runbook")
                             if current_record.revision != normalized.expected_active_revision:
                                 raise PermissionError("active runbook revision does not match the approved revision")
+                            if (
+                                candidate_record.status in {"paused", "degraded"}
+                                and candidate_record.status != current_record.status
+                            ):
+                                raise PermissionError(
+                                    "reviewed paused or degraded updates must preserve status"
+                                )
                         previous_revision = (
                             _ABSENT_REVISION if current_record is None else current_record.revision
                         )
