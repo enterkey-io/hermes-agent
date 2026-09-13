@@ -161,20 +161,33 @@ def _parse_tool_arguments(
         execution_owner=agent,
     )
     if parsed[1] is not None:
-        try:
-            from tools.required_dependency_runtime import mark_rejection
-
-            # Malformed arguments may contain private or non-serializable
-            # values. The dependency result needs only the attempted tool and
-            # bounded failure class, so use an inert invocation identity.
-            mark_rejection(function_name, {}, "invalid_arguments")
-        except Exception:
-            logger.debug(
-                "Could not record required dependency argument rejection for %s",
-                function_name,
-                exc_info=True,
-            )
+        # Malformed arguments may contain private or non-serializable values.
+        # The dependency result needs only the attempted tool and bounded
+        # failure class, so use an inert invocation identity.
+        _record_required_dependency_rejection(
+            function_name,
+            {},
+            "invalid_arguments",
+        )
     return parsed
+
+
+def _record_required_dependency_rejection(
+    function_name: str,
+    function_args: dict,
+    reason: str,
+) -> None:
+    """Record an executor-owned rejection without breaking result delivery."""
+    try:
+        from tools.required_dependency_runtime import mark_rejection
+
+        mark_rejection(function_name, function_args, reason)
+    except Exception:
+        logger.debug(
+            "Could not record required dependency rejection for %s",
+            function_name,
+            exc_info=True,
+        )
 
 
 def _resolve_concurrent_tool_timeout() -> float | None:
@@ -398,6 +411,48 @@ def _tool_search_scoped_names(agent) -> frozenset:
     except Exception:
         pass
     return names
+
+
+def _resolve_executor_tool_search_call(
+    agent,
+    function_name: str,
+    function_args: dict,
+) -> tuple[str, dict, str | None]:
+    """Resolve one bridge call while preserving the attempted tool identity."""
+    try:
+        from tools import tool_search as tool_search
+
+        if function_name != tool_search.TOOL_CALL_NAME:
+            return function_name, function_args, None
+
+        candidate = str(function_args.get("name") or "").strip()
+        underlying, underlying_args, error = tool_search.resolve_underlying_call(
+            function_args
+        )
+        if underlying is None:
+            if not candidate or not tool_search.is_deferrable_tool_name(candidate):
+                return function_name, function_args, None
+            underlying = candidate
+            underlying_args = {}
+
+        function_name = underlying
+        function_args = underlying_args
+        if underlying not in _tool_search_scoped_names(agent):
+            return (
+                function_name,
+                function_args,
+                f"'{underlying}' is not available in this session. "
+                "Use tool_search to find tools you can call.",
+            )
+        if error is not None:
+            return function_name, function_args, error
+        return (
+            function_name,
+            function_args,
+            tool_search.validate_deferred_call_args(underlying, underlying_args),
+        )
+    except Exception:
+        return function_name, function_args, None
 
 
 @dataclass
@@ -1128,6 +1183,11 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     if agent._interrupt_requested:
         print(f"{agent.log_prefix}⚡ Interrupt: skipping {num_tools} tool call(s)")
         for tc in tool_calls:
+            _record_required_dependency_rejection(
+                tc.function.name,
+                {},
+                "executor_cancelled",
+            )
             cancelled_result = (
                 f"[Tool execution cancelled — {tc.function.name} was skipped "
                 "due to user interrupt]"
@@ -1204,29 +1264,15 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
         # scope check), so we enforce session toolset scope HERE. A tool
         # the session was not granted is rejected before any checkpoint,
         # hook, or dispatch fires.
-        _ts_scope_block = None
-        try:
-            from tools import tool_search as _ts
-            if function_name == _ts.TOOL_CALL_NAME:
-                _underlying, _underlying_args, _err = _ts.resolve_underlying_call(function_args)
-                if not _err and _underlying:
-                    if _underlying in _tool_search_scoped_names(agent):
-                        # Probe-validate before unwrapping (ironclaw#5149):
-                        # missing required args return the parameter schema
-                        # instead of dispatching into an opaque failure.
-                        _probe_err = _ts.validate_deferred_call_args(_underlying, _underlying_args)
-                        if _probe_err is not None:
-                            _ts_scope_block = _probe_err
-                        else:
-                            function_name = _underlying
-                            function_args = _underlying_args
-                    else:
-                        _ts_scope_block = (
-                            f"'{_underlying}' is not available in this session. "
-                            "Use tool_search to find tools you can call."
-                        )
-        except Exception:
-            pass
+        (
+            function_name,
+            function_args,
+            _ts_scope_block,
+        ) = _resolve_executor_tool_search_call(
+            agent,
+            function_name,
+            function_args,
+        )
 
         parsed_calls.append(
             (tool_call, function_name, function_args, [], None, _ts_scope_block)
@@ -1593,6 +1639,11 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                         ) in skipped_calls:
                             if results[skipped_i] is None:
                                 middleware_trace = parsed_calls[skipped_i][3]
+                                _record_required_dependency_rejection(
+                                    skipped_name,
+                                    skipped_args,
+                                    "executor_shutdown",
+                                )
                                 result = (
                                     f"Error executing tool '{skipped_name}': "
                                     "Python interpreter is shutting down; tool was not started"
@@ -1752,6 +1803,11 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
             suffix = f"{timeout_s:.1f}s" if timeout_s is not None else "the configured timeout"
             function_result = f"Error executing tool '{name}': timed out after {suffix}"
             effect_disposition = "unknown"
+            _record_required_dependency_rejection(
+                name,
+                args,
+                "executor_timeout",
+            )
             _emit_terminal_post_tool_call(
                 agent,
                 function_name=name,
@@ -1770,6 +1826,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
             # Tool was cancelled (interrupt) or thread didn't return
             if agent._interrupt_requested:
                 function_result = f"[Tool execution cancelled — {name} was skipped due to user interrupt]"
+                rejection_reason = "executor_cancelled"
                 _emit_terminal_post_tool_call(
                     agent,
                     function_name=name,
@@ -1784,6 +1841,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                 )
             else:
                 function_result = f"Error executing tool '{name}': thread did not return a result"
+                rejection_reason = "executor_missing_result"
                 _emit_terminal_post_tool_call(
                     agent,
                     function_name=name,
@@ -1796,6 +1854,11 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                     error_message=function_result,
                     middleware_trace=list(middleware_trace),
                 )
+            _record_required_dependency_rejection(
+                name,
+                args,
+                rejection_reason,
+            )
             tool_duration = 0.0
         else:
             function_name, function_args, function_result, tool_duration, is_error, blocked, middleware_trace = r
@@ -2054,6 +2117,11 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 agent._vprint(f"{agent.log_prefix}⚡ Interrupt: skipping {len(remaining_calls)} tool call(s)", force=True)
             for skipped_tc in remaining_calls:
                 skipped_name = skipped_tc.function.name
+                _record_required_dependency_rejection(
+                    skipped_name,
+                    {},
+                    "executor_cancelled",
+                )
                 cancelled_result = (
                     f"[Tool execution cancelled — {skipped_name} was skipped "
                     "due to user interrupt]"
@@ -2124,39 +2192,27 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
         # Tool Search unwrap — see execute_tool_calls_concurrent for full
         # rationale, including the scope gate (the unwrap dispatches the
         # underlying tool directly, so session toolset scope is enforced here).
-        _ts_scope_block: Optional[str] = None
-        try:
-            from tools import tool_search as _ts
-            if function_name == _ts.TOOL_CALL_NAME:
-                _underlying, _underlying_args, _err = _ts.resolve_underlying_call(function_args)
-                if not _err and _underlying:
-                    if _underlying in _tool_search_scoped_names(agent):
-                        # Probe-validate before unwrapping (ironclaw#5149):
-                        # missing required args return the parameter schema
-                        # instead of dispatching into an opaque failure.
-                        _probe_err = _ts.validate_deferred_call_args(_underlying, _underlying_args)
-                        if _probe_err is not None:
-                            # This path wraps _block_msg in {"error": ...} —
-                            # flatten the probe payload to one plain string.
-                            try:
-                                _probe = json.loads(_probe_err)
-                                _ts_scope_block = (
-                                    f"{_probe.get('error', '')} Parameters schema: "
-                                    f"{json.dumps(_probe.get('parameters', {}), ensure_ascii=False)}. "
-                                    f"{_probe.get('hint', '')}"
-                                ).strip()
-                            except Exception:
-                                _ts_scope_block = _probe_err
-                        else:
-                            function_name = _underlying
-                            function_args = _underlying_args
-                    else:
-                        _ts_scope_block = (
-                            f"'{_underlying}' is not available in this session. "
-                            "Use tool_search to find tools you can call."
-                        )
-        except Exception:
-            pass
+        (
+            function_name,
+            function_args,
+            _ts_scope_block,
+        ) = _resolve_executor_tool_search_call(
+            agent,
+            function_name,
+            function_args,
+        )
+        if _ts_scope_block is not None:
+            # This path wraps the block message in {"error": ...}; flatten a
+            # schema-probe payload to one plain string for the model.
+            try:
+                _probe = json.loads(_ts_scope_block)
+                _ts_scope_block = (
+                    f"{_probe.get('error', '')} Parameters schema: "
+                    f"{json.dumps(_probe.get('parameters', {}), ensure_ascii=False)}. "
+                    f"{_probe.get('hint', '')}"
+                ).strip()
+            except Exception:
+                pass
 
         middleware_trace: list[dict[str, Any]] = []
         _execution_blocked = False

@@ -192,7 +192,12 @@ def _failure_streak_nudge(job: dict) -> str:
     )
 
 
-def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
+def _summarize_cron_failure_for_delivery(
+    job: dict,
+    error: str | None,
+    *,
+    failure_type: str | None = None,
+) -> str:
     """Return a compact one-line failure message for chat delivery.
 
     Full details stay in the cron output directory and the logs. Chat should
@@ -202,6 +207,16 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
     job_name = job.get("name") or job.get("id") or "cron job"
     text = (error or "unknown error").strip()
     lower = text.lower()
+
+    # The caller has authoritative host-side outcome data for required tool
+    # dependencies. Preserve that subsystem identity instead of reclassifying
+    # bounded reason labels such as ``executor_timeout`` through the provider
+    # substring heuristics below.
+    if failure_type == "required_tool_dependency":
+        cleaned = re.sub(r"\s+", " ", text[:2000]).strip()
+        if len(cleaned) > 180:
+            cleaned = cleaned[:177].rstrip() + "..."
+        return f"⚠️ Cron '{job_name}' failed: {cleaned}"
 
     if "skipped to prevent unintended spend: global inference config drifted" in lower:
         if "finite one-shot job is consumed" in lower:
@@ -7225,7 +7240,15 @@ def _run_one_job_body(
                 )
             else:
                 deliver_content = final_response if success else (
-                    _summarize_cron_failure_for_delivery(job, error)
+                    _summarize_cron_failure_for_delivery(
+                        job,
+                        error,
+                        failure_type=(
+                            "required_tool_dependency"
+                            if dependency_failure
+                            else None
+                        ),
+                    )
                     + _failure_streak_nudge(job)
                 )
                 if (

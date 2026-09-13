@@ -23,10 +23,10 @@ and the jobs API cannot set this mode. Runbook schedule metadata can declare it;
 refreshing a runbook that omits it preserves the existing operator setting.
 With `terminal` and `when_invoked`, a workflow may legitimately make no terminal
 call, but any observed backend error or unexplained nonzero exit fails the run.
-An attempted required call rejected by argument parsing, executor middleware,
-registry admission, execution capability, pickup scope, input validation, or
-runtime budget is an observed failure rather than an uncalled conditional
-branch. Exit-zero terminal results carrying the
+An attempted required call rejected by argument parsing, a deferred-tool bridge,
+executor middleware or queueing, registry admission, execution capability,
+pickup scope, input validation, or runtime budget is an observed failure rather
+than an uncalled conditional branch. Exit-zero terminal results carrying the
 host's conservative masked-failure detection also fail required dependency
 health; ordinary terminal calls retain the advisory result and exit code.
 Ordinary terminal results retain advisory notes for explicit non-error codes in

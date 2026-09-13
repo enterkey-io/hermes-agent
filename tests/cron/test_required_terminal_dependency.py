@@ -574,6 +574,32 @@ def test_invalid_arguments_override_completed_workflow(monkeypatch, workflow):
     assert latest_execution("required-terminal-job")["status"] == "failed"
 
 
+def test_executor_timeout_overrides_completed_workflow(monkeypatch, workflow):
+    import agent.tool_executor as tool_executor
+
+    def run_job(_job, **_kwargs):
+        tool_executor._record_required_dependency_rejection(
+            "terminal",
+            {"command": "/usr/bin/true", "workdir": str(workflow)},
+            "executor_timeout",
+        )
+        return True, "raw output", "[SILENT]\n[WORKFLOW_STATUS:completed]", None
+
+    marked, delivered = _run(monkeypatch, workflow, run_job)
+
+    error = (
+        "Required tool dependency degraded: unsuccessful: terminal "
+        "(executor_timeout)"
+    )
+    assert delivered == [f"⚠️ Cron 'Required terminal job' failed: {error}"]
+    assert marked[0][1:3] == (False, error)
+    assert marked[0][3]["workflow_status"] == "failed"
+    assert marked[0][3]["dependency_outcome"]["failed"] == [
+        {"tool": "terminal", "reasons": ["executor_timeout"]}
+    ]
+    assert latest_execution("required-terminal-job")["status"] == "failed"
+
+
 @pytest.mark.parametrize(
     ("payload", "reason"),
     [
