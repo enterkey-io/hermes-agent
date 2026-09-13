@@ -2,7 +2,10 @@
 
 Operator-owned Cron jobs can declare `required_tool_dependencies` and
 `failure_ownership` in their native job metadata.
-Required tool calls are tracked by actual invocation and typed MCP results.
+Required tool calls are tracked by actual invocation and typed results. Exact
+MCP tool names and the built-in `terminal` tool are supported. Terminal failures
+are sticky for the run: repeating the same command cannot erase an earlier
+failure because its referenced files or external state may have changed.
 Pending, failed, interrupted, or missing required calls prevent healthy status,
 even when the agent produces useful partial output. Finalized run health cannot
 be changed by a detached worker completing later. A genuinely silent result
@@ -18,6 +21,24 @@ emits neither a dependency failure nor a recovery event. Recovery still requires
 successful observed calls to every configured dependency. Ordinary model tools
 and the jobs API cannot set this mode. Runbook schedule metadata can declare it;
 refreshing a runbook that omits it preserves the existing operator setting.
+With `terminal` and `when_invoked`, a workflow may legitimately make no terminal
+call, but any observed backend error or unexplained nonzero exit fails the run.
+An attempted required call rejected by argument parsing, a deferred-tool bridge,
+executor middleware or queueing, registry admission, execution capability,
+pickup scope, input validation, or runtime budget is an observed failure rather
+than an uncalled conditional branch. Exit-zero terminal results carrying the
+host's conservative masked-failure detection also fail required dependency
+health; ordinary terminal calls retain the advisory result and exit code.
+Ordinary terminal results retain advisory notes for explicit non-error codes in
+the grep, diff, and test command families. Required dependency health accepts
+those codes only for simple `/bin` or `/usr/bin` executables whose status is
+unambiguous; bare names, custom paths, PATH overrides, conditional chains, and
+active redirections fail closed. Explanatory notes for signals and network
+failures do not. The
+runtime persists only the tool name and bounded failure class, never command
+text or arguments.
+Background launches remain pending because spawning a process does not prove
+its eventual exit outcome; required workflows must use a foreground command.
 
 Owned failures use the existing Kanban coordination request, technical owner,
 director review, and bounded model-call budget. A reviewed reserved user action

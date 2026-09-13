@@ -2368,6 +2368,67 @@ def _interpret_signal_exit(exit_code: int) -> str | None:
     return None
 
 
+def _has_active_shell_composition(command: str) -> bool:
+    """Detect shell composition outside single quotes and escaped literals."""
+    quote: str | None = None
+    escaped = False
+    for index, char in enumerate(command):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and quote != "'":
+            escaped = True
+            continue
+        if char == "'":
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+            continue
+        if char == '"':
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+            continue
+        if quote == "'":
+            continue
+        if char == "`" or (char == "$" and command[index : index + 2] == "$("):
+            return True
+        if quote is None and char in "|;&<>\n\r":
+            return True
+    return False
+
+
+def _simple_status_command(
+    command: str,
+    *,
+    require_trusted_executable: bool = False,
+) -> str | None:
+    """Return the base executable only when it unambiguously owns the status."""
+    if not command or _has_active_shell_composition(command):
+        return None
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return None
+    for word in words:
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", word):
+            if word.startswith("PATH="):
+                return None
+            continue
+        if "/" not in word:
+            return None if require_trusted_executable else word
+        executable = Path(word)
+        if not executable.is_absolute() or str(executable.parent) not in {
+            "/bin",
+            "/usr/bin",
+        }:
+            return None
+        return executable.name
+    return None
+
+
 def _interpret_exit_code(command: str, exit_code: int) -> str | None:
     """Return a human-readable note when a non-zero exit code is non-erroneous.
 
@@ -2393,22 +2454,10 @@ def _interpret_exit_code(command: str, exit_code: int) -> str | None:
     if signal_note is not None:
         return signal_note
 
-    # Extract the last command in a pipeline/chain — that determines the
-    # exit code.  Handles  `cmd1 && cmd2`, `cmd1 | cmd2`, `cmd1; cmd2`.
-    # Deliberately simple: split on shell operators and take the last piece.
-    segments = re.split(r'\s*(?:\|\||&&|[|;])\s*', command)
-    last_segment = (segments[-1] if segments else command).strip()
-
-    # Get base command name (first word), stripping env var assignments
-    # like  VAR=val cmd ...
-    words = last_segment.split()
-    base_cmd = ""
-    for w in words:
-        if "=" in w and not w.startswith("-"):
-            continue  # skip VAR=val
-        base_cmd = w.split("/")[-1]  # handle /usr/bin/grep -> grep
-        break
-
+    # Conditional chains can short-circuit before the final command. Accept
+    # command-specific non-error codes only when one simple executable
+    # unambiguously determines the shell status.
+    base_cmd = _simple_status_command(command)
     if not base_cmd:
         return None
 
@@ -2445,6 +2494,27 @@ def _interpret_exit_code(command: str, exit_code: int) -> str | None:
         return cmd_semantics[exit_code]
 
     return None
+
+
+def _is_expected_nonzero_exit(command: str, exit_code: int) -> bool:
+    """Return whether a nonzero code is an explicit non-error result.
+
+    ``exit_code_meaning`` is broader than this: it also explains signals,
+    connectivity failures, and other genuine errors. Required Cron dependency
+    health must accept only commands whose documented result is non-erroneous.
+    """
+    if exit_code != 1:
+        return False
+
+    base_cmd = _simple_status_command(
+        command,
+        require_trusted_executable=True,
+    )
+
+    return base_cmd in {
+        "grep", "egrep", "fgrep", "rg", "ag", "ack",
+        "diff", "colordiff", "test", "[",
+    }
 
 
 def _command_requires_pipe_stdin(command: str) -> bool:
@@ -3484,6 +3554,7 @@ def terminal_tool(
             # fixes the root cause on the next call instead of spending
             # turns on re-diagnosis. See tools/terminal_hints.py.
             failure_hint = None
+            masked_failure_detected = False
             if returncode != 0 and not exit_note:
                 try:
                     from tools.terminal_hints import annotate_failure
@@ -3501,6 +3572,7 @@ def terminal_tool(
                 try:
                     from tools.terminal_hints import annotate_masked_success
                     failure_hint = annotate_masked_success(command, output)
+                    masked_failure_detected = bool(failure_hint)
                 except Exception:
                     failure_hint = None
 
@@ -3599,6 +3671,8 @@ def terminal_tool(
                 result_dict["exit_code_meaning"] = exit_note
             if failure_hint:
                 result_dict["hint"] = failure_hint
+            if masked_failure_detected:
+                result_dict["masked_failure_detected"] = True
             if sudo_auth_failed:
                 result_dict["sudo_auth_failed"] = True
             if sudo_cache_cleared:
@@ -3896,28 +3970,78 @@ TERMINAL_SCHEMA = {
 
 
 def _handle_terminal(args, **kw):
+    from tools.required_dependency_runtime import (
+        mark_failure,
+        mark_pending,
+        mark_success,
+    )
+
+    attempt = mark_pending("terminal", args)
     # Mirror of execute_code's misplaced-argument recovery: models sometimes
     # send execute_code's ``code`` argument here. Without this, the call
     # falls through to command=None and fails with "Invalid command:
     # expected string, got NoneType" — naming neither the stray argument
     # nor the right tool.
     if "command" not in args and "code" in args:
-        return tool_error(
+        result = tool_error(
             "terminal received a 'code' parameter, but it requires a shell "
             "command in 'command'. Use execute_code(code=...) for Python; "
             "for shell, retry as terminal(command=...)."
         )
-    return terminal_tool(
-        command=args.get("command"),
-        background=args.get("background", False),
-        timeout=args.get("timeout"),
-        task_id=kw.get("task_id"),
-        session_id=kw.get("session_id"),
-        workdir=args.get("workdir"),
-        pty=args.get("pty", False),
-        notify_on_complete=args.get("notify_on_complete", False),
-        watch_patterns=args.get("watch_patterns"),
+    else:
+        result = terminal_tool(
+            command=args.get("command"),
+            background=args.get("background", False),
+            timeout=args.get("timeout"),
+            task_id=kw.get("task_id"),
+            session_id=kw.get("session_id"),
+            workdir=args.get("workdir"),
+            pty=args.get("pty", False),
+            notify_on_complete=args.get("notify_on_complete", False),
+            watch_patterns=args.get("watch_patterns"),
+        )
+
+    try:
+        payload = json.loads(result)
+    except (TypeError, json.JSONDecodeError):
+        mark_failure(attempt, "malformed_result", sticky=True)
+        return result
+
+    exit_code = payload.get("exit_code") if isinstance(payload, dict) else None
+    valid_exit_code = isinstance(exit_code, int) and not isinstance(exit_code, bool)
+    command = args.get("command") if isinstance(args.get("command"), str) else ""
+    expected_nonzero = valid_exit_code and _is_expected_nonzero_exit(
+        command, exit_code
     )
+    if not isinstance(payload, dict):
+        mark_failure(attempt, "malformed_result", sticky=True)
+    elif payload.get("status") == "degraded":
+        mark_failure(attempt, "backend_degraded", sticky=True)
+    elif payload.get("status") in {
+        "blocked", "disabled", "error", "pending_approval",
+    }:
+        mark_failure(attempt, "tool_error", sticky=True)
+    elif payload.get("error"):
+        mark_failure(attempt, "tool_error", sticky=True)
+    elif not valid_exit_code:
+        mark_failure(attempt, "malformed_result", sticky=True)
+    elif args.get("background"):
+        # Starting a detached process is not evidence that it completed. The
+        # process tool has a separate lifecycle that this dependency cannot
+        # authoritatively join to the eventual exit result.
+        mark_failure(attempt, "pending", sticky=True)
+    elif payload.get("masked_failure_detected") is True:
+        mark_failure(attempt, "masked_exit", sticky=True)
+    elif exit_code != 0 and not expected_nonzero:
+        interrupted = (
+            exit_code == 130
+            and "[Command interrupted]" in str(payload.get("output") or "")
+        )
+        reason = "interrupted" if interrupted else "nonzero_exit"
+        mark_failure(attempt, reason, sticky=True)
+    else:
+        mark_success(attempt)
+    return result
 
 
 registry.register(

@@ -215,6 +215,64 @@ def test_sequential_tool_timeout_suppresses_late_terminal_event(tmp_path, monkey
     ]
 
 
+def test_sequential_timeout_stays_failed_after_late_required_success(
+    tmp_path,
+    monkeypatch,
+):
+    import agent.tool_executor as tool_executor
+    from tools.required_dependency_runtime import activate, reset
+
+    agent = _make_agent(tmp_path)
+    started = threading.Event()
+    release = threading.Event()
+    middleware_returned = threading.Event()
+
+    def _dispatch(_name, _args, _task_id, *, tool_call_id, **_kwargs):
+        assert tool_call_id == "hung"
+        started.set()
+        release.wait()
+        return "late success"
+
+    original_middleware = tool_executor._run_agent_tool_execution_middleware
+
+    def _tracked_middleware(*args, **kwargs):
+        result = original_middleware(*args, **kwargs)
+        middleware_returned.set()
+        return result
+
+    messages: list[dict] = []
+    monkeypatch.setenv("HERMES_CONCURRENT_TOOL_TIMEOUT_S", "1.0")
+    token, state = activate(["web_extract"])
+    try:
+        with (
+            patch("run_agent.handle_function_call", side_effect=_dispatch),
+            patch(
+                "agent.tool_executor._run_agent_tool_execution_middleware",
+                side_effect=_tracked_middleware,
+            ),
+        ):
+            execute_tool_calls_sequential(
+                agent,
+                SimpleNamespace(tool_calls=[_tool_call("hung")]),
+                messages,
+                "task",
+            )
+        assert started.is_set()
+        assert "timed out after 1.0s" in messages[0]["content"]
+        release.set()
+        assert middleware_returned.wait(timeout=2)
+        summary = state.finalize()
+    finally:
+        release.set()
+        reset(token)
+
+    assert summary["missing"] == []
+    assert summary["successful"] == []
+    assert summary["failed"] == [
+        {"tool": "web_extract", "reasons": ["executor_timeout"]}
+    ]
+
+
 @pytest.mark.parametrize(
     "clarify_timeout",
     [resolve_clarify_timeout({}), 0],

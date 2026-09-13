@@ -192,7 +192,12 @@ def _failure_streak_nudge(job: dict) -> str:
     )
 
 
-def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
+def _summarize_cron_failure_for_delivery(
+    job: dict,
+    error: str | None,
+    *,
+    failure_type: str | None = None,
+) -> str:
     """Return a compact one-line failure message for chat delivery.
 
     Full details stay in the cron output directory and the logs. Chat should
@@ -202,6 +207,16 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
     job_name = job.get("name") or job.get("id") or "cron job"
     text = (error or "unknown error").strip()
     lower = text.lower()
+
+    # The caller has authoritative host-side outcome data for required tool
+    # dependencies. Preserve that subsystem identity instead of reclassifying
+    # bounded reason labels such as ``executor_timeout`` through the provider
+    # substring heuristics below.
+    if failure_type == "required_tool_dependency":
+        cleaned = re.sub(r"\s+", " ", text[:2000]).strip()
+        if len(cleaned) > 180:
+            cleaned = cleaned[:177].rstrip() + "..."
+        return f"⚠️ Cron '{job_name}' failed: {cleaned}"
 
     if "skipped to prevent unintended spend: global inference config drifted" in lower:
         if "finite one-shot job is consumed" in lower:
@@ -7002,6 +7017,14 @@ def _run_one_job_body(
                 )
             dependency_error = "Required tool dependency degraded: " + "; ".join(parts)
 
+        # Required dependency health is host-observed control data. A model's
+        # useful partial response or completed marker cannot convert a missing,
+        # pending, or failed required tool into a successful Cron outcome.
+        dependency_failure = success and dependency_degraded
+        if dependency_failure:
+            success = False
+            error = dependency_error
+
         workforce_signal_failure = None
         if _required_signal_state is not None and (
             _required_signal_state.failure
@@ -7027,6 +7050,12 @@ def _run_one_job_body(
                 "Workforce factual record failed: "
                 f"{workforce_signal_failure}"
             )
+
+        # Both host checks remain visible in the persisted outcome, but the
+        # workforce failure owns the run's primary error when both fail.
+        dependency_is_primary_failure = bool(
+            dependency_failure and not workforce_signal_failure
+        )
 
         if isinstance(error, ProtectedMutationFailure) and error.uncooperative:
             pending_fail_stop = _prepare_fail_stop_after_uncooperative_handler(
@@ -7081,14 +7110,17 @@ def _run_one_job_body(
             workflow_status, final_response = _extract_workflow_status(
                 final_response
             )
+            if dependency_failure:
+                workflow_status = "failed"
             if workflow_status == "failed" or workforce_signal_failure:
                 success = False
-                error = (
-                    "Workforce factual record failed: "
-                    f"{workforce_signal_failure}"
-                    if workforce_signal_failure
-                    else "Workflow reported failed outcome."
-                )
+                if workforce_signal_failure:
+                    error = (
+                        "Workforce factual record failed: "
+                        f"{workforce_signal_failure}"
+                    )
+                elif not dependency_failure:
+                    error = "Workflow reported failed outcome."
                 workflow_status = "failed"
         side_effect_ownership_lost = False
         try:
@@ -7129,22 +7161,20 @@ def _run_one_job_body(
                 with _side_effect_fence() as owns_intake:
                     if not owns_intake:
                         raise _FireClaimLostDuringSideEffect
-                    if not success or dependency_degraded:
+                    if not success:
                         from cron.operational_failures import append_profile_failure
 
                         try:
                             operational_failure_event = append_profile_failure(
                                 _get_hermes_home(), job,
-                                error if not success else dependency_error,
+                                error,
                                 execution_id=execution_id,
                                 failure_type=(
-                                    "execution"
-                                    if not success
-                                    else "required_tool_dependency"
+                                    "required_tool_dependency"
+                                    if dependency_is_primary_failure
+                                    else "execution"
                                 ),
-                                dependency_outcome=(
-                                    dependency_outcome if success else None
-                                ),
+                                dependency_outcome=dependency_outcome,
                             )
                         except Exception:
                             logger.error(
@@ -7216,7 +7246,15 @@ def _run_one_job_body(
                 )
             else:
                 deliver_content = final_response if success else (
-                    _summarize_cron_failure_for_delivery(job, error)
+                    _summarize_cron_failure_for_delivery(
+                        job,
+                        error,
+                        failure_type=(
+                            "required_tool_dependency"
+                            if dependency_is_primary_failure
+                            else None
+                        ),
+                    )
                     + _failure_streak_nudge(job)
                 )
                 if (

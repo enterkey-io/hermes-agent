@@ -326,6 +326,8 @@ def test_work_review_handoff_skips_mutating_suffix_in_segmented_batch(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """A persisted host review result prevents later batch mutations."""
+    from tools.required_dependency_runtime import activate, reset
+
     _, task_id, implementation_run_id = work_review_context
     source = tmp_path / "source.txt"
     source.write_text("evidence")
@@ -358,7 +360,17 @@ def test_work_review_handoff_skips_mutating_suffix_in_segmented_batch(
 
     monkeypatch.setattr(kb, "request_review", request_review_then_claim)
 
-    result = _run_review_batch(agent, task_id=task_id, responses=(response,), scope=True)
+    token, state = activate(["write_file"])
+    try:
+        result = _run_review_batch(
+            agent,
+            task_id=task_id,
+            responses=(response,),
+            scope=True,
+        )
+        dependency = state.finalize()
+    finally:
+        reset(token)
 
     assert before.read_text() == "before"
     assert not after_one.exists()
@@ -380,6 +392,9 @@ def test_work_review_handoff_skips_mutating_suffix_in_segmented_batch(
         "status": "review",
     }
     assert agent.client.chat.completions.create.call_count == 1
+    assert dependency["failed"] == [
+        {"tool": "write_file", "reasons": ["review_handoff_skipped"]}
+    ]
 
 
 def test_work_review_handoff_skips_mutating_suffix_in_sequential_batch(
@@ -387,11 +402,13 @@ def test_work_review_handoff_skips_mutating_suffix_in_sequential_batch(
     tmp_path: Path,
 ):
     """The all-sequential planner path also leaves a paired skipped result."""
+    from tools.required_dependency_runtime import activate, reset
+
     _, task_id, _ = work_review_context
     source = tmp_path / "source.txt"
     source.write_text("evidence")
     after = tmp_path / "after.txt"
-    agent = _new_agent("read_file", "write_file", "kanban_request_review")
+    agent = _new_agent("read_file", "kanban_request_review", "terminal")
     response = _tool_response(
         _tool_call("read_file", {"path": str(source)}, "call-17-read"),
         _tool_call(
@@ -399,12 +416,26 @@ def test_work_review_handoff_skips_mutating_suffix_in_sequential_batch(
             {"summary": "Evidence is attached and ready for review."},
             "call-17-review",
         ),
-        _tool_call("write_file", {"path": str(after), "content": "must not land"}, "call-17-after"),
+        _tool_call(
+            "terminal",
+            {"command": f"/usr/bin/touch {after}"},
+            "call-17-after",
+        ),
     )
     segments = _plan_tool_batch_segments(response.choices[0].message.tool_calls)
     assert [kind for kind, _ in segments] == ["sequential"]
 
-    result = _run_review_batch(agent, task_id=task_id, responses=(response,), scope=True)
+    token, state = activate(["terminal"])
+    try:
+        result = _run_review_batch(
+            agent,
+            task_id=task_id,
+            responses=(response,),
+            scope=True,
+        )
+        dependency = state.finalize()
+    finally:
+        reset(token)
 
     assert not after.exists()
     assert result["turn_exit_reason"] == "work_review_handoff"
@@ -413,6 +444,10 @@ def test_work_review_handoff_skips_mutating_suffix_in_sequential_batch(
         "call-17-read", "call-17-review", "call-17-after",
     ]
     assert tool_messages[-1].get("effect_disposition") == "none"
+    assert tool_messages[-1].get("name") == "terminal"
+    assert dependency["failed"] == [
+        {"tool": "terminal", "reasons": ["review_handoff_skipped"]}
+    ]
 
 
 def test_rejected_review_does_not_skip_suffix(

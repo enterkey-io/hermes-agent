@@ -1459,6 +1459,14 @@ class ToolRegistry:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _handler_result_is_supported(result) -> bool:
+        return isinstance(result, str) or (
+            isinstance(result, dict)
+            and result.get("_multimodal") is True
+            and isinstance(result.get("content"), list)
+        )
+
+    @staticmethod
     def _normalize_handler_result(name: str, result):
         """Enforce the result shapes supported by the agent tool pipeline.
 
@@ -1469,11 +1477,7 @@ class ToolRegistry:
         """
         if isinstance(result, str):
             return _bound_json_error_result(result)
-        if (
-            isinstance(result, dict)
-            and result.get("_multimodal") is True
-            and isinstance(result.get("content"), list)
-        ):
+        if ToolRegistry._handler_result_is_supported(result):
             return result
 
         result_type = type(result).__name__
@@ -1505,9 +1509,26 @@ class ToolRegistry:
         * All exceptions are caught and returned as ``{"error": "..."}``
           for consistent error format.
         """
+        def reject_required_dependency(result, reason: str):
+            """Record host-side rejection before returning the tool error."""
+            try:
+                from tools.required_dependency_runtime import mark_rejection
+
+                mark_rejection(name, args, reason)
+            except Exception:
+                logger.debug(
+                    "Could not record required dependency rejection for %s",
+                    name,
+                    exc_info=True,
+                )
+            return result
+
         entry = self.get_entry(name, scope=scope)
         if not entry:
-            return tool_error(f"Unknown tool: {name}")
+            return reject_required_dependency(
+                tool_error(f"Unknown tool: {name}"),
+                "unknown_tool",
+            )
         grant = kwargs.pop("_execution_capability_grant", None)
         inbound_json_admission = kwargs.pop("_inbound_json_admission", None)
         execution_owner = kwargs.pop("_execution_capability_owner", None)
@@ -1524,10 +1545,13 @@ class ToolRegistry:
                     owner=execution_owner,
                 )
             except (PermissionError, TypeError, ValueError):
-                return json.dumps({
-                    "error": "Strict inbound JSON admission is unavailable",
-                    "error_type": "inbound_json_policy_unavailable",
-                })
+                return reject_required_dependency(
+                    json.dumps({
+                        "error": "Strict inbound JSON admission is unavailable",
+                        "error_type": "inbound_json_policy_unavailable",
+                    }),
+                    "inbound_json_rejected",
+                )
         if entry.execution_capability is not None:
             from agent.execution_capabilities import (
                 ExecutionCapabilityError,
@@ -1544,10 +1568,13 @@ class ToolRegistry:
                 )
                 kwargs["execution_runtime"] = execution_runtime
             except ExecutionCapabilityError:
-                return tool_error(
-                    "Tool is unavailable in this execution context",
-                    error_type="execution_capability_unavailable",
-                    tool=name,
+                return reject_required_dependency(
+                    tool_error(
+                        "Tool is unavailable in this execution context",
+                        error_type="execution_capability_unavailable",
+                        tool=name,
+                    ),
+                    "execution_capability_rejected",
                 )
         if entry.attempt_observer is not None:
             entry.attempt_observer()
@@ -1560,35 +1587,49 @@ class ToolRegistry:
             # pickup context must not degrade into an unrestricted tool run.
             denial = "workforce handoff pickup scope is unavailable"
         if denial is not None:
-            return tool_error(
-                denial,
-                error_type="workforce_handoff_pickup_scope_denied",
-                tool=name,
+            return reject_required_dependency(
+                tool_error(
+                    denial,
+                    error_type="workforce_handoff_pickup_scope_denied",
+                    tool=name,
+                ),
+                "pickup_scope_rejected",
             )
         try:
             budget_attempt_charged = charge_runtime_tool_attempt(name)
         except RuntimeToolBudgetError as exc:
-            return tool_error(
-                str(exc),
-                error_type="runtime_tool_budget_exceeded",
-                tool=name,
+            return reject_required_dependency(
+                tool_error(
+                    str(exc),
+                    error_type="runtime_tool_budget_exceeded",
+                    tool=name,
+                ),
+                "runtime_budget_rejected",
             )
         if entry.preflight is not None:
             try:
                 entry.preflight(args)
             except (PermissionError, TypeError, ValueError) as exc:
-                return tool_error(
-                    str(exc), error_type="tool_input_validation_failed", tool=name
+                return reject_required_dependency(
+                    tool_error(
+                        str(exc),
+                        error_type="tool_input_validation_failed",
+                        tool=name,
+                    ),
+                    "input_validation_rejected",
                 )
         try:
             args = enforce_runtime_tool_budget(
                 name, args, attempt_charged=budget_attempt_charged
             )
         except RuntimeToolBudgetError as exc:
-            return tool_error(
-                str(exc),
-                error_type="runtime_tool_budget_exceeded",
-                tool=name,
+            return reject_required_dependency(
+                tool_error(
+                    str(exc),
+                    error_type="runtime_tool_budget_exceeded",
+                    tool=name,
+                ),
+                "runtime_budget_rejected",
             )
         result = None
         error = None
@@ -1640,15 +1681,21 @@ class ToolRegistry:
                 execution_runtime is not None and execution_runtime._settle()
             )
         if uncertain:
-            return tool_error(
-                "External mutation outcome is uncertain; reconciliation required",
-                error_type="protected_mutation_uncertain",
-                tool=name,
-                reconciliation_required=True,
+            return reject_required_dependency(
+                tool_error(
+                    "External mutation outcome is uncertain; reconciliation required",
+                    error_type="protected_mutation_uncertain",
+                    tool=name,
+                    reconciliation_required=True,
+                ),
+                "mutation_outcome_uncertain",
             )
         if error is not None:
-            return error
-        return self._normalize_handler_result(name, result)
+            return reject_required_dependency(error, "dispatch_error")
+        normalized = self._normalize_handler_result(name, result)
+        if not self._handler_result_is_supported(result):
+            return reject_required_dependency(normalized, "malformed_result")
+        return normalized
 
     # ------------------------------------------------------------------
     # Query helpers  (replace redundant dicts in model_tools.py)

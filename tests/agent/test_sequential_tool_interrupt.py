@@ -100,6 +100,68 @@ def test_interrupt_abandons_noncooperative_tool(monkeypatch, fake_agent, _fast_p
     assert any(kw.get("status") == "cancelled" for kw in _fast_polls)
 
 
+def test_abandoned_interrupt_stays_failed_after_late_required_success(
+    monkeypatch,
+    fake_agent,
+    _fast_polls,
+):
+    from tools.required_dependency_runtime import activate, mark_pending, mark_success, reset
+
+    started = threading.Event()
+    release = threading.Event()
+    returned = threading.Event()
+
+    def _fake_middleware(agent_arg, **kwargs):
+        attempt = mark_pending(kwargs["function_name"], kwargs["function_args"])
+        started.set()
+        release.wait(timeout=10)
+        mark_success(attempt)
+        returned.set()
+        return _ManagedToolResult(
+            result="late success",
+            args=kwargs["function_args"],
+            middleware_trace=[],
+            blocked=False,
+            dispatched=True,
+        )
+
+    monkeypatch.setattr(
+        tool_executor, "_run_agent_tool_execution_middleware", _fake_middleware
+    )
+    monkeypatch.setattr(
+        tool_executor, "_resolve_sequential_tool_timeout", lambda: None
+    )
+
+    def _interrupt_soon():
+        assert started.wait(timeout=2)
+        fake_agent._interrupt_requested = True
+
+    token, state = activate(["web_extract"])
+    try:
+        threading.Thread(target=_interrupt_soon, daemon=True).start()
+        managed = _run_sequential_tool_execution_middleware(
+            fake_agent,
+            function_name="web_extract",
+            function_args={"url": "https://example.invalid"},
+            effective_task_id="t",
+            tool_call_id="call_cancelled",
+            execute=lambda args: "unused",
+        )
+        assert isinstance(managed.result, _ToolCancelledResult)
+        release.set()
+        assert returned.wait(timeout=2)
+        summary = state.finalize()
+    finally:
+        release.set()
+        reset(token)
+
+    assert summary["missing"] == []
+    assert summary["successful"] == []
+    assert summary["failed"] == [
+        {"tool": "web_extract", "reasons": ["executor_cancelled"]}
+    ]
+
+
 def test_interrupt_prefers_real_result_from_cooperative_tool(
     monkeypatch, fake_agent, _fast_polls
 ):

@@ -855,6 +855,73 @@ class TestRpcTokenAuthorization(unittest.TestCase):
         self.assertEqual(len(resp), 1)
         self.assertIn("Unauthorized", resp[0].get("error", ""))
 
+    def test_remote_call_limit_records_required_terminal_rejection(self):
+        """The file-RPC transport must fail required health before dispatch."""
+        import base64
+
+        from tools.code_execution_tool import _rpc_poll_loop
+        from tools.required_dependency_runtime import activate, reset
+
+        stop_event = threading.Event()
+        request = json.dumps({
+            "token": "secret-token",
+            "tool": "terminal",
+            "args": {"command": "true"},
+            "seq": 1,
+        })
+
+        class FakeEnv:
+            response = None
+            listed = False
+
+            def execute(self, command, cwd=None, timeout=None):
+                del cwd, timeout
+                if command.startswith("ls -1 "):
+                    if self.listed:
+                        return {"output": ""}
+                    self.listed = True
+                    return {"output": "/tmp/rpc/req_000001\n"}
+                if command.startswith("cat "):
+                    return {"output": request}
+                if command.startswith("echo '"):
+                    encoded = command.split("echo '", 1)[1].split("'", 1)[0]
+                    self.response = json.loads(
+                        base64.b64decode(encoded).decode("utf-8")
+                    )
+                    return {"output": ""}
+                if command.startswith("rm -f "):
+                    stop_event.set()
+                    return {"output": ""}
+                raise AssertionError(f"Unexpected remote command: {command}")
+
+        env = FakeEnv()
+        token, state = activate(["terminal"])
+        try:
+            with patch(
+                "model_tools.handle_function_call",
+                side_effect=AssertionError("limited call reached dispatch"),
+            ):
+                _rpc_poll_loop(
+                    env,
+                    "/tmp/rpc",
+                    "test-task",
+                    [],
+                    [0],
+                    max_tool_calls=0,
+                    allowed_tools=frozenset({"terminal"}),
+                    stop_event=stop_event,
+                    rpc_token="secret-token",
+                )
+            dependency = state.finalize()
+        finally:
+            reset(token)
+
+        self.assertIn("Tool call limit reached", env.response["error"])
+        self.assertEqual(
+            dependency["failed"],
+            [{"tool": "terminal", "reasons": ["execute_code_tool_limit"]}],
+        )
+
 
     def test_generated_module_sends_token(self):
         """The generated hermes_tools module reads HERMES_RPC_TOKEN and sends it."""

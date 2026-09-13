@@ -188,7 +188,10 @@ def test_sync_runbook_cron_jobs_projects_trusted_dependency_ownership() -> None:
     _save_runbook()
     metadata = _metadata()
     schedule = metadata["schedules"][0]
-    schedule["required_tool_dependencies"] = ["mcp__nirvana__get_tasks"]
+    schedule["required_tool_dependencies"] = [
+        "mcp__nirvana__get_tasks",
+        "terminal",
+    ]
     schedule["required_tool_dependency_mode"] = "when_invoked"
     schedule["failure_ownership"] = {
         "technical_owner": "root",
@@ -203,7 +206,10 @@ def test_sync_runbook_cron_jobs_projects_trusted_dependency_ownership() -> None:
 
     job = sync_runbook_cron_jobs("daily-brief")[0]
 
-    assert job["required_tool_dependencies"] == ["mcp__nirvana__get_tasks"]
+    assert job["required_tool_dependencies"] == [
+        "mcp__nirvana__get_tasks",
+        "terminal",
+    ]
     assert job["required_tool_dependency_mode"] == "when_invoked"
     assert job["failure_ownership"] == schedule["failure_ownership"]
 

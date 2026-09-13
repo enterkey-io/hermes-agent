@@ -1290,6 +1290,19 @@ def handle_function_call(
         function_args = {}
     _tool_middleware_trace = list(tool_request_middleware_trace or [])
 
+    def _record_dependency_rejection(reason: str) -> None:
+        """Keep direct dispatcher rejections visible to Cron dependency health."""
+        try:
+            from tools.required_dependency_runtime import mark_rejection
+
+            mark_rejection(function_name, function_args, reason)
+        except Exception:
+            logger.debug(
+                "Could not record required dependency rejection for %s",
+                function_name,
+                exc_info=True,
+            )
+
     # ── Tool Search bridge dispatch ──────────────────────────────────
     # tool_search and tool_describe are pure catalog reads — handle them
     # inline. tool_call is unwrapped to the underlying tool so that every
@@ -1423,6 +1436,7 @@ def handle_function_call(
 
     try:
         if function_name in _AGENT_LOOP_TOOLS:
+            _record_dependency_rejection("executor_short_circuit")
             return tool_error(f"{function_name} must be handled by the agent loop")
 
         # Check plugin hooks for a block/approve/modify directive (unless caller
@@ -1461,6 +1475,7 @@ def handle_function_call(
 
             if block_message is not None:
                 result = tool_error(block_message)
+                _record_dependency_rejection("executor_blocked")
                 _emit_post_tool_call_hook(
                     function_name=function_name,
                     function_args=function_args,
@@ -1485,6 +1500,7 @@ def handle_function_call(
 
             edit_block_message = maybe_require_edit_approval(function_name, function_args)
             if edit_block_message is not None:
+                _record_dependency_rejection("executor_blocked")
                 _emit_post_tool_call_hook(
                     function_name=function_name,
                     function_args=function_args,
@@ -1503,6 +1519,7 @@ def handle_function_call(
             logger.debug("ACP edit approval guard error: %s", _edit_approval_err)
             if function_name in {"write_file", "patch"}:
                 result = tool_error("Edit approval denied: approval guard failed")
+                _record_dependency_rejection("executor_blocked")
                 _emit_post_tool_call_hook(
                     function_name=function_name,
                     function_args=function_args,
@@ -1549,11 +1566,14 @@ def handle_function_call(
         except Exception:
             reset_current_observability_context = None
         try:
+            _registry_dispatch_started = False
             if function_name == "execute_code":
                 # Prefer the caller-provided list so subagents can't overwrite
                 # the parent's tool set via the process-global.
                 sandbox_enabled = enabled_tools if enabled_tools is not None else _last_resolved_tool_names
                 def _dispatch(next_args: Dict[str, Any]) -> Any:
+                    nonlocal _registry_dispatch_started
+                    _registry_dispatch_started = True
                     provenance_kwargs = {}
                     if _approval_provenance is not None:
                         provenance_kwargs = {
@@ -1574,6 +1594,8 @@ def handle_function_call(
                     )
             else:
                 def _dispatch(next_args: Dict[str, Any]) -> Any:
+                    nonlocal _registry_dispatch_started
+                    _registry_dispatch_started = True
                     provenance_kwargs = {}
                     if _approval_provenance is not None:
                         provenance_kwargs = {
@@ -1608,6 +1630,8 @@ def handle_function_call(
                     turn_id=turn_id or "",
                     api_request_id=api_request_id or "",
                 )
+            if not _registry_dispatch_started:
+                _record_dependency_rejection("executor_short_circuit")
         finally:
             if _approval_tokens is not None and reset_current_observability_context is not None:
                 try:
@@ -1669,6 +1693,7 @@ def handle_function_call(
         return result
 
     except Exception as e:
+        _record_dependency_rejection("executor_error")
         error_msg = f"Error executing {function_name}: {str(e)}"
         logger.exception(error_msg)
         result = tool_error(_sanitize_tool_error(error_msg))
