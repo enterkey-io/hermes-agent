@@ -114,6 +114,43 @@ def private_selected_envelope(tmp_path: Path) -> Path:
     return path
 
 
+def private_registry(
+    tmp_path: Path,
+    source_path: Path,
+    candidate: dict,
+    *,
+    note_id: str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    summary_sha256: str | None = None,
+) -> Path:
+    transcript_sha256 = gate._sha(source_path.read_bytes())
+    actual_summary_sha256 = gate._sha(gate.render_summary(gate.validate(transcript(), candidate, RECORDING)))
+    summary_sha256 = summary_sha256 or actual_summary_sha256
+    path = tmp_path / "plaud-evernote-registry.json"
+    path.write_text(json.dumps({
+        "version": 1,
+        "recordings": {
+            RECORDING: {
+                "creation": None,
+                "stages": {
+                    "transcript": {"sha256": transcript_sha256},
+                    "summary": {"sha256": summary_sha256},
+                },
+                "evernote": {
+                    "note_guid": note_id,
+                    "notebook_guid": "11111111-2222-3333-4444-555555555555",
+                    "transcript_sha256": transcript_sha256,
+                    "summary_sha256": summary_sha256,
+                    "verified": True,
+                    "replay_verified": True,
+                    "attachment_verified": True,
+                },
+            },
+        },
+    }))
+    path.chmod(0o600)
+    return path
+
+
 def test_owner_check_tolerates_platform_without_getuid(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     metadata = tmp_path.stat()
     monkeypatch.delattr(gate.os, "getuid")
@@ -169,6 +206,13 @@ def test_negation_and_capability_offer_are_not_commitments(segment: int) -> None
         gate.validate(transcript(), candidate, RECORDING)
 
 
+def test_nonadjacent_negation_is_not_a_commitment() -> None:
+    source = transcript()
+    source["segments"][1]["content"] = "I will definitely not send the candidate brief."
+    with pytest.raises(gate.GroundingError, match="unconditional"):
+        gate.validate(source, draft(with_action=True), RECORDING)
+
+
 def test_undecided_statement_is_not_an_explicit_decision() -> None:
     candidate = draft()
     candidate["decisions"] = [6]
@@ -187,7 +231,10 @@ def test_status_remaining_in_question_is_not_a_decision() -> None:
         gate.validate(source, candidate, RECORDING)
 
 
-def test_render_then_finalize_actions_binds_exact_source_receipt_and_note(tmp_path: Path) -> None:
+def test_render_then_finalize_actions_binds_exact_source_receipt_and_note(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     source_path, metadata_path = private_source_files(tmp_path)
     source_index_path = private_source_index(tmp_path)
     selected_envelope_path = private_selected_envelope(tmp_path)
@@ -208,6 +255,7 @@ def test_render_then_finalize_actions_binds_exact_source_receipt_and_note(tmp_pa
     assert receipt["status"] == "validated"
     assert receipt["rendering"] == "whole-source-segments"
     assert all(path.stat().st_mode & 0o777 == 0o600 for path in (render_args.summary_output, render_args.actions_output, render_args.receipt_output))
+    monkeypatch.setattr(gate, "REGISTRY_PATH", private_registry(tmp_path, source_path, draft(with_action=True)))
 
     finalize_args = type("Args", (), {
         "recording_id": RECORDING,
@@ -217,7 +265,6 @@ def test_render_then_finalize_actions_binds_exact_source_receipt_and_note(tmp_pa
         "draft_file": draft_path,
         "receipt_file": render_args.receipt_output,
         "selected_envelope_file": selected_envelope_path,
-        "note_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
         "plan_output": tmp_path / "action-plan.json",
         "delivery_output": tmp_path / "delivery.txt",
     })()
@@ -229,6 +276,44 @@ def test_render_then_finalize_actions_binds_exact_source_receipt_and_note(tmp_pa
     assert "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" in plan["actions"][0]["note"]
     assert result["delivery_sha256"] == gate._sha(finalize_args.delivery_output.read_bytes())
     assert finalize_args.delivery_output.read_text().startswith("Internal finance and integration check-in\n")
+
+
+def test_unbound_evernote_note_blocks_finalization(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source_path, metadata_path = private_source_files(tmp_path)
+    source_index_path = private_source_index(tmp_path)
+    selected_envelope_path = private_selected_envelope(tmp_path)
+    candidate = draft()
+    draft_path = tmp_path / "grounding-draft.json"
+    draft_path.write_text(json.dumps(candidate))
+    draft_path.chmod(0o600)
+    render_args = type("Args", (), {
+        "recording_id": RECORDING,
+        "transcript_file": source_path,
+        "source_metadata_file": metadata_path,
+        "source_index_file": source_index_path,
+        "draft_file": draft_path,
+        "summary_output": tmp_path / "summary.md",
+        "actions_output": tmp_path / "grounded-actions.json",
+        "receipt_output": tmp_path / "grounding-receipt.json",
+    })()
+    gate.render(render_args)
+    registry_path = private_registry(tmp_path, source_path, candidate, summary_sha256="0" * 64)
+    monkeypatch.setattr(gate, "REGISTRY_PATH", registry_path)
+    finalize_args = type("Args", (), {
+        "recording_id": RECORDING,
+        "transcript_file": source_path,
+        "source_metadata_file": metadata_path,
+        "source_index_file": source_index_path,
+        "draft_file": draft_path,
+        "receipt_file": render_args.receipt_output,
+        "selected_envelope_file": selected_envelope_path,
+        "plan_output": tmp_path / "action-plan.json",
+        "delivery_output": tmp_path / "delivery.txt",
+    })()
+    with pytest.raises(gate.GroundingError, match="does not verify"):
+        gate.finalize_actions(finalize_args)
+    assert not finalize_args.plan_output.exists()
+    assert not finalize_args.delivery_output.exists()
 
 
 def test_receipt_drift_blocks_action_finalization(tmp_path: Path) -> None:
@@ -261,7 +346,6 @@ def test_receipt_drift_blocks_action_finalization(tmp_path: Path) -> None:
         "draft_file": draft_path,
         "receipt_file": render_args.receipt_output,
         "selected_envelope_file": selected_envelope_path,
-        "note_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
         "plan_output": tmp_path / "action-plan.json",
         "delivery_output": tmp_path / "delivery.txt",
     })()
@@ -300,7 +384,6 @@ def test_selected_envelope_mismatch_blocks_both_final_outputs(tmp_path: Path) ->
         "draft_file": draft_path,
         "receipt_file": render_args.receipt_output,
         "selected_envelope_file": selected_envelope_path,
-        "note_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
         "plan_output": tmp_path / "action-plan.json",
         "delivery_output": tmp_path / "delivery.txt",
     })()
@@ -361,7 +444,10 @@ def test_render_rejects_a_source_index_from_other_bytes(tmp_path: Path) -> None:
     assert not args.summary_output.exists()
 
 
-def test_cli_index_then_render_exercises_private_runtime_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cli_index_render_finalize_exercises_private_runtime_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     root = tmp_path / "processing"
     work = root / "run-test"
     work.mkdir(parents=True, mode=0o700)
@@ -395,6 +481,24 @@ def test_cli_index_then_render_exercises_private_runtime_path(tmp_path: Path, mo
     assert gate.main() == 0
     assert b"whole-source-segments" in (work / "grounding-receipt.json").read_bytes()
     assert (work / "summary.md").stat().st_mode & 0o777 == 0o600
+    selected_envelope_path = private_selected_envelope(work)
+    monkeypatch.setattr(gate, "REGISTRY_PATH", private_registry(work, source_path, draft()))
+    monkeypatch.setattr(sys, "argv", [
+        str(SCRIPT),
+        "finalize-actions",
+        "--recording-id", RECORDING,
+        "--transcript-file", str(source_path),
+        "--source-metadata-file", str(metadata_path),
+        "--source-index-file", str(work / "grounding-source.txt"),
+        "--draft-file", str(draft_path),
+        "--receipt-file", str(work / "grounding-receipt.json"),
+        "--selected-envelope-file", str(selected_envelope_path),
+        "--plan-output", str(work / "action-plan.json"),
+        "--delivery-output", str(work / "delivery.txt"),
+    ])
+    assert gate.main() == 0
+    assert json.loads((work / "action-plan.json").read_text())["actions"] == []
+    assert b"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" in (work / "delivery.txt").read_bytes()
 
 
 def test_schema_rejects_unreviewed_extra_fields() -> None:

@@ -3,7 +3,8 @@
 
 The model selects whole transcript segments and semantic sections in a strict
 draft. This tool owns all rendered prose, validates conservative decision and
-commitment signals, and has no provider, registry, or delivery surface.
+commitment signals, reads the canonical verified store binding, and has no
+provider mutation or delivery transport surface.
 """
 from __future__ import annotations
 
@@ -32,6 +33,7 @@ ALLOWED_TYPES = {
 }
 ALLOWED_STATES = {"inbox", "next", "waiting", "scheduled", "someday", "later"}
 WORK_ROOT = Path("/home/elliott/.hermes/profiles/milena/cache/plaud-processing")
+REGISTRY_PATH = Path("/home/elliott/.local/state/grace-workflows/plaud-evernote-registry.json")
 SELECTOR_SECTIONS = (
     "highlights",
     "decisions",
@@ -58,9 +60,9 @@ COMMITMENT_RE = re.compile(
     r"\b(?:i\s+will|i['\u2019]ll|i\s+am\s+going\s+to|i['\u2019]m\s+going\s+to)\b",
     re.IGNORECASE,
 )
-NEGATED_COMMITMENT_RE = re.compile(
-    r"\b(?:i\s+will\s+(?:not|never)|i\s+won['\u2019]t|"
-    r"i\s+am\s+not\s+going\s+to|i['\u2019]m\s+not\s+going\s+to)\b",
+NEGATION_RE = re.compile(
+    r"\b(?:not|never|no|cannot|can['\u2019]t|won['\u2019]t|don['\u2019]t|"
+    r"didn['\u2019]t|isn['\u2019]t|aren['\u2019]t|wasn['\u2019]t|weren['\u2019]t)\b",
     re.IGNORECASE,
 )
 CONDITIONAL_OR_WEAK_RE = re.compile(
@@ -323,7 +325,7 @@ def _validate_action(raw: Any, segments: Sequence[Segment], label: str) -> None:
         raise GroundingError(f"{label} has no Elliott-spoken evidence")
     if (
         not COMMITMENT_RE.search(content)
-        or NEGATED_COMMITMENT_RE.search(content)
+        or NEGATION_RE.search(content)
         or CONDITIONAL_OR_WEAK_RE.search(content)
         or "?" in content
     ):
@@ -653,6 +655,52 @@ def render(args: argparse.Namespace) -> dict[str, Any]:
     return receipt
 
 
+def _verified_evernote_binding(
+    recording_id: str,
+    transcript_sha256: str,
+    summary_sha256: str,
+) -> tuple[str, str]:
+    registry, _registry_bytes = _load_json(REGISTRY_PATH, "canonical Plaud registry")
+    registry = _mapping(registry, "canonical Plaud registry")
+    if registry.get("version") != 1:
+        raise GroundingError("canonical Plaud registry version is invalid")
+    recordings = _mapping(registry.get("recordings"), "canonical Plaud registry.recordings")
+    entry = _mapping(recordings.get(recording_id), "canonical Plaud registry recording")
+    if entry.get("creation") is not None:
+        raise GroundingError("Evernote creation outcome remains uncertain")
+    stages = _mapping(entry.get("stages"), "canonical Plaud registry recording.stages")
+    transcript_stage = _mapping(stages.get("transcript"), "canonical transcript stage")
+    summary_stage = _mapping(stages.get("summary"), "canonical summary stage")
+    binding = _mapping(entry.get("evernote"), "canonical Evernote binding")
+    note_id = binding.get("note_guid")
+    notebook_id = binding.get("notebook_guid")
+    if not isinstance(note_id, str) or not UUID_RE.fullmatch(note_id):
+        raise GroundingError("canonical Evernote note GUID is invalid")
+    if not isinstance(notebook_id, str) or not UUID_RE.fullmatch(notebook_id):
+        raise GroundingError("canonical Evernote notebook GUID is invalid")
+    if (
+        transcript_stage.get("sha256") != transcript_sha256
+        or summary_stage.get("sha256") != summary_sha256
+        or binding.get("transcript_sha256") != transcript_sha256
+        or binding.get("summary_sha256") != summary_sha256
+        or binding.get("verified") is not True
+        or binding.get("replay_verified") is not True
+        or binding.get("attachment_verified") is not True
+    ):
+        raise GroundingError("canonical Evernote binding does not verify the current source and summary")
+    proof = {
+        "recording_id": recording_id,
+        "note_guid": note_id,
+        "notebook_guid": notebook_id,
+        "transcript_sha256": transcript_sha256,
+        "summary_sha256": summary_sha256,
+        "verified": True,
+        "replay_verified": True,
+        "attachment_verified": True,
+    }
+    return note_id, _sha(_canonical(proof))
+
+
 def finalize_actions(args: argparse.Namespace) -> dict[str, Any]:
     transcript_bytes = _read_private(args.transcript_file, "transcript")
     source_metadata, source_metadata_bytes = _load_json(args.source_metadata_file, "source metadata")
@@ -683,15 +731,18 @@ def finalize_actions(args: argparse.Namespace) -> dict[str, Any]:
     }
     if receipt != expected:
         raise GroundingError("grounding receipt does not bind the current source and outputs")
-    if not UUID_RE.fullmatch(args.note_id):
-        raise GroundingError("note_id must be an Evernote GUID")
     title = _selected_title(selected_envelope, args.recording_id)
+    note_id, evernote_binding_sha256 = _verified_evernote_binding(
+        args.recording_id,
+        _sha(transcript_bytes),
+        _sha(summary),
+    )
     plan_actions = []
     for row in json.loads(actions)["actions"]:
         plan_actions.append({
             "name": row["name"],
             "note": (
-                f"Evernote note: {args.note_id}. Plaud recording: {args.recording_id}. "
+                f"Evernote note: {note_id}. Plaud recording: {args.recording_id}. "
                 f"Exact source commitment: {row['claim']} ({row['citation']})."
             ),
             "state": row["state"],
@@ -701,7 +752,7 @@ def finalize_actions(args: argparse.Namespace) -> dict[str, Any]:
     delivery = (
         f"{title}\n\n"
         f"Plaud recording {args.recording_id} was stored with a source-extractive summary "
-        f"in Evernote note {args.note_id}. Verified Elliott-owned actions: {len(plan_actions)}.\n"
+        f"in Evernote note {note_id}. Verified Elliott-owned actions: {len(plan_actions)}.\n"
     ).encode()
     if args.plan_output.exists() or args.delivery_output.exists():
         raise GroundingError("refusing to overwrite finalized effect artifacts")
@@ -711,7 +762,8 @@ def finalize_actions(args: argparse.Namespace) -> dict[str, Any]:
         "schema": "plaud-grounded-action-plan-v1",
         "status": "finalized",
         "recording_id": args.recording_id,
-        "note_id": args.note_id,
+        "note_id": note_id,
+        "evernote_binding_sha256": evernote_binding_sha256,
         "action_count": len(plan_actions),
         "action_plan_sha256": _sha(plan),
         "selected_envelope_sha256": _sha(selected_envelope_bytes),
@@ -739,7 +791,6 @@ def parser() -> argparse.ArgumentParser:
     render_parser.add_argument("--receipt-output", type=Path, required=True)
     finalize_parser.add_argument("--receipt-file", type=Path, required=True)
     finalize_parser.add_argument("--selected-envelope-file", type=Path, required=True)
-    finalize_parser.add_argument("--note-id", required=True)
     finalize_parser.add_argument("--plan-output", type=Path, required=True)
     finalize_parser.add_argument("--delivery-output", type=Path, required=True)
     return result
