@@ -485,6 +485,38 @@ def test_whole_run_failure_remains_suppressed_with_dependency_observation(
     assert events[0]["failure_type"] == "execution"
 
 
+def test_workforce_failure_precedes_simultaneous_dependency_failure(
+    monkeypatch,
+    tmp_path,
+):
+    from tools.required_dependency_runtime import mark_rejection
+    from tools.workforce_signal_runtime import mark_failure
+
+    def run_job(_job, **_kwargs):
+        mark_rejection(REQUIRED, {}, "executor_timeout")
+        mark_failure("signal persistence offline")
+        return True, "partial", "Apparently complete", None
+
+    delivered, marked, events = _run_cron(
+        monkeypatch,
+        tmp_path,
+        run_job,
+        _job(required_workforce_signal=True),
+    )
+
+    assert delivered == []
+    assert marked[0][1] is False
+    assert marked[0][2] == (
+        "Workforce factual record failed: signal persistence offline"
+    )
+    assert marked[0][3]["dependency_status"] == "degraded"
+    assert events[0]["failure_type"] == "execution"
+    assert events[0]["sanitized_error"] == marked[0][2]
+    assert events[0]["dependency_outcome"]["failed"] == [
+        {"tool": REQUIRED, "reasons": ["executor_timeout"]}
+    ]
+
+
 @pytest.mark.parametrize("mode", [None, "always", "when_invoked"])
 @pytest.mark.parametrize("invoked", [True, False])
 def test_dependency_health_is_persisted_with_native_job_run_lock(

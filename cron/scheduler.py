@@ -7051,6 +7051,12 @@ def _run_one_job_body(
                 f"{workforce_signal_failure}"
             )
 
+        # Both host checks remain visible in the persisted outcome, but the
+        # workforce failure owns the run's primary error when both fail.
+        dependency_is_primary_failure = bool(
+            dependency_failure and not workforce_signal_failure
+        )
+
         if isinstance(error, ProtectedMutationFailure) and error.uncooperative:
             pending_fail_stop = _prepare_fail_stop_after_uncooperative_handler(
                 execution_id=execution_id,
@@ -7165,7 +7171,7 @@ def _run_one_job_body(
                                 execution_id=execution_id,
                                 failure_type=(
                                     "required_tool_dependency"
-                                    if dependency_failure
+                                    if dependency_is_primary_failure
                                     else "execution"
                                 ),
                                 dependency_outcome=dependency_outcome,
@@ -7245,7 +7251,7 @@ def _run_one_job_body(
                         error,
                         failure_type=(
                             "required_tool_dependency"
-                            if dependency_failure
+                            if dependency_is_primary_failure
                             else None
                         ),
                     )

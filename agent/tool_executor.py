@@ -455,6 +455,31 @@ def _resolve_executor_tool_search_call(
         return function_name, function_args, None
 
 
+def _record_unstarted_tool_call_rejection(agent, tool_call, reason: str) -> None:
+    """Record one skipped model-emitted call under its effective tool name."""
+    function = getattr(tool_call, "function", None)
+    function_name = getattr(function, "name", "") or "tool"
+    raw_arguments = getattr(function, "arguments", "{}")
+    function_args, malformed_result, _admission = _parse_tool_arguments(
+        raw_arguments,
+        function_name=function_name,
+        agent=agent,
+    )
+    if malformed_result is not None:
+        # The shared parser already records this attempted call as rejected.
+        return
+    function_name, function_args, _scope_block = _resolve_executor_tool_search_call(
+        agent,
+        function_name,
+        function_args,
+    )
+    _record_required_dependency_rejection(
+        function_name,
+        function_args,
+        reason,
+    )
+
+
 @dataclass
 class _ManagedToolResult:
     result: Any
@@ -1193,9 +1218,9 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     if agent._interrupt_requested:
         print(f"{agent.log_prefix}⚡ Interrupt: skipping {num_tools} tool call(s)")
         for tc in tool_calls:
-            _record_required_dependency_rejection(
-                tc.function.name,
-                {},
+            _record_unstarted_tool_call_rejection(
+                agent,
+                tc,
                 "executor_cancelled",
             )
             cancelled_result = (
@@ -2038,7 +2063,13 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
 
 
 
-def _append_cancelled_tool_results(messages: list, tool_calls, *, reason: str) -> None:
+def _append_cancelled_tool_results(
+    agent,
+    messages: list,
+    tool_calls,
+    *,
+    reason: str,
+) -> None:
     """Append a cancelled ``tool`` result for each call in ``tool_calls``.
 
     Used when a hard interrupt (KeyboardInterrupt / BaseException) aborts the
@@ -2050,6 +2081,11 @@ def _append_cancelled_tool_results(messages: list, tool_calls, *, reason: str) -
     """
     for tc in tool_calls:
         name = getattr(getattr(tc, "function", None), "name", "") or "tool"
+        _record_unstarted_tool_call_rejection(
+            agent,
+            tc,
+            "executor_cancelled",
+        )
         messages.append(make_tool_result_message(
             name,
             f"[Tool execution cancelled — {name} was skipped due to {reason}]",
@@ -2081,6 +2117,11 @@ def _append_work_review_skipped_tool_results(
     """Persist paired no-effect results for calls after a review handoff."""
     for skipped_tc in tool_calls:
         skipped_name = skipped_tc.function.name
+        _record_unstarted_tool_call_rejection(
+            agent,
+            skipped_tc,
+            "review_handoff_skipped",
+        )
         messages.append(make_tool_result_message(
             skipped_name,
             (
@@ -2127,9 +2168,9 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 agent._vprint(f"{agent.log_prefix}⚡ Interrupt: skipping {len(remaining_calls)} tool call(s)", force=True)
             for skipped_tc in remaining_calls:
                 skipped_name = skipped_tc.function.name
-                _record_required_dependency_rejection(
-                    skipped_name,
-                    {},
+                _record_unstarted_tool_call_rejection(
+                    agent,
+                    skipped_tc,
                     "executor_cancelled",
                 )
                 cancelled_result = (
@@ -2626,6 +2667,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 # the batch before re-raising, so the assistant tool-call turn
                 # is never left without matching tool results (alternation).
                 _append_cancelled_tool_results(
+                    agent,
                     messages,
                     assistant_message.tool_calls[i - 1:],
                     reason="keyboard interrupt",
@@ -2714,6 +2756,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 # Emit a tool result for THIS call and every remaining call in
                 # the batch before re-raising (see interactive branch above).
                 _append_cancelled_tool_results(
+                    agent,
                     messages,
                     assistant_message.tool_calls[i - 1:],
                     reason="keyboard interrupt",
@@ -2902,6 +2945,11 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             agent._vprint(f"{agent.log_prefix}⚡ Interrupt: skipping {remaining} remaining tool call(s)", force=True)
             for skipped_tc in assistant_message.tool_calls[i:]:
                 skipped_name = skipped_tc.function.name
+                _record_unstarted_tool_call_rejection(
+                    agent,
+                    skipped_tc,
+                    "executor_cancelled",
+                )
                 messages.append(make_tool_result_message(
                     skipped_name,
                     f"[Tool execution skipped — {skipped_name} was not started. User sent a new message]",

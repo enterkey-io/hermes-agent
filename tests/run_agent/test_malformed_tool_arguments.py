@@ -233,3 +233,50 @@ def test_queued_required_call_timeout_records_failure():
     assert summary["failed"] == [
         {"tool": "terminal", "reasons": ["executor_timeout"]}
     ]
+
+
+def test_review_handoff_skipped_bridge_records_underlying_dependency():
+    import agent.tool_executor as tool_executor
+    from tools.registry import registry
+    from tools.required_dependency_runtime import activate, reset
+
+    name = "mcp__required__review_handoff"
+    dispatched = []
+    registry.register(
+        name=name,
+        toolset="mcp-required-test",
+        schema={
+            "name": name,
+            "description": "required bridge handoff test",
+            "parameters": {"type": "object", "properties": {}},
+        },
+        handler=lambda _args, **_kwargs: dispatched.append(True),
+    )
+    agent = _make_agent()
+    skipped = _tool_call(
+        "call-skipped-bridge",
+        json.dumps({"name": name, "arguments": {}}),
+        name="tool_call",
+    )
+    messages = []
+    token, state = activate([name])
+    try:
+        with patch(
+            "agent.tool_executor._tool_search_scoped_names",
+            return_value=frozenset({name}),
+        ):
+            assert tool_executor._append_work_review_skipped_tool_results(
+                agent,
+                messages,
+                [skipped],
+            )
+        summary = state.finalize()
+    finally:
+        reset(token)
+
+    assert dispatched == []
+    assert len(messages) == 1
+    assert summary["missing"] == []
+    assert summary["failed"] == [
+        {"tool": name, "reasons": ["review_handoff_skipped"]}
+    ]
