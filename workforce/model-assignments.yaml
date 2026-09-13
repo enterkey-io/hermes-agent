@@ -1,5 +1,5 @@
-schema_version: 2
-effective_date: 2026-08-20
+schema_version: 3
+effective_date: 2026-09-13
 status: trial
 approved_by: elliott
 
@@ -7,10 +7,8 @@ context_policy:
   provider: openai-codex
   model_prefix: gpt-5.6-
   mode: provider-resolved
-  direct_api_advertised_tokens: 1050000
-  codex_oauth_verified_tokens: 900000
   native_compact_threshold_tokens: 750000
-  note: Remove stale per-profile context_length pins. Hermes resolves the provider-aware ceiling; native server compaction fires just before the 85% local fallback on the verified Codex OAuth route.
+  note: Remove stale per-profile context_length pins. Hermes resolves the provider/model ceiling automatically. The native threshold requests server-side Responses compaction; it is not a model-capacity cap or a guarantee that native compaction owns every local preflight boundary.
 
 presets:
   sol-medium:
@@ -33,12 +31,12 @@ presets:
 route_policy:
   main_telegram_buzz_api:
     source: agent_assignment
-    note: Buzz and the ordinary agent default must never use GLM.
+    note: Buzz and the ordinary agent primary default must never use GLM; the configured service/rate fallback is governed separately.
   matrix:
     provider: ollama-cloud
     model: glm-5.2:cloud
     reasoning_effort: medium
-    note: GLM is reserved for Matrix chat only.
+    note: GLM-5.2 is reserved for Matrix chat; GLM-5.3 is a configured service/rate fallback exception.
   voice:
     source: profile_platform_override
     current_default_when_configured:
@@ -151,6 +149,24 @@ assignments:
   oyku: {profile: oyku, preset: terra-high}
   maggie: {profile: maggie, preset: sol-medium}
   mel: {profile: mel, preset: terra-high}
+
+fallback_policy:
+  provider: ollama-cloud
+  model: glm-5.3:cloud
+  reasoning_effort: high
+  activation: configured service/rate exception only
+  allowed_reasons:
+    - rate_limit
+    - upstream_rate_limit
+    - overloaded
+    - server_error
+    - timeout
+  exclusions:
+    - content policy or refusal
+    - context or payload recovery
+    - tool, protocol, or response-format repair
+    - authentication, billing, or client error
+  note: Fallback preserves the selected primary, channel routes, and per-job Cron pins.
 
 change_contract:
   - Update this registry first and record Elliott's approval.
