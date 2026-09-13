@@ -259,6 +259,28 @@ def test_failed_redirection_is_a_real_terminal_failure(workflow):
     assert summary["failed"] == [{"tool": "terminal", "reasons": ["nonzero_exit"]}]
 
 
+def test_custom_grep_basename_is_a_real_terminal_failure(workflow):
+    from tools.required_dependency_runtime import activate, reset
+
+    executable = workflow / "grep"
+    executable.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    executable.chmod(0o700)
+    token, state = activate(["terminal"])
+    try:
+        result = json.loads(_handle_terminal({
+            "command": shlex.quote(str(executable)),
+            "workdir": str(workflow),
+        }))
+        summary = state.finalize()
+    finally:
+        reset(token)
+
+    assert result["exit_code"] == 1
+    assert "exit_code_meaning" not in result
+    assert summary["successful"] == []
+    assert summary["failed"] == [{"tool": "terminal", "reasons": ["nonzero_exit"]}]
+
+
 def test_signal_note_does_not_turn_terminal_failure_into_success(monkeypatch):
     from tools.required_dependency_runtime import activate, reset
     import tools.terminal_tool as terminal_module

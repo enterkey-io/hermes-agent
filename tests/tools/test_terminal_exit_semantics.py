@@ -82,6 +82,22 @@ class TestInterpretExitCode:
 
     @pytest.mark.parametrize(
         "command",
+        ["./grep x file", "/tmp/diff a b", "PATH=/tmp grep x file"],
+    )
+    def test_custom_executable_does_not_receive_system_utility_semantics(
+        self, command
+    ):
+        assert _interpret_exit_code(command, 1) is None
+        assert _is_expected_nonzero_exit(command, 1) is False
+
+    def test_standard_absolute_executable_keeps_known_semantics(self):
+        assert _interpret_exit_code("/usr/bin/grep x file", 1) == (
+            "No matches found (not an error)"
+        )
+        assert _is_expected_nonzero_exit("/usr/bin/grep x file", 1) is True
+
+    @pytest.mark.parametrize(
+        "command",
         [
             "cd /missing && grep x file",
             "false || grep x file",

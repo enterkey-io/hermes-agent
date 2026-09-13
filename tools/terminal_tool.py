@@ -2410,8 +2410,18 @@ def _simple_status_command(command: str) -> str | None:
         return None
     for word in words:
         if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", word):
+            if word.startswith("PATH="):
+                return None
             continue
-        return word.split("/")[-1]
+        if "/" not in word:
+            return word
+        executable = Path(word)
+        if not executable.is_absolute() or str(executable.parent) not in {
+            "/bin",
+            "/usr/bin",
+        }:
+            return None
+        return executable.name
     return None
 
 
