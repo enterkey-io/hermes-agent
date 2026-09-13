@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from agent.error_classifier import FailoverReason, allows_configured_fallback
 from scripts.workforce_config_stage import stage
 from scripts.workforce_cutover_bundle import bundle
 
@@ -20,7 +21,24 @@ def test_workforce_registry_keeps_context_and_fallback_policies_compatible():
     assert "codex_oauth_verified_tokens" not in context
     assert context["native_compact_threshold_tokens"] > 0
     assert "context or payload recovery" in fallback["exclusions"]
-    assert set(fallback["allowed_reasons"]).isdisjoint(fallback["exclusions"])
+
+    configured_reasons = {FailoverReason(value) for value in fallback["allowed_reasons"]}
+    runtime_reasons = {
+        reason for reason in FailoverReason if allows_configured_fallback(reason)
+    }
+    assert configured_reasons == runtime_reasons
+
+    forbidden_reasons = {
+        FailoverReason.auth,
+        FailoverReason.auth_permanent,
+        FailoverReason.billing,
+        FailoverReason.context_overflow,
+        FailoverReason.payload_too_large,
+        FailoverReason.content_policy_blocked,
+        FailoverReason.format_error,
+        FailoverReason.invalid_encrypted_content,
+    }
+    assert all(not allows_configured_fallback(reason) for reason in forbidden_reasons)
 
     presets = registry["presets"]
     for assignment in registry["assignments"].values():
