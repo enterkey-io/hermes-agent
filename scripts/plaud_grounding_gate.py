@@ -330,8 +330,8 @@ def _validate_draft(draft: Any, recording_id: str, segments: tuple[Segment, ...]
     if draft.get("version") != 2 or draft.get("recording_id") != recording_id:
         raise GroundingError("draft version or recording_id is invalid")
 
-    _validate_classification(draft.get("classification"), segments)
-    _segment_number(draft.get("purpose_segment"), segments, "purpose_segment")
+    basis_number = _validate_classification(draft.get("classification"), segments)
+    purpose_number = _segment_number(draft.get("purpose_segment"), segments, "purpose_segment")
     claim_count = 2
 
     selected: dict[str, list[int]] = {}
@@ -348,9 +348,9 @@ def _validate_draft(draft: Any, recording_id: str, segments: tuple[Segment, ...]
     selected_numbers = [number for section in SELECTOR_SECTIONS for number in selected[section]]
     if len(selected_numbers) != len(set(selected_numbers)):
         raise GroundingError("a source segment may appear in only one summary section")
-    selected_characters = sum(len(_normalize(segments[number - 1].content)) for number in selected_numbers)
-    if selected_characters > 5000:
-        raise GroundingError("selected summary source exceeds the 5000-character limit")
+    header_numbers = {basis_number, purpose_number}
+    if set(selected_numbers) & header_numbers:
+        raise GroundingError("classification and purpose segments may not repeat in summary sections")
 
     for index, number in enumerate(selected["decisions"]):
         _validate_decision(segments[number - 1], f"decisions[{index}]")
@@ -377,6 +377,16 @@ def _validate_draft(draft: Any, recording_id: str, segments: tuple[Segment, ...]
         action_segments.append(action["segment"])
     if len(action_segments) != len(set(action_segments)):
         raise GroundingError("actions contains a duplicate segment")
+    if set(action_segments) & (set(selected_numbers) | header_numbers):
+        raise GroundingError("an action segment may not repeat elsewhere in the summary")
+    rendered_numbers = [basis_number]
+    if purpose_number != basis_number:
+        rendered_numbers.append(purpose_number)
+    rendered_numbers.extend(selected_numbers)
+    rendered_numbers.extend(action_segments)
+    selected_characters = sum(len(_normalize(segments[number - 1].content)) for number in rendered_numbers)
+    if selected_characters > 5000:
+        raise GroundingError("all rendered source exceeds the 5000-character limit")
     claim_count += len(actions)
     return ValidatedDraft(draft, segments, claim_count, claim_count)
 

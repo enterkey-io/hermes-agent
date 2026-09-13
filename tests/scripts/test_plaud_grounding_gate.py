@@ -62,7 +62,7 @@ def draft(*, with_action: bool = False) -> dict:
             "basis_segment": 1,
         },
         "purpose_segment": 1,
-        "highlights": [1, 2, 3],
+        "highlights": [3, 4, 7],
         "chapters": [
             {"first_segment": 1, "last_segment": 2},
             {"first_segment": 3, "last_segment": 7},
@@ -133,7 +133,6 @@ def test_exact_incident_action_shape_cannot_enter_selector_schema() -> None:
 
 def test_whole_segment_render_preserves_negation() -> None:
     candidate = draft()
-    candidate["highlights"] = [1, 3, 4]
     summary = gate.render_summary(gate.validate(transcript(), candidate, RECORDING))
     assert b"I will not send the candidate brief because the role was canceled." in summary
     assert b"I will send the candidate brief" not in summary
@@ -212,7 +211,7 @@ def test_receipt_drift_blocks_action_finalization(tmp_path: Path) -> None:
     })()
     gate.render(render_args)
     changed = json.loads(draft_path.read_text())
-    changed["purpose_segment"] = 2
+    changed["classification"]["confidence"] = 0.90
     draft_path.write_text(json.dumps(changed))
     draft_path.chmod(0o600)
     finalize_args = type("Args", (), {
@@ -319,6 +318,14 @@ def test_segment_cannot_be_repeated_across_semantic_sections() -> None:
     bad["uncertainties"] = [6]
     with pytest.raises(gate.GroundingError, match="only one summary section"):
         gate.validate(transcript(), bad, RECORDING)
+
+
+def test_total_source_budget_includes_basis_purpose_and_actions() -> None:
+    source = transcript()
+    source["segments"][0]["content"] += " " + ("basis " * 520).rstrip()
+    source["segments"][1]["content"] += " " + ("followup " * 330).rstrip()
+    with pytest.raises(gate.GroundingError, match="all rendered source"):
+        gate.validate(source, draft(with_action=True), RECORDING)
 
 
 def test_verified_fallback_can_ground_summary_but_never_owner_action(tmp_path: Path) -> None:
