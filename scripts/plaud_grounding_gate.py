@@ -485,6 +485,22 @@ def _action_name(segment: Segment) -> str:
     return prefix + content
 
 
+def _selected_title(envelope: Any, recording_id: str) -> str:
+    envelope = _mapping(envelope, "selected envelope")
+    _require_exact_keys(envelope, {"inventory_complete", "recording", "status", "wakeAgent"}, "selected envelope")
+    if envelope.get("inventory_complete") is not True or envelope.get("status") != "ready" or envelope.get("wakeAgent") is not True:
+        raise GroundingError("selected envelope is not a ready preflight result")
+    recording = _mapping(envelope.get("recording"), "selected envelope.recording")
+    _require_exact_keys(recording, {"duration_ms", "id", "recorded_at", "title"}, "selected envelope.recording")
+    if recording.get("id") != recording_id:
+        raise GroundingError("selected envelope recording_id does not match")
+    duration = recording.get("duration_ms")
+    if isinstance(duration, bool) or not isinstance(duration, (int, float)) or duration <= 0:
+        raise GroundingError("selected envelope duration_ms must be positive")
+    _text(recording.get("recorded_at"), "selected envelope.recorded_at", maximum=80)
+    return _text(recording.get("title"), "selected envelope.title", maximum=300)
+
+
 def render_grounded_actions(validated: ValidatedDraft) -> bytes:
     actions = []
     for row in validated.raw["actions"]:
@@ -554,7 +570,9 @@ def _validate_cli_paths(args: argparse.Namespace) -> None:
             "source_index_file": "grounding-source.txt",
             "draft_file": "grounding-draft.json",
             "receipt_file": "grounding-receipt.json",
+            "selected_envelope_file": "selected-envelope.json",
             "plan_output": "action-plan.json",
+            "delivery_output": "delivery.txt",
         })
     work = args.transcript_file.parent.resolve(strict=True)
     root = WORK_ROOT.resolve(strict=True)
@@ -628,6 +646,7 @@ def finalize_actions(args: argparse.Namespace) -> dict[str, Any]:
     source_metadata, source_metadata_bytes = _load_json(args.source_metadata_file, "source metadata")
     draft, draft_bytes = _load_json(args.draft_file, "draft")
     receipt, _receipt_bytes = _load_json(args.receipt_file, "grounding receipt")
+    selected_envelope, selected_envelope_bytes = _load_json(args.selected_envelope_file, "selected envelope")
     validated = validate_source(transcript_bytes, source_metadata, draft, args.recording_id)
     source_index = _read_private(args.source_index_file, "source index")
     if source_index != render_source_index(validated.segments):
@@ -654,6 +673,7 @@ def finalize_actions(args: argparse.Namespace) -> dict[str, Any]:
         raise GroundingError("grounding receipt does not bind the current source and outputs")
     if not UUID_RE.fullmatch(args.note_id):
         raise GroundingError("note_id must be an Evernote GUID")
+    title = _selected_title(selected_envelope, args.recording_id)
     plan_actions = []
     for row in json.loads(actions)["actions"]:
         plan_actions.append({
@@ -666,7 +686,15 @@ def finalize_actions(args: argparse.Namespace) -> dict[str, Any]:
             "explicit_elliott_owned": True,
         })
     plan = _canonical({"version": 1, "recording_id": args.recording_id, "actions": plan_actions})
+    delivery = (
+        f"{title}\n\n"
+        f"Plaud recording {args.recording_id} was stored with a source-extractive summary "
+        f"in Evernote note {args.note_id}. Verified Elliott-owned actions: {len(plan_actions)}.\n"
+    ).encode()
+    if args.plan_output.exists() or args.delivery_output.exists():
+        raise GroundingError("refusing to overwrite finalized effect artifacts")
     _write_new(args.plan_output, plan)
+    _write_new(args.delivery_output, delivery)
     return {
         "schema": "plaud-grounded-action-plan-v1",
         "status": "finalized",
@@ -674,6 +702,8 @@ def finalize_actions(args: argparse.Namespace) -> dict[str, Any]:
         "note_id": args.note_id,
         "action_count": len(plan_actions),
         "action_plan_sha256": _sha(plan),
+        "selected_envelope_sha256": _sha(selected_envelope_bytes),
+        "delivery_sha256": _sha(delivery),
         "provider_operations": 0,
     }
 
@@ -696,8 +726,10 @@ def parser() -> argparse.ArgumentParser:
     render_parser.add_argument("--actions-output", type=Path, required=True)
     render_parser.add_argument("--receipt-output", type=Path, required=True)
     finalize_parser.add_argument("--receipt-file", type=Path, required=True)
+    finalize_parser.add_argument("--selected-envelope-file", type=Path, required=True)
     finalize_parser.add_argument("--note-id", required=True)
     finalize_parser.add_argument("--plan-output", type=Path, required=True)
+    finalize_parser.add_argument("--delivery-output", type=Path, required=True)
     return result
 
 

@@ -97,6 +97,23 @@ def private_source_index(tmp_path: Path) -> Path:
     return index_path
 
 
+def private_selected_envelope(tmp_path: Path) -> Path:
+    path = tmp_path / "selected-envelope.json"
+    path.write_text(json.dumps({
+        "inventory_complete": True,
+        "recording": {
+            "duration_ms": 55000,
+            "id": RECORDING,
+            "recorded_at": "2026-09-10T19:00:32Z",
+            "title": "Internal finance and integration check-in",
+        },
+        "status": "ready",
+        "wakeAgent": True,
+    }))
+    path.chmod(0o600)
+    return path
+
+
 def test_valid_zero_action_draft_renders_only_complete_source_segments() -> None:
     validated = gate.validate(transcript(), draft(), RECORDING)
     summary = gate.render_summary(validated)
@@ -157,6 +174,7 @@ def test_undecided_statement_is_not_an_explicit_decision() -> None:
 def test_render_then_finalize_actions_binds_exact_source_receipt_and_note(tmp_path: Path) -> None:
     source_path, metadata_path = private_source_files(tmp_path)
     source_index_path = private_source_index(tmp_path)
+    selected_envelope_path = private_selected_envelope(tmp_path)
     draft_path = tmp_path / "grounding-draft.json"
     draft_path.write_text(json.dumps(draft(with_action=True)))
     draft_path.chmod(0o600)
@@ -182,8 +200,10 @@ def test_render_then_finalize_actions_binds_exact_source_receipt_and_note(tmp_pa
         "source_index_file": source_index_path,
         "draft_file": draft_path,
         "receipt_file": render_args.receipt_output,
+        "selected_envelope_file": selected_envelope_path,
         "note_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
         "plan_output": tmp_path / "action-plan.json",
+        "delivery_output": tmp_path / "delivery.txt",
     })()
     result = gate.finalize_actions(finalize_args)
     plan = json.loads(finalize_args.plan_output.read_text())
@@ -191,11 +211,14 @@ def test_render_then_finalize_actions_binds_exact_source_receipt_and_note(tmp_pa
     assert plan["actions"][0]["name"].startswith("Plaud follow-up: We need the final sales posting")
     assert "I will send the final posting to Heath tomorrow" in plan["actions"][0]["note"]
     assert "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" in plan["actions"][0]["note"]
+    assert result["delivery_sha256"] == gate._sha(finalize_args.delivery_output.read_bytes())
+    assert finalize_args.delivery_output.read_text().startswith("Internal finance and integration check-in\n")
 
 
 def test_receipt_drift_blocks_action_finalization(tmp_path: Path) -> None:
     source_path, metadata_path = private_source_files(tmp_path)
     source_index_path = private_source_index(tmp_path)
+    selected_envelope_path = private_selected_envelope(tmp_path)
     draft_path = tmp_path / "grounding-draft.json"
     draft_path.write_text(json.dumps(draft(with_action=True)))
     draft_path.chmod(0o600)
@@ -221,12 +244,54 @@ def test_receipt_drift_blocks_action_finalization(tmp_path: Path) -> None:
         "source_index_file": source_index_path,
         "draft_file": draft_path,
         "receipt_file": render_args.receipt_output,
+        "selected_envelope_file": selected_envelope_path,
         "note_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
         "plan_output": tmp_path / "action-plan.json",
+        "delivery_output": tmp_path / "delivery.txt",
     })()
     with pytest.raises(gate.GroundingError, match="does not bind"):
         gate.finalize_actions(finalize_args)
     assert not finalize_args.plan_output.exists()
+
+
+def test_selected_envelope_mismatch_blocks_both_final_outputs(tmp_path: Path) -> None:
+    source_path, metadata_path = private_source_files(tmp_path)
+    source_index_path = private_source_index(tmp_path)
+    selected_envelope_path = private_selected_envelope(tmp_path)
+    draft_path = tmp_path / "grounding-draft.json"
+    draft_path.write_text(json.dumps(draft()))
+    draft_path.chmod(0o600)
+    render_args = type("Args", (), {
+        "recording_id": RECORDING,
+        "transcript_file": source_path,
+        "source_metadata_file": metadata_path,
+        "source_index_file": source_index_path,
+        "draft_file": draft_path,
+        "summary_output": tmp_path / "summary.md",
+        "actions_output": tmp_path / "grounded-actions.json",
+        "receipt_output": tmp_path / "grounding-receipt.json",
+    })()
+    gate.render(render_args)
+    changed = json.loads(selected_envelope_path.read_text())
+    changed["recording"]["id"] = "different-recording"
+    selected_envelope_path.write_text(json.dumps(changed))
+    selected_envelope_path.chmod(0o600)
+    finalize_args = type("Args", (), {
+        "recording_id": RECORDING,
+        "transcript_file": source_path,
+        "source_metadata_file": metadata_path,
+        "source_index_file": source_index_path,
+        "draft_file": draft_path,
+        "receipt_file": render_args.receipt_output,
+        "selected_envelope_file": selected_envelope_path,
+        "note_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        "plan_output": tmp_path / "action-plan.json",
+        "delivery_output": tmp_path / "delivery.txt",
+    })()
+    with pytest.raises(gate.GroundingError, match="recording_id does not match"):
+        gate.finalize_actions(finalize_args)
+    assert not finalize_args.plan_output.exists()
+    assert not finalize_args.delivery_output.exists()
 
 
 def test_index_source_is_private_complete_and_refuses_overwrite(tmp_path: Path) -> None:
