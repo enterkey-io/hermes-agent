@@ -919,6 +919,8 @@ class TestEnabledToolsets:
             "max_detail_reads": 3,
             "max_list_items": 20,
             "allowed_tools": ["kanban_list", "workforce_signal"],
+            "write_tools": ["workforce_signal"],
+            "tool_call_limits": {"workforce_signal": 1},
         }
         job = create_job(
             prompt="bounded",
@@ -936,6 +938,38 @@ class TestEnabledToolsets:
                 prompt="bad",
                 schedule="every 1h",
                 runtime_tool_budget={**budget, "allowed_tools": []},
+            )
+        with pytest.raises(ValueError, match="subset of allowed_tools"):
+            create_job(
+                prompt="bad",
+                schedule="every 1h",
+                runtime_tool_budget={**budget, "write_tools": ["terminal"]},
+            )
+        with pytest.raises(ValueError, match="keys must be allowed tools"):
+            create_job(
+                prompt="bad",
+                schedule="every 1h",
+                runtime_tool_budget={**budget, "tool_call_limits": {"terminal": 1}},
+            )
+        with pytest.raises(ValueError, match="no greater than max_calls"):
+            create_job(
+                prompt="bad",
+                schedule="every 1h",
+                runtime_tool_budget={
+                    **budget,
+                    "tool_call_limits": {"workforce_signal": 9},
+                },
+            )
+        with pytest.raises(ValueError, match="unique non-empty names"):
+            create_job(
+                prompt="bad",
+                schedule="every 1h",
+                runtime_tool_budget={
+                    **budget,
+                    "allowed_tools": ["workforce_signal", "other"],
+                    "write_tools": [],
+                    "tool_call_limits": {"workforce_signal": 1, " workforce_signal ": 1},
+                },
             )
 
 
