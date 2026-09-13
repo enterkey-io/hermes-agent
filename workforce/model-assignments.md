@@ -1,16 +1,20 @@
 # Hermes Workforce Model Assignments
 
-Status: **owner-approved trial effective 2026-08-18**.
+Status: **owner-approved trial, reconciled September 13, 2026**.
 
-The machine-readable authority is `workforce/model-assignments.yaml`. Update
-that file first whenever Elliott changes the roster.
+The canonical live machine-readable authority is
+`/home/elliott/.hermes/inventory/workforce-model-assignments.yaml`. This tracked
+`workforce/model-assignments.yaml` is its versioned source and must remain
+semantically equivalent. Update and review both before changing the roster.
 
 ## Route rules
 
 - Main, Telegram, Buzz, and API sessions use the agent assignment below.
-- Buzz must not have a separate model override and must never use GLM.
+- Buzz must not have a separate model override. Its primary route never uses
+  GLM; the configured service/rate fallback is a separate exception.
 - Matrix is explicitly `ollama-cloud/glm-5.2:cloud` at medium effort for every
-  operational profile. GLM is reserved for Matrix chat.
+  operational profile. GLM-5.2 is reserved for Matrix chat; GLM-5.3 is the
+  configured service/rate fallback exception.
 - Voice remains a separate platform override. Where currently configured it is
   `openai-codex/gpt-5.4-mini` at low effort. Chloe and Emma have no voice route yet.
 - Smart approval review remains `openai-codex/gpt-5.6-terra` at xhigh effort,
@@ -24,11 +28,24 @@ that file first whenever Elliott changes the roster.
   task decomposition is disabled fleet-wide. Durable fan-out must be an
   intentional, reviewed task graph, not a side effect of whichever gateway
   acquires the shared lock first.
-- GPT-5.6 profiles do not carry a fixed `model.context_length`. OpenAI advertises
-  1,050,000 tokens for the direct API model family; Hermes' Codex OAuth route is
-  conservatively resolved to its locally verified 900,000-token usable ceiling.
-  Native Responses compaction is configured at 750,000 tokens, just before the
-  local 85% fallback (765,000), rather than at the old 200,000-token default.
+- GPT-5.6 profiles do not carry a fixed `model.context_length`; Hermes resolves
+  the provider/model limit automatically. Native Responses compaction is
+  configured at 750,000 tokens. That value is a provider-native trigger, not a
+  model-capacity cap or a guarantee that native compaction owns every local
+  preflight boundary.
+
+## Configured GLM-5.3 fallback
+
+- Global and profile fallback chains use `ollama-cloud/glm-5.3:cloud` at high
+  reasoning effort only for rate limits, upstream overload/server errors, and
+  timeouts.
+- Content policy, context/payload recovery, tool/protocol/format failures,
+  authentication, billing, and client errors stay on their native recovery or
+  terminal paths.
+- This does not replace primary assignments, Matrix `glm-5.2:cloud`, Voice,
+  smart approval review, context/cache policy, or independently pinned Cron
+  jobs. Amy and Kourtnie's GLM-5.2 primary routes share the provider, so this is
+  not independent resilience for an Ollama Cloud outage.
 
 ## Cost-aware subagents
 
@@ -107,7 +124,8 @@ and behavioral mismatch observed on Luna.
 
 ## Change procedure
 
-1. Confirm Elliott's intended assignment and update the YAML registry.
+1. Confirm Elliott's intended assignment and update the canonical live YAML
+   registry plus its versioned source.
 2. Back up every affected `config.yaml`, `AGENTS.md`, and Cron store.
 3. Set the profile default and reasoning effort; keep Matrix explicitly at
    GLM medium; do not create a Buzz override.
@@ -119,5 +137,6 @@ and behavioral mismatch observed on Luna.
    verify one read-only child canary before relying on the route.
 8. Apply and validate the complete auxiliary policy; verify low-cost tasks
    resolve to Luna, vision resolves to Terra, and task-specific limits survive.
-9. Verify GPT-5.6 profiles have no fixed `model.context_length`, resolve to the
-   provider-aware ceiling, and set native Responses compaction to 750,000.
+9. Verify all profiles have no stale fixed `model.context_length`, Hermes still
+   resolves each active provider/model automatically, and eligible GPT-5.6
+   profiles retain the reviewed native Responses trigger.

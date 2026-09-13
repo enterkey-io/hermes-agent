@@ -8,6 +8,25 @@ from scripts.workforce_config_stage import stage
 from scripts.workforce_cutover_bundle import bundle
 
 
+def test_workforce_registry_keeps_context_and_fallback_policies_compatible():
+    registry = yaml.safe_load(
+        (Path(__file__).parents[2] / "workforce/model-assignments.yaml").read_text()
+    )
+
+    context = registry["context_policy"]
+    fallback = registry["fallback_policy"]
+    assert context["mode"] == "provider-resolved"
+    assert "direct_api_advertised_tokens" not in context
+    assert "codex_oauth_verified_tokens" not in context
+    assert context["native_compact_threshold_tokens"] > 0
+    assert "context or payload recovery" in fallback["exclusions"]
+    assert set(fallback["allowed_reasons"]).isdisjoint(fallback["exclusions"])
+
+    presets = registry["presets"]
+    for assignment in registry["assignments"].values():
+        assert assignment["preset"] in presets
+
+
 def test_config_stage_and_bundle_are_complete_idempotent_and_non_mutating(tmp_path: Path):
     profiles = tmp_path / "profiles"
     agents = []
