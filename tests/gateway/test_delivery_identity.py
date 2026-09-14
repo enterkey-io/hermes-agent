@@ -112,6 +112,37 @@ async def test_fresh_final_split_receipt_preserves_send_result_order():
 
 
 @pytest.mark.asyncio
+async def test_interim_fresh_final_receipt_excludes_deleted_preview():
+    adapter = SimpleNamespace(
+        send=AsyncMock(
+            return_value=SimpleNamespace(
+                success=True,
+                message_id="segment-final",
+                continuation_message_ids=(),
+                raw_response=None,
+            )
+        ),
+        delete_message=AsyncMock(return_value=True),
+    )
+    consumer = GatewayStreamConsumer(adapter=adapter, chat_id="chat-1")
+    consumer._message_id = "segment-preview"
+    consumer._platform_message_ids = ["segment-preview"]
+    consumer._last_sent_text = "partial segment"
+
+    assert await consumer._try_fresh_final(
+        "complete segment",
+        is_turn_final=False,
+    ) is True
+    consumer._reset_segment_state()
+
+    adapter.delete_message.assert_awaited_once_with("chat-1", "segment-preview")
+    assert consumer.final_delivery_metadata_for("complete segment") == {
+        "response_identity": consumer.response_identity,
+        "platform_message_id": "segment-final",
+    }
+
+
+@pytest.mark.asyncio
 async def test_replacement_fallback_receipt_excludes_deleted_preview_identity():
     adapter = SimpleNamespace(
         MAX_MESSAGE_LENGTH=4096,
@@ -263,6 +294,62 @@ def test_external_split_final_delivery_records_every_message_id_in_order():
             "continuation-1",
             "continuation-2",
         ],
+    }
+
+
+def test_reset_segment_retains_matching_delivery_receipt():
+    consumer = GatewayStreamConsumer(adapter=object(), chat_id="chat-1")
+    consumer._message_id = "segment-message"
+    consumer._platform_message_ids = ["segment-message"]
+    consumer._last_sent_text = "reused final answer"
+
+    consumer._reset_segment_state()
+
+    assert consumer.delivered_final_matches("reused final answer") is True
+    assert consumer.final_delivery_metadata_for("reused final answer") == {
+        "response_identity": consumer.response_identity,
+        "platform_message_id": "segment-message",
+    }
+
+
+def test_reset_split_segment_binds_full_ledger_to_all_platform_ids():
+    consumer = GatewayStreamConsumer(adapter=object(), chat_id="chat-1")
+    consumer._message_id = "segment-2"
+    consumer._platform_message_ids = ["segment-1", "segment-2"]
+    consumer._last_sent_text = "second half"
+    consumer._stream_ledger = "first half second half"
+    consumer._turn_split_delivery = True
+
+    consumer._reset_segment_state()
+
+    assert consumer.has_delivered_text("first half second half") is True
+    assert consumer.has_delivered_text("second half") is False
+    assert consumer.final_delivery_metadata_for("first half second half") == {
+        "response_identity": consumer.response_identity,
+        "platform_message_ids": ["segment-1", "segment-2"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_reused_commentary_retains_adapter_expanded_receipt():
+    adapter = SimpleNamespace(
+        send=AsyncMock(
+            return_value=SimpleNamespace(
+                success=True,
+                message_id="commentary-1",
+                continuation_message_ids=(),
+                raw_response={"message_ids": ["commentary-1", "commentary-2"]},
+            )
+        )
+    )
+    consumer = GatewayStreamConsumer(adapter=adapter, chat_id="chat-1")
+
+    assert await consumer._send_commentary("reused commentary") is True
+
+    assert consumer.delivered_final_matches("reused commentary") is True
+    assert consumer.final_delivery_metadata_for("reused commentary") == {
+        "response_identity": consumer.response_identity,
+        "platform_message_ids": ["commentary-1", "commentary-2"],
     }
 
 

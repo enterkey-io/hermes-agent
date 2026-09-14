@@ -1416,6 +1416,49 @@ class SequentialStreamReceiptAgent:
         }
 
 
+class ReusedSegmentReceiptAgent:
+    """Reuse a pre-tool streamed segment as the current turn final."""
+
+    def __init__(self, **kwargs):
+        self.stream_delta_callback = kwargs.get("stream_delta_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        final = "answer completed before housekeeping"
+        self.stream_delta_callback(final)
+        self.stream_delta_callback(None)
+        return {
+            "final_response": final,
+            "response_previewed": True,
+            "assistant_message_row_id": 801,
+            "messages": [
+                {"role": "assistant", "content": final, "_row_id": 801}
+            ],
+            "api_calls": 2,
+        }
+
+
+class ReusedCommentaryReceiptAgent:
+    """Reuse a separately sent interim message as the current turn final."""
+
+    def __init__(self, **kwargs):
+        self.interim_assistant_callback = kwargs.get("interim_assistant_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        final = "answer completed before verification"
+        self.interim_assistant_callback(final, already_streamed=False)
+        return {
+            "final_response": final,
+            "response_previewed": True,
+            "assistant_message_row_id": 802,
+            "messages": [
+                {"role": "assistant", "content": final, "_row_id": 802}
+            ],
+            "api_calls": 2,
+        }
+
+
 class RotatingStreamReceiptAgent:
     """Stream a final whose persisted row belongs to a compressed child session."""
 
@@ -1589,6 +1632,84 @@ async def test_successful_split_transformed_edit_persists_every_message_id(
         "continuation-1",
         "continuation-2",
     ]
+
+
+@pytest.mark.asyncio
+async def test_reused_stream_segment_persists_its_platform_receipt(
+    monkeypatch, tmp_path
+):
+    receipts = []
+
+    def configure_runner(runner):
+        runner.session_store.record_assistant_delivery = (
+            lambda session_id, row_id, receipt: receipts.append(
+                (session_id, row_id, receipt)
+            )
+            or True
+        )
+
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        ReusedSegmentReceiptAgent,
+        session_id="sess-reused-segment",
+        config_data={
+            "display": {"tool_progress": "off", "interim_assistant_messages": False},
+            "streaming": {"enabled": True, "edit_interval": 0.01, "buffer_threshold": 1},
+        },
+        platform=Platform.TELEGRAM,
+        chat_id="chat-1",
+        chat_type="group",
+        thread_id=None,
+        adapter_cls=MetadataEditProgressCaptureAdapter,
+        configure_runner=configure_runner,
+    )
+
+    assert [item["content"] for item in adapter.sent] == [
+        "answer completed before housekeeping"
+    ]
+    assert result.get("already_sent") is True
+    assert receipts[0][0:2] == ("sess-reused-segment", 801)
+    assert receipts[0][2]["platform_message_id"] == "progress-1"
+
+
+@pytest.mark.asyncio
+async def test_reused_commentary_persists_its_platform_receipt(
+    monkeypatch, tmp_path
+):
+    receipts = []
+
+    def configure_runner(runner):
+        runner.session_store.record_assistant_delivery = (
+            lambda session_id, row_id, receipt: receipts.append(
+                (session_id, row_id, receipt)
+            )
+            or True
+        )
+
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        ReusedCommentaryReceiptAgent,
+        session_id="sess-reused-commentary",
+        config_data={
+            "display": {"tool_progress": "off", "interim_assistant_messages": True},
+            "streaming": {"enabled": False},
+        },
+        platform=Platform.TELEGRAM,
+        chat_id="chat-1",
+        chat_type="group",
+        thread_id=None,
+        adapter_cls=MetadataEditProgressCaptureAdapter,
+        configure_runner=configure_runner,
+    )
+
+    assert [item["content"] for item in adapter.sent] == [
+        "answer completed before verification"
+    ]
+    assert result.get("already_sent") is True
+    assert receipts[0][0:2] == ("sess-reused-commentary", 802)
+    assert receipts[0][2]["platform_message_id"] == "progress-1"
 
 
 @pytest.mark.asyncio

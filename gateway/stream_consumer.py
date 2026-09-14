@@ -301,6 +301,12 @@ class GatewayStreamConsumer:
         # of what was delivered, and the gateway's final-send suppression
         # can't recognize an already-delivered response. (#65919 review)
         self._delivered_segment_texts: list[str] = []
+        # Exact visible text plus ordered platform IDs for finalized segments
+        # and commentary. A later verification/housekeeping fallback may reuse
+        # one of those messages as the logical final response after active
+        # segment state has been reset; retain enough provenance to bind that
+        # delivery to the new durable assistant row.
+        self._delivered_text_receipts: list[tuple[str, tuple[str, ...]]] = []
         # Cache adapter lifecycle capability: only platforms that need an
         # explicit finalize call (e.g. DingTalk AI Cards) force us to make
         # a redundant final edit.  Everyone else keeps the fast path.
@@ -404,6 +410,37 @@ class GatewayStreamConsumer:
         elif ids:
             metadata["platform_message_ids"] = ids
         return metadata
+
+    def final_delivery_metadata_for(self, text: str) -> dict:
+        """Return the receipt for the delivery that exactly matches *text*."""
+        target = self._clean_for_display(text or "").strip()
+        if not target:
+            return {"response_identity": self._response_identity}
+
+        normalized_final = (
+            self._clean_for_display(self._delivered_final_text).strip()
+            if self._delivered_final_text is not None
+            else None
+        )
+        if normalized_final == ensure_closed_code_fences(target).strip():
+            return self.final_delivery_metadata
+
+        if not self._turn_split_delivery and self._visible_prefix().strip() == target:
+            return self.final_delivery_metadata
+
+        for delivered_text, platform_ids in reversed(self._delivered_text_receipts):
+            if delivered_text.strip() != target:
+                continue
+            metadata: dict[str, Any] = {
+                "response_identity": self._response_identity,
+            }
+            if len(platform_ids) == 1:
+                metadata["platform_message_id"] = platform_ids[0]
+            elif platform_ids:
+                metadata["platform_message_ids"] = list(platform_ids)
+            return metadata
+
+        return {"response_identity": self._response_identity}
 
     @property
     def final_content_delivered(self) -> bool:
@@ -569,9 +606,13 @@ class GatewayStreamConsumer:
         if not target:
             return None
         if self._delivered_final_text is None:
+            if self._historical_delivery_matches(final_text):
+                return True
             if self._turn_split_delivery:
                 # #78541: refuse legacy trust for payload-less split delivery.
                 return False
+            if self.has_delivered_text(final_text):
+                return True
             return None
         if self._delivered_final_text.strip() == target:
             return True
@@ -589,10 +630,38 @@ class GatewayStreamConsumer:
         visible_prefix = self._visible_prefix().strip()
         if visible_prefix == target:
             return True
+        return self._historical_delivery_matches(text)
+
+    def _historical_delivery_matches(self, text: str) -> bool:
+        """Return whether finalized commentary/segment text matches *text*."""
+        target = self._clean_for_display(text or "").strip()
+        if not target:
+            return False
         return any(
             sent.strip() == target
             for sent in (*self._delivered_commentary_texts, *self._delivered_segment_texts)
         )
+
+    def _remember_delivered_text_receipt(
+        self,
+        text: str,
+        platform_ids: tuple[str, ...],
+    ) -> None:
+        """Retain ordered platform provenance for an immutable visible message."""
+        delivered_text = self._clean_for_display(text or "").strip()
+        if not delivered_text:
+            return
+        normalized_ids: list[str] = []
+        for message_id in platform_ids:
+            if not message_id or message_id == "__no_edit__":
+                continue
+            normalized = str(message_id)
+            if normalized not in normalized_ids:
+                normalized_ids.append(normalized)
+        if normalized_ids:
+            self._delivered_text_receipts.append(
+                (delivered_text, tuple(normalized_ids))
+            )
 
     def on_segment_break(self) -> None:
         """Finalize the current stream segment and start a fresh message."""
@@ -657,12 +726,27 @@ class GatewayStreamConsumer:
         if preserve_no_edit and self._message_id == "__no_edit__":
             return
         # Retain the finalized visible text of the current segment before
-        # clearing ``_last_sent_text``, so ``has_delivered_text`` can still
-        # match it after a segment break. (#65919 review)
-        if self._last_sent_text:
-            finalized = self._clean_for_display(self._last_sent_text).strip()
+        # clearing its live buffers, so ``has_delivered_text`` can still match
+        # it after a segment break. A split segment uses its full ledger rather
+        # than the active tail because the receipt covers every sealed chunk.
+        # (#65919 review)
+        delivered_segment_text = (
+            self._stream_ledger
+            if self._turn_split_delivery and self._stream_ledger
+            else self._last_sent_text
+        )
+        if delivered_segment_text:
+            finalized = self._clean_for_display(delivered_segment_text).strip()
             if finalized:
                 self._delivered_segment_texts.append(finalized)
+                platform_ids = tuple(self._platform_message_ids)
+                if (
+                    not platform_ids
+                    and self._message_id
+                    and self._message_id != "__no_edit__"
+                ):
+                    platform_ids = (str(self._message_id),)
+                self._remember_delivered_text_receipt(finalized, platform_ids)
         self._message_id = None
         self._message_created_ts = None
         self._accumulated = ""
@@ -2017,6 +2101,10 @@ class GatewayStreamConsumer:
                 # an interim "preview" actually carried the final response, vs.
                 # unrelated commentary delivered during a session split (#14238).
                 self._delivered_commentary_texts.append(text)
+                self._remember_delivered_text_receipt(
+                    text,
+                    self._fresh_result_platform_message_ids(result),
+                )
             return result.success
         except Exception as e:
             logger.error("Commentary send error: %s", e)
@@ -2080,6 +2168,31 @@ class GatewayStreamConsumer:
             message_id = str(message_id)
             self._preview_message_ids.add(message_id)
             self._segment_preview_message_ids.add(message_id)
+
+    @staticmethod
+    def _fresh_result_platform_message_ids(result: Any) -> tuple[str, ...]:
+        """Return every ID from a fresh send in authoritative visible order."""
+        raw = getattr(result, "raw_response", None) or {}
+        if isinstance(raw, dict):
+            raw_ids = tuple(
+                str(mid) for mid in (raw.get("message_ids") or ()) if mid
+            )
+            if raw_ids:
+                return raw_ids
+
+        ordered_ids = tuple(
+            str(mid)
+            for mid in (
+                getattr(result, "continuation_message_ids", None) or ()
+            )
+            if mid
+        )
+        result_message_id = getattr(result, "message_id", None)
+        if result_message_id:
+            normalized_result_id = str(result_message_id)
+            if normalized_result_id not in ordered_ids:
+                ordered_ids += (normalized_result_id,)
+        return ordered_ids
 
     def _track_preview_ids_from_result(
         self,
@@ -2301,10 +2414,10 @@ class GatewayStreamConsumer:
                         stale_id, e,
                     )
         self._preview_message_ids = set()
-        # The fresh final replaces every preview, so its receipt must not
-        # retain deleted preview IDs as if they were visible final fragments.
-        if is_turn_final:
-            self._platform_message_ids = []
+        # The fresh send replaces every preview, so this segment's receipt must
+        # not retain deleted IDs as if they were still-visible fragments. This
+        # applies to interim segment finalization as well as the turn final.
+        self._platform_message_ids = []
         if new_message_id:
             self._message_id = new_message_id
             self._message_created_ts = time.monotonic()
