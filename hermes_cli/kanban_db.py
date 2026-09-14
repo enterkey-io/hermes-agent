@@ -89,8 +89,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 
-import yaml
-
 from hermes_cli.sqlite_util import add_column_if_missing as _add_column_if_missing
 from toolsets import get_toolset_names
 
@@ -3731,6 +3729,18 @@ def _bundled_skill_dir(skill_name: str) -> Optional[Path]:
     return matches[0].parent if len(matches) == 1 else None
 
 
+def _load_profile_config_readonly(profile_path: Path) -> Mapping[str, Any]:
+    """Load one worker profile through Hermes's canonical config pipeline."""
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    from hermes_cli.config import load_config_readonly
+
+    token = set_hermes_home_override(profile_path)
+    try:
+        return load_config_readonly()
+    finally:
+        reset_hermes_home_override(token)
+
+
 def _profile_has_skill(profile_path: Path, skill_name: str) -> bool:
     """Check installed/profile-external skill sources without running setup."""
     wanted = str(skill_name or "").strip()
@@ -3764,10 +3774,8 @@ def _profile_has_skill(profile_path: Path, skill_name: str) -> bool:
     if _matches(profile_path / "skills"):
         return True
     try:
-        cfg = yaml.safe_load(
-            (profile_path / "config.yaml").read_text(encoding="utf-8-sig")
-        ) or {}
-    except (OSError, yaml.YAMLError):
+        cfg = _load_profile_config_readonly(profile_path)
+    except Exception:
         cfg = {}
     skills_cfg = cfg.get("skills") if isinstance(cfg, dict) else None
     external = (
@@ -3792,10 +3800,8 @@ def _profile_has_skill(profile_path: Path, skill_name: str) -> bool:
 def _profile_has_static_model_route(profile_path: Path, task: Task | None = None) -> bool:
     """Validate configured model/provider presence without network polling."""
     try:
-        cfg = yaml.safe_load(
-            (profile_path / "config.yaml").read_text(encoding="utf-8-sig")
-        ) or {}
-    except (OSError, yaml.YAMLError):
+        cfg = _load_profile_config_readonly(profile_path)
+    except Exception:
         return False
     if not isinstance(cfg, dict):
         return False
