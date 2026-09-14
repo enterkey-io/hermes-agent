@@ -375,6 +375,106 @@ def test_review_and_intent_failures_return_to_recorded_implementer(
         assert task.intent_validator == "aurora"
 
 
+def test_intent_handoff_resolves_prior_failure_without_technical_review(
+    lifecycle_env, monkeypatch
+) -> None:
+    monkeypatch.setattr(kb, "lifecycle_enforcement_enabled", lambda *_a, **_k: True)
+    with kb.connect() as conn:
+        task_id = _managed_task(
+            conn,
+            title="research intent correction",
+            lifecycle_type="research",
+            assignee="sage",
+            implementer="sage",
+            technical_reviewer=None,
+            intent_validator="emily",
+            activation_owner=None,
+            closure_owner="emily",
+            return_to="sage",
+            idempotency_key="research-intent-correction-v1",
+        )
+        execution = kb.claim_task(conn, task_id)
+        assert execution is not None
+        assert kb.handoff_task(
+            conn,
+            task_id,
+            next_assignee="emily",
+            next_phase="intent_review",
+            summary="Research evidence is ready for intent review.",
+            evidence={"sources": ["primary"]},
+            expected_outcome="Validate the evidence and requested scope.",
+            recheck_condition="Every material claim remains source-grounded.",
+            expected_run_id=execution.current_run_id,
+        ) == (True, "emily")
+
+        intent = kb.claim_task(conn, task_id)
+        assert intent is not None
+        assert kb.request_changes(
+            conn,
+            task_id,
+            reason="One material claim needs a primary source.",
+            expected_run_id=intent.current_run_id,
+        ) == (True, "sage")
+        assert kb.task_graph_status(conn, task_id)["failed_reviews"]
+
+        correction = kb.claim_task(conn, task_id)
+        assert correction is not None
+        assert kb.handoff_task(
+            conn,
+            task_id,
+            next_assignee="emily",
+            next_phase="intent_review",
+            summary="The missing primary source is now included.",
+            evidence={"sources": ["primary", "correction"]},
+            expected_outcome="Revalidate the corrected evidence.",
+            recheck_condition="The corrected claim remains source-grounded.",
+            expected_run_id=correction.current_run_id,
+        ) == (True, "emily")
+        accepted = kb.claim_task(conn, task_id)
+        assert accepted is not None
+        assert kb.handoff_task(
+            conn,
+            task_id,
+            next_assignee="aurora",
+            next_phase="recovery",
+            summary="Intent review needs a bounded evidence recovery.",
+            evidence={"missing": "citation readback"},
+            expected_outcome="Recover the cited evidence without changing scope.",
+            recheck_condition="The citation readback is independently verified.",
+            expected_run_id=accepted.current_run_id,
+        ) == (True, "aurora")
+        assert kb.task_graph_status(conn, task_id)["failed_reviews"]
+
+        recovery = kb.claim_task(conn, task_id)
+        assert recovery is not None
+        assert kb.handoff_task(
+            conn,
+            task_id,
+            next_assignee="emily",
+            next_phase="intent_review",
+            summary="The citation readback was recovered.",
+            evidence={"readback": "verified"},
+            expected_outcome="Revalidate the corrected evidence.",
+            recheck_condition="The citation readback remains verified.",
+            expected_run_id=recovery.current_run_id,
+        ) == (True, "emily")
+        final_intent = kb.claim_task(conn, task_id)
+        assert final_intent is not None
+        assert kb.handoff_task(
+            conn,
+            task_id,
+            next_assignee="emily",
+            next_phase="closure",
+            summary="Intent review accepts the corrected research.",
+            evidence={"intent": "accepted"},
+            expected_outcome="Close the accepted research outcome.",
+            recheck_condition="All accepted claims remain source-grounded.",
+            expected_run_id=final_intent.current_run_id,
+        ) == (True, "emily")
+
+        assert kb.task_graph_status(conn, task_id)["failed_reviews"] == []
+
+
 def test_lifecycle_review_reassignments_notify_after_commit(
     lifecycle_env, monkeypatch
 ) -> None:
@@ -1319,6 +1419,123 @@ def test_handoff_tool_rejects_legacy_card(lifecycle_env, monkeypatch) -> None:
                 "evidence": {"tests": ["focused"]},
                 "expected_outcome": "Validate the requested behavior.",
                 "recheck_condition": "Card remains under legacy rules.",
+            }
+        )
+    )
+    assert "ok" not in response
+    assert "lifecycle" in response["error"]
+
+
+def test_pass_review_rejects_legacy_cards_before_mutation_or_idempotent_retry(
+    lifecycle_env, monkeypatch
+) -> None:
+    monkeypatch.setattr(kb, "lifecycle_enforcement_enabled", lambda *_a, **_k: True)
+    with kb.connect() as conn:
+        legacy_id = kb.create_task(
+            conn,
+            title="legacy review card",
+            assignee="sloane",
+            original_author="aurora",
+        )
+        implementation = kb.claim_task(conn, legacy_id)
+        assert implementation is not None
+        assert kb.request_review(
+            conn,
+            legacy_id,
+            summary="Legacy implementation is ready for review.",
+            metadata={"tests": ["focused"]},
+            reviewer="reese",
+            expected_run_id=implementation.current_run_id,
+        )
+        review = kb.claim_review_task(conn, legacy_id)
+        assert review is not None
+        ok, reason = kb.pass_review(
+            conn,
+            legacy_id,
+            summary="Attempted lifecycle review pass.",
+            metadata={"verdict": "pass"},
+            expected_run_id=review.current_run_id,
+        )
+        assert ok is False
+        assert "lifecycle" in str(reason)
+        legacy = kb.get_task(conn, legacy_id)
+        assert legacy is not None
+        assert (legacy.status, legacy.assignee, legacy.current_phase) == (
+            "running",
+            "reese",
+            None,
+        )
+
+        managed_id = _managed_task(
+            conn, title="removed review opt-in", idempotency_key="removed-review-opt-in-v1"
+        )
+        managed_execution = kb.claim_task(conn, managed_id)
+        assert managed_execution is not None
+        assert kb.request_review(
+            conn,
+            managed_id,
+            summary="Managed implementation is ready for review.",
+            metadata={"tests": ["focused"]},
+            expected_run_id=managed_execution.current_run_id,
+        )
+        managed_review = kb.claim_review_task(conn, managed_id)
+        assert managed_review is not None
+        assert kb.pass_review(
+            conn,
+            managed_id,
+            summary="PASS before opt-in removal.",
+            metadata={"verdict": "pass"},
+            expected_run_id=managed_review.current_run_id,
+        ) == (True, "aurora")
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET lifecycle_type = NULL WHERE id = ?", (managed_id,)
+            )
+        retry_ok, retry_reason = kb.pass_review(
+            conn,
+            managed_id,
+            summary="PASS before opt-in removal.",
+            metadata={"verdict": "pass"},
+            expected_run_id=managed_review.current_run_id,
+            retry_actor="reese",
+            retry_only=True,
+        )
+        assert retry_ok is False
+        assert "lifecycle" in str(retry_reason)
+
+
+def test_pass_review_tool_rejects_legacy_card(lifecycle_env, monkeypatch) -> None:
+    from tools import kanban_tools as kt
+
+    monkeypatch.setattr(kb, "lifecycle_enforcement_enabled", lambda *_a, **_k: True)
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="legacy review tool card",
+            assignee="sloane",
+            original_author="aurora",
+        )
+        implementation = kb.claim_task(conn, task_id)
+        assert implementation is not None
+        assert kb.request_review(
+            conn,
+            task_id,
+            summary="Legacy implementation is ready for review.",
+            metadata={"tests": ["focused"]},
+            reviewer="reese",
+            expected_run_id=implementation.current_run_id,
+        )
+        review = kb.claim_review_task(conn, task_id)
+        assert review is not None
+    monkeypatch.setenv("HERMES_KANBAN_TASK", task_id)
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(review.current_run_id))
+    monkeypatch.setenv("HERMES_PROFILE", "reese")
+
+    response = json.loads(
+        kt._handle_pass_review(
+            {
+                "summary": "Attempted lifecycle review pass.",
+                "evidence": {"tests": ["focused"]},
             }
         )
     )

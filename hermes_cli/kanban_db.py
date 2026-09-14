@@ -7338,12 +7338,32 @@ def task_graph_status(conn: sqlite3.Connection, task_id: str) -> dict[str, Any]:
         ).fetchone()
         if event is None:
             continue
-        resolved = conn.execute(
-            "SELECT 1 FROM task_events WHERE task_id = ? AND id > ? "
-            "AND kind IN ('review_passed', 'completed', 'archived') LIMIT 1",
+        resolution_events = conn.execute(
+            "SELECT kind, payload FROM task_events WHERE task_id = ? AND id > ? "
+            "AND kind IN ('review_passed', 'handoff_created', 'completed', "
+            "'archived') ORDER BY id",
             (row["id"], int(event["id"])),
-        ).fetchone()
-        if resolved is not None:
+        ).fetchall()
+        resolved = False
+        for resolution_event in resolution_events:
+            if resolution_event["kind"] != "handoff_created":
+                resolved = True
+                break
+            try:
+                resolution_payload = json.loads(
+                    resolution_event["payload"] or "{}"
+                )
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if (
+                isinstance(resolution_payload, dict)
+                and resolution_payload.get("source_phase") == "intent_review"
+                and resolution_payload.get("next_phase")
+                in {"activation", "live_acceptance", "closure"}
+            ):
+                resolved = True
+                break
+        if resolved:
             continue
         try:
             payload = json.loads(event["payload"] or "{}")
@@ -11944,6 +11964,8 @@ def pass_review(
     existing = get_task(conn, task_id)
     if existing is None:
         return False, "task not found"
+    if not existing.lifecycle_type:
+        return False, "review pass requires lifecycle_type opt-in"
     receiver = existing.intent_validator or existing.original_author
     if not receiver:
         return False, "review handoff has no intent validator or original author"
@@ -11975,6 +11997,8 @@ def pass_review(
         if row is None:
             return False, "task not found"
         task = Task.from_row(row)
+        if not task.lifecycle_type:
+            return False, "review pass requires lifecycle_type opt-in"
         if task.status != "running" or task.current_run_id is None:
             return False, "task is not in an active review run"
         if expected_run_id is not None and task.current_run_id != int(expected_run_id):

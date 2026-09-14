@@ -84,36 +84,47 @@ def _record_kanban_budget_exhausted(
                 expected_claim_lock = ""
         _conn = _kb.connect()
         try:
-            kwargs = {
-                "error": (
-                    f"Iteration budget exhausted "
-                    f"({api_call_count}/{max_iterations}) — "
-                    "task could not complete within the allowed "
-                    "iterations"
-                ),
-                "outcome": "timed_out",
-                "release_claim": True,
-                "end_run": True,
-                "event_payload_extra": {
-                    "budget_used": api_call_count,
-                    "budget_max": max_iterations,
-                },
-                "lifecycle_recovery_checkpoint": {
-                    "reason": "iteration_budget_exhausted",
-                    "budget": {
-                        "used": api_call_count,
-                        "max": max_iterations,
-                    },
+            error = (
+                f"Iteration budget exhausted "
+                f"({api_call_count}/{max_iterations}) — "
+                "task could not complete within the allowed "
+                "iterations"
+            )
+            event_payload_extra = {
+                "budget_used": api_call_count,
+                "budget_max": max_iterations,
+            }
+            recovery_checkpoint = {
+                "reason": "iteration_budget_exhausted",
+                "budget": {
+                    "used": api_call_count,
+                    "max": max_iterations,
                 },
             }
             if expected_run_id is not None and expected_claim_lock:
-                kwargs["expected_run_id"] = expected_run_id
-                kwargs["expected_claim_lock"] = expected_claim_lock
-            _kb._record_task_failure(
-                _conn,
-                kanban_task,
-                **kwargs,
-            )
+                _kb._record_task_failure(
+                    _conn,
+                    kanban_task,
+                    error=error,
+                    outcome="timed_out",
+                    release_claim=True,
+                    end_run=True,
+                    event_payload_extra=event_payload_extra,
+                    lifecycle_recovery_checkpoint=recovery_checkpoint,
+                    expected_run_id=expected_run_id,
+                    expected_claim_lock=expected_claim_lock,
+                )
+            else:
+                _kb._record_task_failure(
+                    _conn,
+                    kanban_task,
+                    error=error,
+                    outcome="timed_out",
+                    release_claim=True,
+                    end_run=True,
+                    event_payload_extra=event_payload_extra,
+                    lifecycle_recovery_checkpoint=recovery_checkpoint,
+                )
         finally:
             try:
                 _conn.close()
