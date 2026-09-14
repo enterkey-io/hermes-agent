@@ -3811,6 +3811,28 @@ class SessionStore:
             logger.debug("has_platform_message_id lookup failed", exc_info=True)
             return False
 
+    def merge_latest_matching_message_display_metadata(
+        self,
+        session_id: str,
+        *,
+        role: str,
+        content: str,
+        metadata: Dict[str, Any],
+    ) -> bool:
+        """Persist gateway presentation metadata without changing transcript text."""
+        if not self._db:
+            return False
+        try:
+            return self._db.merge_latest_matching_message_display_metadata(
+                session_id,
+                role=role,
+                content=content,
+                metadata=metadata,
+            )
+        except Exception:
+            logger.debug("gateway display metadata merge failed", exc_info=True)
+            return False
+
     def rewrite_transcript(
         self,
         session_id: str,

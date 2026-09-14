@@ -1282,6 +1282,24 @@ class TransformedStreamAgent:
         }
 
 
+class SequentialStreamReceiptAgent:
+    """Two logical turns with distinct streamed finals for delivery provenance."""
+
+    def __init__(self, **kwargs):
+        self.stream_delta_callback = kwargs.get("stream_delta_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        final = f"reply for {message}"
+        self.stream_delta_callback(final)
+        return {
+            "final_response": final,
+            "response_previewed": True,
+            "messages": [{"role": "assistant", "content": final}],
+            "api_calls": 1,
+        }
+
+
 @pytest.mark.asyncio
 async def test_transformed_response_edits_streamed_message_in_place(monkeypatch, tmp_path):
     """When a transform_llm_output hook modifies the response after streaming,
@@ -1313,6 +1331,50 @@ async def test_transformed_response_edits_streamed_message_in_place(monkeypatch,
     assert any("[plugin appended this]" in text for text in edited_texts), (
         f"expected transformed text in adapter.edits, got: {edited_texts!r}"
     )
+
+
+@pytest.mark.asyncio
+async def test_sequential_streamed_turns_do_not_reuse_persisted_delivery_receipts(
+    monkeypatch, tmp_path
+):
+    """A restored turn-one receipt cannot suppress a distinct streamed turn two."""
+    adapter = MetadataEditProgressCaptureAdapter(platform=Platform.TELEGRAM)
+    next_id = iter(("telegram-1", "telegram-2"))
+
+    async def send(chat_id, content, reply_to=None, metadata=None):
+        adapter.sent.append({"chat_id": chat_id, "content": content, "metadata": metadata})
+        return SendResult(success=True, message_id=next(next_id))
+
+    adapter.send = send
+    runner = _make_runner(adapter)
+    runner.config.streaming = StreamingConfig(enabled=True, edit_interval=0.01, buffer_threshold=1)
+    receipts = []
+    runner.session_store.merge_latest_matching_message_display_metadata = (
+        lambda session_id, **kwargs: receipts.append((session_id, kwargs)) or True
+    )
+    gateway_run = importlib.import_module("gateway.run")
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = SequentialStreamReceiptAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+    source = SessionSource(platform=Platform.TELEGRAM, chat_id="chat-1", chat_type="group")
+
+    first = await runner._run_agent("first", "", [], source, "session-1", session_key="same-session")
+    restored_history = first["messages"]
+    second = await runner._run_agent(
+        "second", "", restored_history, source, "session-1", session_key="same-session"
+    )
+
+    assert [call["content"] for call in adapter.sent] == ["reply for first", "reply for second"]
+    assert len(receipts) == 2
+    first_receipt = receipts[0][1]["metadata"]["gateway_delivery"]
+    second_receipt = receipts[1][1]["metadata"]["gateway_delivery"]
+    assert first_receipt["response_identity"] != second_receipt["response_identity"]
+    assert first_receipt["platform_message_id"] == "telegram-1"
+    assert second_receipt["platform_message_id"] == "telegram-2"
+    assert first["messages"][0]["display_metadata"]["gateway_delivery"] == first_receipt
+    assert second["messages"][0]["display_metadata"]["gateway_delivery"] == second_receipt
 
 
 @pytest.mark.asyncio

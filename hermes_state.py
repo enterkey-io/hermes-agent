@@ -9526,6 +9526,41 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
 
         return bool(self._execute_write(_do))
 
+    def merge_latest_matching_message_display_metadata(
+        self,
+        session_id: str,
+        *,
+        role: str,
+        content: str,
+        metadata: Dict[str, Any],
+    ) -> bool:
+        """Merge presentation metadata into this turn's latest persisted row.
+
+        Platform delivery completes after the agent persists its response. This
+        stamps the resulting receipt without modifying text or overwriting other
+        display metadata such as reactions.
+        """
+        if not session_id or not content or not isinstance(metadata, dict):
+            return False
+
+        def _do(conn):
+            row = conn.execute(
+                "SELECT id, display_metadata FROM messages WHERE session_id = ? "
+                "AND role = ? AND content = ? AND active = 1 ORDER BY id DESC LIMIT 1",
+                (session_id, role, self._encode_content(content)),
+            ).fetchone()
+            if row is None:
+                return False
+            merged = self._decode_display_metadata(row["display_metadata"]) or {}
+            merged.update(metadata)
+            conn.execute(
+                "UPDATE messages SET display_metadata = ? WHERE id = ?",
+                (self._encode_display_metadata(merged), row["id"]),
+            )
+            return True
+
+        return bool(self._execute_write(_do))
+
     #: Key under which message reactions live inside ``display_metadata``.
     #: Reactions share the existing per-message JSON column rather than a side
     #: table so they survive rewind/compaction row rewrites with the row itself.

@@ -21,6 +21,7 @@ import logging
 import queue
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -226,6 +227,12 @@ class GatewayStreamConsumer:
         # turn-final payload for multi-message deliveries (#78541).
         self._stream_ledger = ""
         self._message_id: Optional[str] = None
+        # A receipt belongs to this logical response, never to its text:
+        # adjacent turns may legitimately produce identical assistant replies.
+        self._response_identity = uuid.uuid4().hex
+        # Ordered platform IDs for the active answer segment. A set cannot
+        # preserve the visible ordering of an overflow-split final response.
+        self._platform_message_ids: list[str] = []
         # Wall-clock timestamp (time.monotonic) when ``_message_id`` was
         # first assigned from a successful first-send.  Used by the
         # fresh-final logic to detect long-lived previews whose edit
@@ -375,6 +382,24 @@ class GatewayStreamConsumer:
         return self._message_id
 
     @property
+    def response_identity(self) -> str:
+        """Opaque identity for this one logical assistant response."""
+        return self._response_identity
+
+    @property
+    def final_delivery_metadata(self) -> dict:
+        """Content-free receipt to persist with the finalized assistant row."""
+        ids = list(self._platform_message_ids)
+        if not ids and self._message_id and self._message_id != "__no_edit__":
+            ids = [str(self._message_id)]
+        metadata: dict[str, Any] = {"response_identity": self._response_identity}
+        if len(ids) == 1:
+            metadata["platform_message_id"] = ids[0]
+        elif ids:
+            metadata["platform_message_ids"] = ids
+        return metadata
+
+    @property
     def final_content_delivered(self) -> bool:
         """True when the final response content reached the user, even if
         the subsequent cosmetic edit (cursor removal) failed."""
@@ -472,6 +497,25 @@ class GatewayStreamConsumer:
         self._delivered_final_text = ensure_closed_code_fences(
             self._clean_for_display(source)
         ).strip()
+        self._record_final_platform_message_ids()
+
+    def _record_final_platform_message_ids(
+        self, continuation_message_ids: tuple[str, ...] = (),
+    ) -> None:
+        """Capture final platform IDs once, retaining deterministic order."""
+        for message_id in (self._message_id, *continuation_message_ids):
+            if message_id and message_id != "__no_edit__":
+                normalized = str(message_id)
+                if normalized not in self._platform_message_ids:
+                    self._platform_message_ids.append(normalized)
+
+    def record_external_final_delivery(self, text: str, message_id: Optional[str] = None) -> None:
+        """Record a gateway reconciliation edit made after streaming ends."""
+        if message_id:
+            self._message_id = str(message_id)
+        self._final_response_sent = True
+        self._final_content_delivered = True
+        self._record_turn_final_payload(text)
 
     def delivered_final_matches(self, final_text: str) -> Optional[bool]:
         """Reconcile the recorded turn-final payload against ``final_text``.
@@ -601,6 +645,7 @@ class GatewayStreamConsumer:
         self._fallback_prefix = ""
         self._fallback_preserve_partial_messages = False
         self._segment_preview_message_ids = set()
+        self._platform_message_ids = []
         # #29346: a tool/segment boundary means what we delivered was an interim
         # preamble, not the final answer — clear the flags so a premature setter
         # can't fool the gateway. Safe: got_done returns before any reset, and
@@ -1498,6 +1543,10 @@ class GatewayStreamConsumer:
         chunks = self._split_text_chunks(continuation, safe_limit, len_fn=_len_fn)
 
         stale_message_id = self._message_id  # partial message to clean up
+        if continuation == final_text and not self._fallback_preserve_partial_messages:
+            # This fallback replaces (and tries to delete) the partial preview.
+            # Do not persist its stale ID as part of the final visible reply.
+            self._platform_message_ids = []
         last_message_id: Optional[str] = None
         last_successful_chunk = ""
         sent_any_chunk = False
@@ -1545,6 +1594,9 @@ class GatewayStreamConsumer:
             sent_any_chunk = True
             last_successful_chunk = chunk
             last_message_id = result.message_id or last_message_id
+            self._record_final_platform_message_ids(
+                (str(result.message_id),) if result.message_id else ()
+            )
             # Each fallback chunk is a fresh platform message — notify
             # so any stale tool-progress bubble gets closed off.
             self._notify_new_message()
@@ -1942,6 +1994,9 @@ class GatewayStreamConsumer:
         if isinstance(raw, dict):
             for mid in (raw.get("message_ids") or ()):
                 self._track_preview_id(mid)
+        self._record_final_platform_message_ids(
+            tuple(str(mid) for mid in (getattr(result, "continuation_message_ids", None) or ()))
+        )
 
     def _adapter_prefers_fresh_final(self, text: str) -> bool:
         """Return True when the adapter would rather finalize a streamed reply
@@ -2036,6 +2091,10 @@ class GatewayStreamConsumer:
                         stale_id, e,
                     )
         self._preview_message_ids = set()
+        # The fresh final replaces every preview, so its receipt must not
+        # retain deleted preview IDs as if they were visible final fragments.
+        if is_turn_final:
+            self._platform_message_ids = []
         if new_message_id:
             self._message_id = new_message_id
             self._message_created_ts = time.monotonic()
@@ -2045,6 +2104,7 @@ class GatewayStreamConsumer:
             # don't try to edit something we can't address.
             self._message_id = "__no_edit__"
             self._message_created_ts = None
+        self._track_preview_ids_from_result(result)
         self._already_sent = True
         self._last_sent_text = text
         if is_turn_final:

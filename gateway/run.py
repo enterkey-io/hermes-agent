@@ -29850,6 +29850,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         )
                         if getattr(_reconcile_res, "success", True):
                             response["already_sent"] = True
+                            _sc.record_external_final_delivery(
+                                _final,
+                                getattr(_reconcile_res, "message_id", None) or _sc_msg_id,
+                            )
                             logger.info(
                                 "Reconciled stale streamed finalize for session %s: edited message %s with the complete response (#71643).",
                                 session_key or "?", _sc_msg_id,
@@ -29883,6 +29887,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             finalize=True,
                         )
                         response["already_sent"] = True
+                        _sc.record_external_final_delivery(
+                            response["final_response"], _sc_msg_id
+                        )
                         logger.info(
                             "Edited streamed message %s for session %s to include plugin-transformed content.",
                             _sc_msg_id, session_key or "?",
@@ -29892,6 +29899,44 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             "Failed to edit streamed message for session %s: %s",
                             session_key or "?", _edit_err,
                         )
+
+        # A stream final has already been persisted by the agent before its
+        # platform delivery result is known. Attach only a receipt for this
+        # consumer's own reconciled current payload; prior-turn flags or equal
+        # text can never supply a receipt for this new response.
+        if isinstance(response, dict) and not response.get("failed") and _sc is not None:
+            _final = response.get("final_response") or ""
+            _matches = getattr(_sc, "delivered_final_matches", None)
+            if _final and callable(_matches):
+                try:
+                    _current_delivery = _matches(_final) is True
+                except Exception:
+                    _current_delivery = False
+                if _current_delivery:
+                    _receipt = getattr(_sc, "final_delivery_metadata", None)
+                    if isinstance(_receipt, dict) and _receipt.get("response_identity"):
+                        for _message in reversed(response.get("messages") or []):
+                            if (
+                                isinstance(_message, dict)
+                                and _message.get("role") == "assistant"
+                                and _message.get("content") == _final
+                            ):
+                                _metadata = dict(_message.get("display_metadata") or {})
+                                _metadata["gateway_delivery"] = _receipt
+                                _message["display_metadata"] = _metadata
+                                break
+                        _merge_receipt = getattr(
+                            self.session_store,
+                            "merge_latest_matching_message_display_metadata",
+                            None,
+                        )
+                        if callable(_merge_receipt):
+                            _merge_receipt(
+                                session_id,
+                                role="assistant",
+                                content=_final,
+                                metadata={"gateway_delivery": _receipt},
+                            )
 
         # Schedule deletion of tracked temporary progress bubbles after the
         # final response lands. Failed runs skip this so bubbles remain as
