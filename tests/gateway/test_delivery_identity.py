@@ -62,6 +62,29 @@ async def test_fresh_final_receipt_excludes_deleted_preview_identity():
     }
 
 
+@pytest.mark.asyncio
+async def test_replacement_fallback_receipt_excludes_deleted_preview_identity():
+    adapter = SimpleNamespace(
+        MAX_MESSAGE_LENGTH=4096,
+        send=AsyncMock(
+            return_value=SimpleNamespace(success=True, message_id="final-message")
+        ),
+        delete_message=AsyncMock(return_value=True),
+    )
+    consumer = GatewayStreamConsumer(adapter=adapter, chat_id="chat-1")
+    consumer._message_id = "preview-message"
+    consumer._last_sent_text = "stale preview"
+    consumer._platform_message_ids = ["preview-message"]
+
+    await consumer._send_fallback_final("complete response")
+
+    adapter.delete_message.assert_awaited_once_with("chat-1", "preview-message")
+    assert consumer.final_delivery_metadata == {
+        "response_identity": consumer.response_identity,
+        "platform_message_id": "final-message",
+    }
+
+
 def test_gateway_delivery_receipt_targets_exact_active_row_across_compaction(tmp_path):
     db_path = tmp_path / "state.db"
     db = SessionDB(db_path=db_path)

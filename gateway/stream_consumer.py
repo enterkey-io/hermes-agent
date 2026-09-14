@@ -503,10 +503,14 @@ class GatewayStreamConsumer:
         self._record_final_platform_message_ids()
 
     def _record_final_platform_message_ids(
-        self, continuation_message_ids: tuple[str, ...] = (),
+        self,
+        continuation_message_ids: tuple[str, ...] = (),
+        *,
+        include_current_message: bool = True,
     ) -> None:
         """Capture final platform IDs once, retaining deterministic order."""
-        for message_id in (self._message_id, *continuation_message_ids):
+        current_ids = (self._message_id,) if include_current_message else ()
+        for message_id in (*current_ids, *continuation_message_ids):
             if message_id and message_id != "__no_edit__":
                 normalized = str(message_id)
                 if normalized not in self._platform_message_ids:
@@ -709,8 +713,13 @@ class GatewayStreamConsumer:
         target = ensure_closed_code_fences(
             self._clean_for_display(final_text or "")
         ).strip()
+        source = (
+            self._stream_ledger
+            if self._turn_split_delivery and self._stream_ledger
+            else self._accumulated
+        )
         streamed = ensure_closed_code_fences(
-            self._clean_for_display(self._accumulated)
+            self._clean_for_display(source)
         ).strip()
         return bool(target) and streamed == target
 
@@ -1591,7 +1600,11 @@ class GatewayStreamConsumer:
         chunks = self._split_text_chunks(continuation, safe_limit, len_fn=_len_fn)
 
         stale_message_id = self._message_id  # partial message to clean up
-        if continuation == final_text and not self._fallback_preserve_partial_messages:
+        replaces_preview = (
+            continuation == final_text
+            and not self._fallback_preserve_partial_messages
+        )
+        if replaces_preview:
             # This fallback replaces (and tries to delete) the partial preview.
             # Do not persist its stale ID as part of the final visible reply.
             self._platform_message_ids = []
@@ -1643,7 +1656,8 @@ class GatewayStreamConsumer:
             last_successful_chunk = chunk
             last_message_id = result.message_id or last_message_id
             self._record_final_platform_message_ids(
-                (str(result.message_id),) if result.message_id else ()
+                (str(result.message_id),) if result.message_id else (),
+                include_current_message=not replaces_preview,
             )
             # Each fallback chunk is a fresh platform message — notify
             # so any stale tool-progress bubble gets closed off.

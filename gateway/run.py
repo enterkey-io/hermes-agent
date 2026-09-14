@@ -29952,9 +29952,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             None,
                         )
                         if _message is not None and _assistant_row_id is not None:
+                            _delivery_session_id = (
+                                response.get("session_id") or session_id
+                            )
                             try:
                                 _recorded = await self.async_session_store.record_assistant_delivery(
-                                    session_id,
+                                    _delivery_session_id,
                                     _assistant_row_id,
                                     _receipt,
                                 )
@@ -29976,7 +29979,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             logger.debug(
                                 "No persisted assistant row identity available for "
                                 "gateway delivery receipt (session=%s)",
-                                session_id,
+                                response.get("session_id") or session_id,
                             )
 
         # Schedule deletion of tracked temporary progress bubbles after the

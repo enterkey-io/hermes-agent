@@ -169,6 +169,47 @@ class TestDraftStreamingHappyPath:
         adapter.send.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_matching_overflowed_payload_finalizes_from_full_stream_ledger(self):
+        adapter = _make_draft_capable_adapter()
+        type(adapter).MAX_MESSAGE_LENGTH = 600
+        message_ids = iter(("sealed-head", "final-tail"))
+        adapter.send.side_effect = lambda **kwargs: SimpleNamespace(
+            success=True, message_id=next(message_ids)
+        )
+        cfg = StreamConsumerConfig(
+            transport="auto",
+            chat_type="dm",
+            edit_interval=0.01,
+            buffer_threshold=1,
+            cursor="",
+        )
+        consumer = GatewayStreamConsumer(adapter, "12345", cfg)
+        streamed_head = "A" * 700
+        streamed_tail = "B" * 50
+        complete = streamed_head + streamed_tail
+
+        consumer.on_delta(streamed_head)
+        task = asyncio.create_task(consumer.run())
+        for _ in range(100):
+            if consumer._turn_split_delivery:
+                break
+            await asyncio.sleep(0.01)
+        assert consumer._turn_split_delivery is True
+        assert consumer._accumulated != consumer._stream_ledger
+
+        consumer.on_delta(streamed_tail)
+        consumer.finish_if_matches(complete)
+        await asyncio.wait_for(task, timeout=1)
+
+        assert consumer.delivered_final_matches(complete) is True
+        sent_contents = [
+            call.kwargs["content"] for call in adapter.send.call_args_list
+        ]
+        assert len(sent_contents) == 2
+        assert sent_contents[0].startswith("A" * 400)
+        assert sent_contents[1].endswith(streamed_tail)
+
+    @pytest.mark.asyncio
     async def test_matching_completed_payload_finalizes_existing_edit_preview(self):
         adapter = _make_draft_capable_adapter(supports_draft=False)
         cfg = StreamConsumerConfig(

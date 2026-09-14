@@ -1344,6 +1344,29 @@ class SequentialStreamReceiptAgent:
         }
 
 
+class RotatingStreamReceiptAgent:
+    """Stream a final whose persisted row belongs to a compressed child session."""
+
+    def __init__(self, **kwargs):
+        self.stream_delta_callback = kwargs.get("stream_delta_callback")
+        self.session_id = kwargs.get("session_id")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        final = "reply persisted after compression rotation"
+        self.stream_delta_callback(final)
+        self.session_id = "session-child"
+        return {
+            "final_response": final,
+            "response_previewed": True,
+            "assistant_message_row_id": 601,
+            "messages": [
+                {"role": "assistant", "content": final, "_row_id": 601}
+            ],
+            "api_calls": 1,
+        }
+
+
 class BlockingPostTurnAgent:
     """Expose a slow post-turn phase after the visible response is complete."""
 
@@ -1478,6 +1501,48 @@ async def test_sequential_streamed_turns_do_not_reuse_persisted_delivery_receipt
     assert second_receipt["platform_message_id"] == "telegram-2"
     assert first["messages"][0]["display_metadata"]["gateway_delivery"] == first_receipt
     assert second["messages"][0]["display_metadata"]["gateway_delivery"] == second_receipt
+
+
+@pytest.mark.asyncio
+async def test_stream_receipt_follows_compression_rotated_session(monkeypatch, tmp_path):
+    adapter = MetadataEditProgressCaptureAdapter(platform=Platform.TELEGRAM)
+    runner = _make_runner(adapter)
+    runner.config.streaming = StreamingConfig(
+        enabled=True, edit_interval=0.01, buffer_threshold=1
+    )
+    receipts = []
+    runner.session_store.record_assistant_delivery = (
+        lambda session_id, row_id, receipt: receipts.append(
+            (session_id, row_id, receipt)
+        )
+        or True
+    )
+    gateway_run = importlib.import_module("gateway.run")
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(
+        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
+    )
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = RotatingStreamReceiptAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="chat-1",
+        chat_type="group",
+    )
+
+    result = await runner._run_agent(
+        "question",
+        "",
+        [],
+        source,
+        "session-parent",
+        session_key="telegram:chat-1",
+    )
+
+    assert result["session_id"] == "session-child"
+    assert receipts[0][0:2] == ("session-child", 601)
+    assert result["messages"][0]["display_metadata"]["gateway_delivery"] == receipts[0][2]
 
 
 @pytest.mark.asyncio
