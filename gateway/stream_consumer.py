@@ -2089,7 +2089,12 @@ class GatewayStreamConsumer:
     ) -> None:
         """Record every message id a send/edit result exposes: the primary id
         plus any continuation ids from an oversized split
-        (``continuation_message_ids`` or ``raw_response['message_ids']``)."""
+        (``continuation_message_ids`` or ``raw_response['message_ids']``).
+
+        A raw ID list is already in visible order. Without one, fresh sends use
+        the SendResult contract's continuation IDs followed by its last-message
+        ID; edits retain the existing target first, then their continuations.
+        """
         self._track_preview_id(getattr(result, "message_id", None))
         for mid in (getattr(result, "continuation_message_ids", None) or ()):
             self._track_preview_id(mid)
@@ -2107,19 +2112,37 @@ class GatewayStreamConsumer:
                 include_current_message=False,
             )
         else:
-            result_message_ids = ()
-            if not include_current_message:
-                result_message_id = getattr(result, "message_id", None)
-                if result_message_id:
-                    result_message_ids = (str(result_message_id),)
+            result_message_id = getattr(result, "message_id", None)
+            normalized_result_id = (
+                str(result_message_id) if result_message_id else None
+            )
+            continuation_ids = tuple(
+                str(mid)
+                for mid in (
+                    getattr(result, "continuation_message_ids", None) or ()
+                )
+                if mid
+            )
+            ordered_result_ids = continuation_ids
+            if (
+                normalized_result_id
+                and normalized_result_id not in ordered_result_ids
+            ):
+                ordered_result_ids += (normalized_result_id,)
+
+            current_message_id = (
+                str(self._message_id)
+                if self._message_id and self._message_id != "__no_edit__"
+                else None
+            )
+            preserve_existing_target = bool(
+                include_current_message
+                and current_message_id
+                and current_message_id != normalized_result_id
+            )
             self._record_final_platform_message_ids(
-                result_message_ids + tuple(
-                    str(mid)
-                    for mid in (
-                        getattr(result, "continuation_message_ids", None) or ()
-                    )
-                ),
-                include_current_message=include_current_message,
+                ordered_result_ids,
+                include_current_message=preserve_existing_target,
             )
 
     def _ingest_partial_overflow_result(self, result: Any, text: str) -> bool:

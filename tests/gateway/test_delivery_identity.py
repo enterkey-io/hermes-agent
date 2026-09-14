@@ -88,6 +88,30 @@ async def test_fresh_final_receipt_excludes_deleted_preview_identity():
 
 
 @pytest.mark.asyncio
+async def test_fresh_final_split_receipt_preserves_send_result_order():
+    adapter = SimpleNamespace(
+        send=AsyncMock(
+            return_value=SimpleNamespace(
+                success=True,
+                message_id="replacement-2",
+                continuation_message_ids=("replacement-1",),
+                raw_response=None,
+            )
+        ),
+        delete_message=AsyncMock(return_value=True),
+    )
+    consumer = GatewayStreamConsumer(adapter=adapter, chat_id="chat-1")
+    consumer._message_id = "preview-message"
+    consumer._platform_message_ids = ["preview-message"]
+
+    assert await consumer._try_fresh_final("complete response") is True
+    assert consumer.final_delivery_metadata == {
+        "response_identity": consumer.response_identity,
+        "platform_message_ids": ["replacement-1", "replacement-2"],
+    }
+
+
+@pytest.mark.asyncio
 async def test_replacement_fallback_receipt_excludes_deleted_preview_identity():
     adapter = SimpleNamespace(
         MAX_MESSAGE_LENGTH=4096,
@@ -161,6 +185,58 @@ async def test_fallback_receipt_ingests_adapter_expanded_send_ids():
     assert consumer.final_delivery_metadata == {
         "response_identity": consumer.response_identity,
         "platform_message_ids": ["fallback-1", "fallback-2"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_fallback_receipt_preserves_no_raw_split_order():
+    adapter = SimpleNamespace(
+        MAX_MESSAGE_LENGTH=4096,
+        send=AsyncMock(
+            return_value=SimpleNamespace(
+                success=True,
+                message_id="fallback-2",
+                continuation_message_ids=("fallback-1",),
+                raw_response=None,
+            )
+        ),
+        delete_message=AsyncMock(return_value=True),
+    )
+    consumer = GatewayStreamConsumer(adapter=adapter, chat_id="chat-1")
+    consumer._message_id = "preview-message"
+    consumer._last_sent_text = "stale preview"
+    consumer._platform_message_ids = ["preview-message"]
+
+    await consumer._send_fallback_final("complete response")
+
+    assert consumer.final_delivery_metadata == {
+        "response_identity": consumer.response_identity,
+        "platform_message_ids": ["fallback-1", "fallback-2"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_empty_fallback_split_receipt_preserves_send_result_order():
+    adapter = SimpleNamespace(
+        send=AsyncMock(
+            return_value=SimpleNamespace(
+                success=True,
+                message_id="replacement-2",
+                continuation_message_ids=("replacement-1",),
+                raw_response=None,
+            )
+        ),
+        delete_message=AsyncMock(return_value=True),
+    )
+    consumer = GatewayStreamConsumer(adapter=adapter, chat_id="chat-1")
+    consumer._message_id = "preview-message"
+    consumer._segment_preview_message_ids = {"preview-message"}
+    consumer._platform_message_ids = ["preview-message"]
+
+    assert await consumer._send_empty_fallback_final("complete response") == "delivered"
+    assert consumer.final_delivery_metadata == {
+        "response_identity": consumer.response_identity,
+        "platform_message_ids": ["replacement-1", "replacement-2"],
     }
 
 
