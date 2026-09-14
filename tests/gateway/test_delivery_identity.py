@@ -137,6 +137,33 @@ async def test_empty_fallback_receipt_excludes_deleted_preview_identity():
     }
 
 
+@pytest.mark.asyncio
+async def test_fallback_receipt_ingests_adapter_expanded_send_ids():
+    adapter = SimpleNamespace(
+        MAX_MESSAGE_LENGTH=4096,
+        send=AsyncMock(
+            return_value=SimpleNamespace(
+                success=True,
+                message_id="fallback-1",
+                continuation_message_ids=(),
+                raw_response={"message_ids": ["fallback-1", "fallback-2"]},
+            )
+        ),
+        delete_message=AsyncMock(return_value=True),
+    )
+    consumer = GatewayStreamConsumer(adapter=adapter, chat_id="chat-1")
+    consumer._message_id = "preview-message"
+    consumer._last_sent_text = "stale preview"
+    consumer._platform_message_ids = ["preview-message"]
+
+    await consumer._send_fallback_final("complete response")
+
+    assert consumer.final_delivery_metadata == {
+        "response_identity": consumer.response_identity,
+        "platform_message_ids": ["fallback-1", "fallback-2"],
+    }
+
+
 def test_external_split_final_delivery_records_every_message_id_in_order():
     consumer = GatewayStreamConsumer(adapter=object(), chat_id="chat-1")
     consumer._message_id = "original"
@@ -232,5 +259,42 @@ def test_gateway_delivery_receipt_targets_exact_active_row_across_compaction(tmp
         assert not db.record_assistant_delivery(
             "session-1", archived_first_row_id, first_receipt
         )
+    finally:
+        db.close()
+
+
+def test_persisted_platform_receipt_never_reaches_provider_messages(tmp_path):
+    from agent.transports.chat_completions import ChatCompletionsTransport
+    from run_agent import AIAgent
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.create_session("session-1", source="telegram")
+    messages = [
+        {"role": "user", "content": "question"},
+        {"role": "assistant", "content": "answer"},
+    ]
+    db.append_messages_batch("session-1", messages)
+    receipt = {
+        "response_identity": "a" * 32,
+        "platform_message_id": "telegram-42",
+    }
+
+    try:
+        assert db.record_assistant_delivery(
+            "session-1",
+            messages[1]["_row_id"],
+            receipt,
+        )
+        restored = db.get_messages_as_conversation("session-1")
+        assert restored[1]["message_id"] == "telegram-42"
+
+        sanitized = AIAgent._sanitize_api_messages(restored)
+        wire = ChatCompletionsTransport().convert_messages(sanitized)
+
+        assert wire == [
+            {"role": "user", "content": "question"},
+            {"role": "assistant", "content": "answer"},
+        ]
+        assert restored[1]["message_id"] == "telegram-42"
     finally:
         db.close()

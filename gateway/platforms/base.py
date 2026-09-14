@@ -2498,6 +2498,10 @@ class SendResult:
     success: bool
     message_id: Optional[str] = None
     error: Optional[str] = None
+    # Multi-message adapters may expose ``raw_response["message_ids"]`` as
+    # the authoritative ordered list of every platform message created by one
+    # send/edit. The stream consumer uses it for durable delivery receipts
+    # when rendering expands beyond ``message_id`` / continuation metadata.
     raw_response: Any = None
     # Adapter-specific metadata.  Cross-layer contracts that affect delivery
     # semantics must be documented at the producer and consumer sites.  Current

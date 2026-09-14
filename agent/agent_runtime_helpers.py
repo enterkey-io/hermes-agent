@@ -3581,6 +3581,34 @@ def sanitize_api_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]
         filtered.append(msg)
     messages = filtered
 
+    # --- Strip transcript and platform presentation metadata ---
+    # Session replay exposes platform_message_id as message_id for UI/recall
+    # compatibility, while a just-delivered live gateway row can still carry
+    # platform_message_id directly. Neither identifier nor the display-only
+    # fields belongs to any provider message schema. Remove them at the shared
+    # pre-call boundary on copies so every API mode is protected without
+    # mutating the durable/cached transcript or its prompt-cache content.
+    presentation_keys = {
+        "display_kind",
+        "display_metadata",
+        "message_id",
+        "platform_message_id",
+    }
+    if any(
+        isinstance(msg, dict) and presentation_keys.intersection(msg)
+        for msg in messages
+    ):
+        messages = [
+            {
+                key: value
+                for key, value in msg.items()
+                if key not in presentation_keys
+            }
+            if isinstance(msg, dict)
+            else msg
+            for msg in messages
+        ]
+
     # --- Heal empty-content non-final messages (self-recovery) ---
     # A dead stream can leave an empty assistant stub (or an empty user turn)
     # mid-transcript; the provider then 400s EVERY subsequent request until it

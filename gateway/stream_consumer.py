@@ -1679,9 +1679,9 @@ class GatewayStreamConsumer:
             sent_any_chunk = True
             last_successful_chunk = chunk
             last_message_id = result.message_id or last_message_id
-            self._record_final_platform_message_ids(
-                (str(result.message_id),) if result.message_id else (),
-                include_current_message=not replaces_preview,
+            self._track_preview_ids_from_result(
+                result,
+                include_current_message=False,
             )
             # Each fallback chunk is a fresh platform message — notify
             # so any stale tool-progress bubble gets closed off.
@@ -2081,7 +2081,12 @@ class GatewayStreamConsumer:
             self._preview_message_ids.add(message_id)
             self._segment_preview_message_ids.add(message_id)
 
-    def _track_preview_ids_from_result(self, result: Any) -> None:
+    def _track_preview_ids_from_result(
+        self,
+        result: Any,
+        *,
+        include_current_message: bool = True,
+    ) -> None:
         """Record every message id a send/edit result exposes: the primary id
         plus any continuation ids from an oversized split
         (``continuation_message_ids`` or ``raw_response['message_ids']``)."""
@@ -2102,13 +2107,19 @@ class GatewayStreamConsumer:
                 include_current_message=False,
             )
         else:
+            result_message_ids = ()
+            if not include_current_message:
+                result_message_id = getattr(result, "message_id", None)
+                if result_message_id:
+                    result_message_ids = (str(result_message_id),)
             self._record_final_platform_message_ids(
-                tuple(
+                result_message_ids + tuple(
                     str(mid)
                     for mid in (
                         getattr(result, "continuation_message_ids", None) or ()
                     )
-                )
+                ),
+                include_current_message=include_current_message,
             )
 
     def _ingest_partial_overflow_result(self, result: Any, text: str) -> bool:
