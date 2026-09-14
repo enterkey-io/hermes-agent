@@ -29949,6 +29949,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _content_delivered,
                 )
                 response["already_sent"] = True
+            elif not _is_empty_sentinel and _transformed and _streamed:
+                # The post-loop callback carries the fully transformed payload.
+                # When its early replacement already landed, avoid editing the
+                # same final a second time after maintenance completes.
+                logger.info(
+                    "Suppressing transformed final resend for session %s: "
+                    "the exact post-transform payload was delivered early.",
+                    session_key or "?",
+                )
+                response["already_sent"] = True
             elif not _is_empty_sentinel and not _transformed and _stale_finalized and _sc is not None:
                 # Stale finalize (#71643): the streamed message holds only the
                 # last preview snapshot. Prefer editing it up to the complete

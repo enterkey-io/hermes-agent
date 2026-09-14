@@ -1512,6 +1512,37 @@ class BlockingPostTurnAgent:
         }
 
 
+class BlockingTransformedPostTurnAgent:
+    """Queue a transformed final, then simulate blocking post-turn work."""
+
+    maintenance_started = threading.Event()
+    maintenance_release = threading.Event()
+
+    def __init__(self, **kwargs):
+        self.stream_delta_callback = kwargs.get("stream_delta_callback")
+        self.stream_final_callback = None
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        raw = "Raw answer before plugin transform"
+        final = raw + "\n\n[plugin appended this]"
+        self.stream_delta_callback(raw)
+        time.sleep(0.1)
+        self.stream_final_callback(final)
+        type(self).maintenance_started.set()
+        assert type(self).maintenance_release.wait(timeout=5)
+        return {
+            "final_response": final,
+            "response_previewed": True,
+            "response_transformed": True,
+            "assistant_message_row_id": 901,
+            "messages": [
+                {"role": "assistant", "content": raw, "_row_id": 901}
+            ],
+            "api_calls": 1,
+        }
+
+
 @pytest.mark.asyncio
 async def test_transformed_response_edits_streamed_message_in_place(monkeypatch, tmp_path):
     """When a transform_llm_output hook modifies the response after streaming,
@@ -1935,6 +1966,76 @@ async def test_completed_native_draft_is_persisted_before_slow_post_turn_work(
     assert receipts[0][0:2] == ("session-1", 501)
     assert receipts[0][2]["platform_message_id"] == "progress-1"
     assert result["messages"][0]["platform_message_id"] == "progress-1"
+
+
+@pytest.mark.asyncio
+async def test_transformed_native_draft_is_replaced_before_post_turn_work(
+    monkeypatch,
+    tmp_path,
+):
+    BlockingTransformedPostTurnAgent.maintenance_started = threading.Event()
+    BlockingTransformedPostTurnAgent.maintenance_release = threading.Event()
+    adapter = DraftProgressCaptureAdapter(platform=Platform.TELEGRAM)
+    runner = _make_runner(adapter)
+    runner.config.streaming = StreamingConfig(
+        enabled=True,
+        transport="auto",
+        edit_interval=0.01,
+        buffer_threshold=1,
+    )
+    receipts = []
+    runner.session_store.record_assistant_delivery = (
+        lambda session_id, row_id, receipt: receipts.append(
+            (session_id, row_id, receipt)
+        )
+        or True
+    )
+    gateway_run = importlib.import_module("gateway.run")
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(
+        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
+    )
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = BlockingTransformedPostTurnAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="chat-1",
+        chat_type="dm",
+    )
+
+    task = asyncio.create_task(
+        runner._run_agent(
+            "question",
+            "",
+            [],
+            source,
+            "session-1",
+            session_key="telegram:chat-1",
+        )
+    )
+    try:
+        assert await asyncio.to_thread(
+            BlockingTransformedPostTurnAgent.maintenance_started.wait, 2
+        )
+        for _ in range(100):
+            if adapter.sent:
+                break
+            await asyncio.sleep(0.01)
+
+        assert task.done() is False
+        assert [item["content"] for item in adapter.sent] == [
+            "Raw answer before plugin transform\n\n[plugin appended this]"
+        ]
+    finally:
+        BlockingTransformedPostTurnAgent.maintenance_release.set()
+
+    result = await asyncio.wait_for(task, timeout=5)
+    assert len(adapter.sent) == 1
+    assert adapter.edits == []
+    assert result.get("already_sent") is True
+    assert receipts[0][0:2] == ("session-1", 901)
+    assert receipts[0][2]["platform_message_id"] == "progress-1"
 
 
 @pytest.mark.asyncio

@@ -237,7 +237,7 @@ class TestDraftStreamingHappyPath:
         assert consumer.delivered_final_matches("Complete answer") is True
 
     @pytest.mark.asyncio
-    async def test_mismatched_completed_payload_waits_for_ordinary_finish(self):
+    async def test_transformed_completed_payload_replaces_draft_before_cleanup(self):
         adapter = _make_draft_capable_adapter()
         cfg = StreamConsumerConfig(
             transport="auto",
@@ -251,15 +251,50 @@ class TestDraftStreamingHappyPath:
         consumer.on_delta("Raw model answer")
         task = asyncio.create_task(consumer.run())
         consumer.finish_if_matches("Raw model answer\n\n[plugin transform]")
-        await asyncio.sleep(0.05)
-
-        assert task.done() is False
-        adapter.send.assert_not_awaited()
-
-        consumer.finish()
         await asyncio.wait_for(task, timeout=1)
+
         adapter.send.assert_awaited_once()
-        assert consumer.delivered_final_matches("Raw model answer") is True
+        assert adapter.send.call_args.kwargs["content"] == (
+            "Raw model answer\n\n[plugin transform]"
+        )
+        assert consumer.delivered_final_matches(
+            "Raw model answer\n\n[plugin transform]"
+        ) is True
+
+        # The ordinary post-maintenance signal stays idempotent.
+        consumer.finish()
+        await asyncio.sleep(0)
+        adapter.send.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_reused_finalized_segment_is_adopted_without_duplicate_send(self):
+        adapter = _make_draft_capable_adapter()
+        consumer = GatewayStreamConsumer(
+            adapter,
+            "12345",
+            StreamConsumerConfig(
+                transport="auto",
+                chat_type="dm",
+                edit_interval=0.01,
+                buffer_threshold=5,
+                cursor="",
+            ),
+        )
+        consumer._delivered_segment_texts.append("Already delivered")
+        consumer._delivered_text_receipts.append(
+            ("Already delivered", ("segment-message",))
+        )
+
+        task = asyncio.create_task(consumer.run())
+        consumer.finish_if_matches("Already delivered")
+        await asyncio.wait_for(task, timeout=1)
+
+        adapter.send.assert_not_awaited()
+        assert consumer.final_response_sent is True
+        assert consumer.final_delivery_metadata_for("Already delivered") == {
+            "response_identity": consumer.response_identity,
+            "platform_message_id": "segment-message",
+        }
 
     @pytest.mark.asyncio
     async def test_edit_preview_still_marks_expect_edits(self):

@@ -1,7 +1,10 @@
 import json
+import threading
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
+
+import pytest
 
 from agent.turn_finalizer import finalize_turn
 
@@ -275,16 +278,38 @@ def test_final_response_fill_invalidates_flush_scan_cursor():
     assert agent._db_flush_scan_prefix is None
 
 
-def test_visible_final_is_signaled_after_persist_and_before_micro_compaction(
+@pytest.mark.parametrize(
+    "blocked_phase",
+    ["trajectory", "cleanup", "persist", "micro_compact"],
+)
+def test_visible_final_is_signaled_before_blocking_post_turn_maintenance(
     monkeypatch,
+    blocked_phase,
 ):
+    entered = threading.Event()
+    release = threading.Event()
+    visible = threading.Event()
     events = []
     agent = FakeAgent()
-    agent._persist_session = lambda *_args: events.append("persist")
-    agent.stream_final_callback = lambda text: events.append(("visible", text))
+
+    def maintenance(phase):
+        events.append(phase)
+        if phase == blocked_phase:
+            entered.set()
+            assert release.wait(timeout=2)
+
+    agent._save_trajectory = lambda *_args: maintenance("trajectory")
+    agent._cleanup_task_resources = lambda *_args: maintenance("cleanup")
+    agent._persist_session = lambda *_args, **_kwargs: maintenance("persist")
+
+    def signal_visible(text):
+        events.append(("visible", text))
+        visible.set()
+
+    agent.stream_final_callback = signal_visible
 
     def micro_compact(messages):
-        events.append("micro_compact")
+        maintenance("micro_compact")
         return messages
 
     agent.context_compressor = SimpleNamespace(
@@ -304,26 +329,48 @@ def test_visible_final_is_signaled_after_persist_and_before_micro_compaction(
         {"role": "assistant", "content": "Raw answer"},
     ]
 
-    result = finalize_turn(
-        agent,
-        final_response="Raw answer",
-        api_call_count=1,
-        interrupted=False,
-        failed=False,
-        messages=messages,
-        conversation_history=[],
-        effective_task_id="task",
-        turn_id="turn",
-        user_message="question",
-        original_user_message="question",
-        _should_review_memory=False,
-        _turn_exit_reason="text_response(final)",
-    )
+    result_holder = []
+    errors = []
 
-    assert result["final_response"] == "Raw answer\n\n[transformed]"
-    assert events[:3] == [
-        "persist",
+    def finalize():
+        try:
+            result_holder.append(
+                finalize_turn(
+                    agent,
+                    final_response="Raw answer",
+                    api_call_count=1,
+                    interrupted=False,
+                    failed=False,
+                    messages=messages,
+                    conversation_history=[],
+                    effective_task_id="task",
+                    turn_id="turn",
+                    user_message="question",
+                    original_user_message="question",
+                    _should_review_memory=False,
+                    _turn_exit_reason="text_response(final)",
+                )
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=finalize)
+    thread.start()
+    try:
+        assert entered.wait(timeout=1)
+        assert visible.is_set(), f"delivery was not signaled before {blocked_phase}"
+    finally:
+        release.set()
+        thread.join(timeout=2)
+
+    assert thread.is_alive() is False
+    assert errors == []
+    assert result_holder[0]["final_response"] == "Raw answer\n\n[transformed]"
+    assert events == [
         ("visible", "Raw answer\n\n[transformed]"),
+        "trajectory",
+        "cleanup",
+        "persist",
         "micro_compact",
     ]
 

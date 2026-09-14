@@ -797,12 +797,13 @@ class GatewayStreamConsumer:
         self._queue.put(_DONE)
 
     def finish_if_matches(self, final_text: str) -> None:
-        """Finalize early only if queued deltas equal the completed response.
+        """Finalize from the authoritative completed response before cleanup.
 
         The agent calls this after output transforms are complete but before
         slow post-turn maintenance. FIFO queue ordering guarantees all prior
-        deltas are observed first. A mismatch leaves the consumer running for
-        the ordinary :meth:`finish` call, preserving transform/footer safety.
+        deltas are observed first. An exact match uses the normal in-place
+        finalization path. A transformed/footer mismatch replaces the preview
+        with the authoritative payload rather than waiting for maintenance.
         """
         if (
             self._finish_enqueued
@@ -1061,12 +1062,32 @@ class GatewayStreamConsumer:
 
                 if early_final_text is not None:
                     self._flush_think_buffer()
+                    if _is_intentional_silence_response(
+                        self._clean_for_display(early_final_text)
+                    ):
+                        await self._suppress_silence_marker()
+                        return
+                    if (
+                        self._delivered_final_text is not None
+                        and self.delivered_final_matches(early_final_text) is True
+                    ) or self._historical_delivery_matches(early_final_text):
+                        # A finalized segment/commentary already carried the
+                        # exact response. Adopt its retained receipt and stop.
+                        self._final_response_sent = True
+                        self._final_content_delivered = True
+                        return
                     if self._accumulated_matches_final(early_final_text):
                         got_done = True
                     else:
+                        outcome = await self._send_empty_fallback_final(
+                            early_final_text
+                        )
+                        if outcome == "delivered":
+                            return
                         logger.debug(
-                            "Early stream final did not match completed response; "
+                            "Early authoritative final replacement was %s; "
                             "waiting for ordinary turn finalization (chat=%s)",
+                            outcome,
                             self.chat_id,
                         )
 
