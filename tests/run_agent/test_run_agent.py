@@ -117,6 +117,34 @@ def test_flush_persist_override_replaces_api_local_multimodal_note(agent):
     assert api_content[0]["text"] == "[MODEL SWITCH NOTE]\n\nDescribe this screenshot"
 
 
+def test_flush_propagates_durable_row_ids_to_live_messages(agent):
+    class _RowIdDB:
+        def append_messages_batch(self, session_id, messages, **kwargs):
+            for row_id, message in enumerate(messages, start=41):
+                message["_row_id"] = row_id
+            return len(messages)
+
+    agent._session_db = _RowIdDB()
+    agent._session_db_created = True
+    agent.session_id = "session-123"
+    agent._last_flushed_db_idx = 0
+    agent._flushed_db_message_ids = set()
+    agent._flushed_db_message_session_id = None
+    agent._persist_user_message_idx = None
+    agent._persist_user_message_override = None
+    agent._persist_user_message_timestamp = None
+    agent._persist_disabled = False
+    messages = [
+        {"role": "user", "content": "question"},
+        {"role": "assistant", "content": "answer"},
+    ]
+
+    assert agent._flush_messages_to_session_db(messages, []) is True
+
+    assert [message["_row_id"] for message in messages] == [41, 42]
+    assert all(message["_db_persisted"] is True for message in messages)
+
+
 def test_direct_session_db_flushes_share_marker_claim(agent):
     """A direct flush cannot interleave its marker check with `_persist_session`."""
     class _BarrierDB:
@@ -503,6 +531,31 @@ class TestSessionJsonSnapshotOptIn:
         assert expected.exists(), (
             "Opt-in writer must produce session_{sid}.json under logs_dir"
         )
+
+    def test_save_session_log_only_shrinks_for_explicit_compaction(self, agent, tmp_path):
+        agent._session_json_enabled = True
+        agent.logs_dir = tmp_path
+        fuller = [
+            {"role": "user", "content": "older question"},
+            {"role": "assistant", "content": "older answer"},
+            {"role": "user", "content": "current question"},
+            {"role": "assistant", "content": "current answer"},
+        ]
+        compacted = fuller[-2:]
+        expected = tmp_path / f"session_{agent.session_id}.json"
+
+        agent._save_session_log(fuller)
+        agent._save_session_log(compacted)
+        guarded = json.loads(expected.read_text(encoding="utf-8"))
+        assert guarded["message_count"] == 4
+
+        agent._save_session_log(compacted, allow_shrink=True)
+        rewritten = json.loads(expected.read_text(encoding="utf-8"))
+        assert rewritten["message_count"] == 2
+        assert [message["content"] for message in rewritten["messages"]] == [
+            "current question",
+            "current answer",
+        ]
 
     def test_logs_dir_retained_for_request_dumps(self, agent):
         # logs_dir is kept unconditionally because

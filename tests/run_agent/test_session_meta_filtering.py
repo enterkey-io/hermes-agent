@@ -63,19 +63,30 @@ class TestDisplayFieldsStrippedFromApiPayload:
     provider-bound API payload — strict OpenAI-compatible backends reject
     unknown fields."""
 
-    def test_sanitizer_does_not_remove_display_fields(self):
-        """sanitize_api_messages is NOT the chokepoint for display fields —
-        they are popped earlier in conversation_loop. But this test documents
-        that the sanitizer alone does NOT strip them, proving the pop in
-        conversation_loop is load-bearing."""
+    def test_sanitizer_strips_display_and_platform_identity_fields(self):
+        """The final pre-call guard covers restored and live gateway metadata."""
         msgs = [
-            {"role": "user", "content": "hello", "display_kind": "model_switch"},
-            {"role": "assistant", "content": "hi", "display_metadata": {"model": "m"}},
+            {
+                "role": "user",
+                "content": "hello",
+                "display_kind": "model_switch",
+                "message_id": "inbound-1",
+            },
+            {
+                "role": "assistant",
+                "content": "hi",
+                "display_metadata": {"model": "m"},
+                "platform_message_id": "outbound-1",
+            },
         ]
         out = AIAgent._sanitize_api_messages(msgs)
-        # The sanitizer preserves them — the conversation_loop pop is the fix.
-        assert "display_kind" in out[0]
-        assert "display_metadata" in out[1]
+        assert all(
+            not {"display_kind", "display_metadata", "message_id", "platform_message_id"}
+            & message.keys()
+            for message in out
+        )
+        assert msgs[0]["message_id"] == "inbound-1"
+        assert msgs[1]["platform_message_id"] == "outbound-1"
 
     def test_conversation_loop_strips_display_fields(self):
         """The per-request api_msg copy in conversation_loop strips

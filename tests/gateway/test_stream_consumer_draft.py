@@ -141,6 +141,162 @@ class TestDraftStreamingHappyPath:
         assert "expect_edits" not in final_metadata
 
     @pytest.mark.asyncio
+    async def test_matching_completed_payload_finalizes_before_ordinary_finish(self):
+        adapter = _make_draft_capable_adapter()
+        cfg = StreamConsumerConfig(
+            transport="auto",
+            chat_type="dm",
+            edit_interval=0.01,
+            buffer_threshold=5,
+            cursor="",
+        )
+        consumer = GatewayStreamConsumer(adapter, "12345", cfg)
+
+        consumer.on_delta("Complete answer")
+        task = asyncio.create_task(consumer.run())
+        consumer.finish_if_matches("Complete answer")
+        await asyncio.wait_for(task, timeout=1)
+
+        adapter.send.assert_awaited_once()
+        assert consumer.final_response_sent is True
+        assert consumer.delivered_final_matches("Complete answer") is True
+
+        # The post-run completion path may signal finish again. It is
+        # idempotent and cannot create a second persistent message.
+        consumer.finish()
+        consumer.finish()
+        await asyncio.sleep(0)
+        adapter.send.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_matching_overflowed_payload_finalizes_from_full_stream_ledger(self):
+        adapter = _make_draft_capable_adapter()
+        type(adapter).MAX_MESSAGE_LENGTH = 600
+        message_ids = iter(("sealed-head", "final-tail"))
+        adapter.send.side_effect = lambda **kwargs: SimpleNamespace(
+            success=True, message_id=next(message_ids)
+        )
+        cfg = StreamConsumerConfig(
+            transport="auto",
+            chat_type="dm",
+            edit_interval=0.01,
+            buffer_threshold=1,
+            cursor="",
+        )
+        consumer = GatewayStreamConsumer(adapter, "12345", cfg)
+        streamed_head = "A" * 700
+        streamed_tail = "B" * 50
+        complete = streamed_head + streamed_tail
+
+        consumer.on_delta(streamed_head)
+        task = asyncio.create_task(consumer.run())
+        for _ in range(100):
+            if consumer._turn_split_delivery:
+                break
+            await asyncio.sleep(0.01)
+        assert consumer._turn_split_delivery is True
+        assert consumer._accumulated != consumer._stream_ledger
+
+        consumer.on_delta(streamed_tail)
+        consumer.finish_if_matches(complete)
+        await asyncio.wait_for(task, timeout=1)
+
+        assert consumer.delivered_final_matches(complete) is True
+        sent_contents = [
+            call.kwargs["content"] for call in adapter.send.call_args_list
+        ]
+        assert len(sent_contents) == 2
+        assert sent_contents[0].startswith("A" * 400)
+        assert sent_contents[1].endswith(streamed_tail)
+
+    @pytest.mark.asyncio
+    async def test_matching_completed_payload_finalizes_existing_edit_preview(self):
+        adapter = _make_draft_capable_adapter(supports_draft=False)
+        cfg = StreamConsumerConfig(
+            transport="edit",
+            chat_type="dm",
+            edit_interval=0.01,
+            buffer_threshold=1,
+            cursor="",
+        )
+        consumer = GatewayStreamConsumer(adapter, "12345", cfg)
+
+        consumer.on_delta("Complete answer")
+        task = asyncio.create_task(consumer.run())
+        for _ in range(100):
+            if adapter.send.await_count:
+                break
+            await asyncio.sleep(0.01)
+        adapter.send.assert_awaited_once()
+
+        consumer.finish_if_matches("Complete answer")
+        await asyncio.wait_for(task, timeout=1)
+
+        adapter.send.assert_awaited_once()
+        adapter.edit_message.assert_not_awaited()
+        assert consumer.delivered_final_matches("Complete answer") is True
+
+    @pytest.mark.asyncio
+    async def test_transformed_completed_payload_replaces_draft_before_cleanup(self):
+        adapter = _make_draft_capable_adapter()
+        cfg = StreamConsumerConfig(
+            transport="auto",
+            chat_type="dm",
+            edit_interval=0.01,
+            buffer_threshold=5,
+            cursor="",
+        )
+        consumer = GatewayStreamConsumer(adapter, "12345", cfg)
+
+        consumer.on_delta("Raw model answer")
+        task = asyncio.create_task(consumer.run())
+        consumer.finish_if_matches("Raw model answer\n\n[plugin transform]")
+        await asyncio.wait_for(task, timeout=1)
+
+        adapter.send.assert_awaited_once()
+        assert adapter.send.call_args.kwargs["content"] == (
+            "Raw model answer\n\n[plugin transform]"
+        )
+        assert consumer.delivered_final_matches(
+            "Raw model answer\n\n[plugin transform]"
+        ) is True
+
+        # The ordinary post-maintenance signal stays idempotent.
+        consumer.finish()
+        await asyncio.sleep(0)
+        adapter.send.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_reused_finalized_segment_is_adopted_without_duplicate_send(self):
+        adapter = _make_draft_capable_adapter()
+        consumer = GatewayStreamConsumer(
+            adapter,
+            "12345",
+            StreamConsumerConfig(
+                transport="auto",
+                chat_type="dm",
+                edit_interval=0.01,
+                buffer_threshold=5,
+                cursor="",
+            ),
+        )
+        consumer._delivered_segment_texts.append("Already delivered")
+        consumer._delivered_text_receipts.append(
+            ("Already delivered", ("segment-message",))
+        )
+
+        task = asyncio.create_task(consumer.run())
+        consumer.finish_if_matches("Already delivered")
+        await asyncio.wait_for(task, timeout=1)
+
+        adapter.send.assert_not_awaited()
+        assert consumer.final_response_sent is True
+        assert consumer.final_delivery_metadata_for("Already delivered") == {
+            "response_identity": consumer.response_identity,
+            "platform_message_id": "segment-message",
+        }
+
+    @pytest.mark.asyncio
     async def test_edit_preview_still_marks_expect_edits(self):
         adapter = _make_draft_capable_adapter(supports_draft=False)
         cfg = StreamConsumerConfig(transport="edit", chat_type="dm", cursor="")
@@ -422,4 +578,3 @@ class TestRichAwareOverflow:
         adapter.edit_message.assert_not_called()
         adapter.delete_message.assert_awaited_once_with("12345", "preview1")
         assert consumer.final_response_sent is True
-

@@ -2498,14 +2498,21 @@ class SendResult:
     success: bool
     message_id: Optional[str] = None
     error: Optional[str] = None
+    # Multi-message adapters may expose ``raw_response["message_ids"]`` as
+    # the authoritative ordered list of every platform message created by one
+    # send/edit. The stream consumer uses it for durable delivery receipts
+    # when rendering expands beyond ``message_id`` / continuation metadata.
     raw_response: Any = None
     # Adapter-specific metadata.  Cross-layer contracts that affect delivery
     # semantics must be documented at the producer and consumer sites.  Current
-    # known contract: Telegram edit overflow partials set
-    # raw_response["partial_overflow"] with delivered_chunks, total_chunks,
-    # last_message_id, delivered_prefix, and continuation_message_ids so the
-    # stream consumer can send the missing tail instead of marking a clipped
-    # response complete.
+    # known contract: Telegram and Discord edit-overflow paths set
+    # raw_response["partial_overflow"] when only a prefix lands. The stream
+    # consumer treats that structured marker as incomplete regardless of this
+    # result's coarse success bit. Both expose delivered_chunks, total_chunks,
+    # last_message_id, and continuation_message_ids; adapters also expose
+    # delivered_prefix only when they can identify an exact prefix of the
+    # adapter input. If formatting prevents that proof, the consumer replaces
+    # and cleans up every landed partial message after a successful full resend.
     retryable: bool = False  # True for transient connection errors — base will retry automatically
     # Server-requested retry delay in seconds (e.g. Telegram FloodWait retry_after).
     # When present, _send_with_retry() honors this instead of its default backoff.

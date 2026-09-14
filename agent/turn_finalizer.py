@@ -246,6 +246,11 @@ def finalize_turn(
             )
         )
     )
+    # Presentation transforms are deliberately applied before post-turn I/O so
+    # the gateway can commit the visible answer immediately. Keep the model's
+    # original response separately for transcript closure and diagnostic parity:
+    # transform_llm_output is a delivery hook, not a prompt-history mutation.
+    _durable_final_response = final_response
 
     # Preflight can seed the display count before the provider receives the
     # request. Roll that estimate back only when an interrupt wins the race
@@ -276,6 +281,96 @@ def finalize_turn(
         )
         if callable(_rollback_fn):
             _rollback_fn(_preflight_snapshot)
+
+    # Finish the user-visible response before any fallible or blocking
+    # post-turn maintenance. Telegram native drafts are ephemeral; trajectory
+    # writes, remote resource cleanup, contended SQLite persistence, and
+    # micro-compaction can all outlive one. The callback is FIFO behind streamed
+    # deltas, so the consumer receives the complete presentation payload only
+    # after every prior chunk.
+
+    # File-mutation verifier footer.
+    if final_response and not interrupted:
+        try:
+            _failed = getattr(agent, "_turn_failed_file_mutations", None) or {}
+            if _failed and agent._file_mutation_verifier_enabled():
+                footer = agent._format_file_mutation_failure_footer(_failed)
+                if footer:
+                    final_response = final_response.rstrip() + "\n\n" + footer
+        except Exception as _ver_err:
+            logger.debug("file-mutation verifier footer failed: %s", _ver_err)
+
+    # Turn-completion explainer for empty or truncated abnormal exits.
+    if not interrupted and not terminal_review_verdict and not work_review_handoff:
+        try:
+            if agent._turn_completion_explainer_enabled():
+                _stripped = (final_response or "").strip()
+                _is_empty_terminal = _stripped == "" or _stripped == "(empty)"
+                _is_partial_fragment = (
+                    not _is_empty_terminal
+                    and not preserved_verification_fallback
+                    and not str(_turn_exit_reason).startswith("text_response")
+                    and len(_stripped) <= 24
+                    and _stripped[-1:]
+                    not in {".", "!", "?", "。", "！", "？", "`", ")"}
+                )
+                _is_partial_stream_recovery = (
+                    str(_turn_exit_reason) == "partial_stream_recovery"
+                )
+                if (
+                    _is_empty_terminal
+                    or _is_partial_fragment
+                    or _is_partial_stream_recovery
+                ):
+                    _explanation = agent._format_turn_completion_explanation(
+                        _turn_exit_reason,
+                        getattr(agent, "_last_persistence_error_cause", None),
+                    )
+                    if _explanation:
+                        if _is_empty_terminal:
+                            final_response = _explanation
+                        else:
+                            final_response = _stripped + "\n\n" + _explanation
+        except Exception as _exp_err:
+            logger.debug("turn-completion explainer failed: %s", _exp_err)
+
+    _response_transformed = False
+    _pre_transform_response = None
+
+    # Plugin hook: transform_llm_output. First non-empty string wins.
+    if final_response and not interrupted:
+        try:
+            from hermes_cli.lifecycle import invoke_hook as _invoke_hook
+
+            _transform_results = _invoke_hook(
+                "transform_llm_output",
+                response_text=final_response,
+                session_id=agent.session_id or "",
+                model=agent.model,
+                platform=getattr(agent, "platform", None) or "",
+            )
+            for _hook_result in _transform_results:
+                if isinstance(_hook_result, str) and _hook_result:
+                    _pre_transform_response = final_response
+                    final_response = _hook_result
+                    _response_transformed = True
+                    break
+        except Exception as exc:
+            logger.warning("transform_llm_output hook failed: %s", exc)
+
+    # Scrub before the callback so every platform adapter receives valid text.
+    if isinstance(final_response, str):
+        final_response = _sanitize_surrogates(final_response)
+
+    if final_response and not interrupted and not failed:
+        try:
+            _stream_final_callback = getattr(agent, "stream_final_callback", None)
+            if callable(_stream_final_callback):
+                _stream_final_callback(final_response)
+        except Exception as _stream_final_err:
+            logger.debug(
+                "early stream final callback failed: %s", _stream_final_err
+            )
 
     # Post-loop cleanup must never lose the response.  Trajectory save,
     # resource teardown, and session persistence all touch fallible
@@ -339,7 +434,7 @@ def finalize_turn(
             close_interrupted_tool_sequence(
                 messages,
                 (
-                    final_response
+                    _durable_final_response
                     if interrupted
                     else (
                         "Kanban terminal verdict recorded by host."
@@ -364,7 +459,7 @@ def finalize_turn(
         # Compare content (not just role) so a verification candidate that
         # matches the final response is not duplicated at budget
         # exhaustion. (#65919 §7)
-        if final_response and not interrupted:
+        if _durable_final_response and not interrupted:
             try:
                 _tail = messages[-1] if messages else None
             except Exception:
@@ -375,9 +470,13 @@ def finalize_turn(
                 # so the durable turn closes with the answer (#43849/#44100).
                 append_message(
                     messages,
-                    {"role": "assistant", "content": final_response},
+                    {"role": "assistant", "content": _durable_final_response},
                 )
-            elif isinstance(_tail, dict) and _tail.get("content") != final_response and _is_pure_tool_call_tail(_tail):
+            elif (
+                isinstance(_tail, dict)
+                and _tail.get("content") != _durable_final_response
+                and _is_pure_tool_call_tail(_tail)
+            ):
                 # The tail IS an assistant row, but a *pure tool-call turn*:
                 # tool_calls with no text of its own. The role check alone
                 # leaves the #43849/#44100 invariant unmet — the user saw a
@@ -392,7 +491,7 @@ def finalize_turn(
                 # the tail already carries the final response text (verification
                 # candidate collapse — the provisional answer was persisted and
                 # reused as the terminal response, #65919 §7).
-                _tail["content"] = final_response
+                _tail["content"] = _durable_final_response
                 # The normal assistant builder already stamps this row. Cover
                 # legacy/exceptional pure-tool tails before they become a
                 # delivered final response.
@@ -422,57 +521,9 @@ def finalize_turn(
         if callable(_apply_override):
             _apply_override(messages)
 
-        # ── Post-turn micro-compaction ────────────────────────────
-        # After the assistant response is finalized but before the session is
-        # persisted, run micro-compaction to absorb the oldest uncompacted
-        # exchange into the rolling summary.  This amortizes compression
-        # across turns rather than batching it into one big pause.
-        if not interrupted and not failed:
-            try:
-                _compressor = getattr(agent, "context_compressor", None)
-                # Strict `is True` + isinstance gates: plugin context engines
-                # (and MagicMock compressors in tests) satisfy getattr/duck
-                # checks with truthy auto-attributes — a bare truthiness check
-                # here called _micro_compact on a mock and spliced its (empty-
-                # iterating) return value over the transcript, wiping it.
-                if (
-                    _compressor
-                    and getattr(_compressor, '_micro_compact_enabled', False) is True
-                    and callable(getattr(_compressor, '_micro_compact', None))
-                    and final_response
-                    # Persistence-isolated agents (background review fork)
-                    # must not micro-compact: the pass burns a real aux-LLM
-                    # call on a throwaway replay transcript, and if the
-                    # compressor ever holds a session_db binding it would
-                    # archive_and_compact the CANONICAL session rows — the
-                    # exact write class _persist_disabled exists to stop.
-                    and not getattr(agent, "_persist_disabled", False)
-                ):
-                    _before = len(messages)
-                    _compacted = _compressor._micro_compact(messages)
-                    # Micro-compaction defrag rewrites the newest MICRO
-                    # marker's content and pops _db_persisted from the live
-                    # dict in place — the sibling of the pop site above. The
-                    # compressor has no agent reference, so it raises a flag
-                    # for us to invalidate the bounded flush-scan cursor;
-                    # otherwise the rewritten marker row is identity-skipped
-                    # and the stale summary persists to state.db.
-                    if getattr(
-                        _compressor, "_flush_scan_cursor_invalidated", False
-                    ):
-                        _compressor._flush_scan_cursor_invalidated = False
-                        agent._db_flush_scan_prefix = None
-                    if isinstance(_compacted, list) and _compacted:
-                        messages[:] = _compacted
-                    _after = len(messages)
-                    if _before != _after:
-                        logger.info(
-                            "Micro-compaction: %d -> %d messages",
-                            _before, _after,
-                        )
-            except Exception as _mc_err:
-                logger.info("Micro-compaction failed: %s", _mc_err)
-
+        # Establish the durable assistant-row identity before any slow
+        # post-turn maintenance. The stream consumer can then finalize the
+        # visible response while micro-compaction works in the background.
         agent._persist_session(messages, conversation_history)
     except Exception as _persist_err:
         _cleanup_errors.append(f"persist_session: {_persist_err}")
@@ -505,7 +556,7 @@ def finalize_turn(
         1 for m in messages
         if isinstance(m, dict) and m.get("role") == "assistant" and m.get("tool_calls")
     )
-    _resp_len = len(final_response) if final_response else 0
+    _resp_len = len(_durable_final_response) if _durable_final_response else 0
     _budget_used = agent.iteration_budget.used if agent.iteration_budget else 0
     _budget_max = agent.iteration_budget.max_total if agent.iteration_budget else 0
 
@@ -530,114 +581,94 @@ def finalize_turn(
     else:
         logger.info(_diag_msg, *_diag_args)
 
-    # File-mutation verifier footer.
-    # If one or more ``write_file`` / ``patch`` calls failed during this
-    # turn and were never superseded by a successful write to the same
-    # path, append an advisory footer to the assistant response.  This
-    # catches the specific case — reported by Ben Eng (#15524-adjacent)
-    # — where a model issues a batch of parallel patches, half of them
-    # fail with "Could not find old_string", and the model summarises
-    # the turn claiming every file was edited.  The user then has to
-    # manually run ``git status`` to catch the lie.  With this footer
-    # the truth is surfaced on every turn, so over-claiming is
-    # structurally impossible past the model.
-    #
-    # Gate: only applied when a real text response exists for this
-    # turn and the user didn't interrupt.  Empty/interrupted turns
-    # already have other surface text that shouldn't be augmented.
-    if final_response and not interrupted:
+    # ── Post-turn micro-compaction ────────────────────────────
+    # The visible answer is already queued for platform finalization. Absorb
+    # one old exchange before post-turn observers run, preserving their
+    # existing view of the compacted transcript.
+    if not interrupted and not failed:
         try:
-            _failed = getattr(agent, "_turn_failed_file_mutations", None) or {}
-            if _failed and agent._file_mutation_verifier_enabled():
-                footer = agent._format_file_mutation_failure_footer(_failed)
-                if footer:
-                    final_response = final_response.rstrip() + "\n\n" + footer
-        except Exception as _ver_err:
-            logger.debug("file-mutation verifier footer failed: %s", _ver_err)
-
-    # Turn-completion explainer.
-    # When a turn ends abnormally after substantive work — empty content
-    # after retries, a partial/truncated stream, a still-pending tool
-    # result, or an iteration/budget limit — the user otherwise gets a
-    # blank or fragmentary response box with no consolidated reason why
-    # the agent stopped (#34452).  Surface a single user-visible
-    # explanation derived from ``_turn_exit_reason``, mirroring the
-    # file-mutation verifier footer pattern above.
-    #
-    # Gate carefully so healthy turns stay quiet:
-    #   - ``text_response(...)`` exits never produce an explanation
-    #     (handled inside the formatter), so a terse ``Done.`` is silent.
-    #   - We only ACT when there is no genuinely usable reply this turn:
-    #     an empty response, the "(empty)" terminal sentinel, or a
-    #     suspiciously short partial fragment with no terminating
-    #     punctuation (e.g. "The").  A real short answer keeps its text.
-    if not interrupted and not terminal_review_verdict and not work_review_handoff:
-        try:
-            if agent._turn_completion_explainer_enabled():
-                _stripped = (final_response or "").strip()
-                _is_empty_terminal = _stripped == "" or _stripped == "(empty)"
-                # A short fragment that is not a normal text_response exit
-                # and lacks sentence-ending punctuation is treated as a
-                # truncated partial (the "The" case from #34452).
-                _is_partial_fragment = (
-                    not _is_empty_terminal
-                    and not preserved_verification_fallback
-                    and not str(_turn_exit_reason).startswith("text_response")
-                    and len(_stripped) <= 24
-                    and _stripped[-1:] not in {".", "!", "?", "。", "！", "？", "`", ")"}
-                )
-                _is_partial_stream_recovery = (
-                    str(_turn_exit_reason) == "partial_stream_recovery"
-                )
-                if (
-                    _is_empty_terminal
-                    or _is_partial_fragment
-                    or _is_partial_stream_recovery
-                ):
-                    _explanation = agent._format_turn_completion_explanation(
-                        _turn_exit_reason,
-                        getattr(agent, "_last_persistence_error_cause", None),
+            _compressor = getattr(agent, "context_compressor", None)
+            # Strict `is True` + callable gates keep MagicMock/plugin context
+            # engines from being treated as the built-in compressor.
+            if (
+                _compressor
+                and getattr(_compressor, "_micro_compact_enabled", False) is True
+                and callable(getattr(_compressor, "_micro_compact", None))
+                and final_response
+                # Persistence-isolated background review forks must never
+                # archive the canonical session or spend an auxiliary call.
+                and not getattr(agent, "_persist_disabled", False)
+            ):
+                _before_count = len(messages)
+                _before_fingerprint = [
+                    (
+                        id(message),
+                        message.get("content"),
+                        message.get("_row_id"),
+                        message.get("_db_persisted"),
                     )
-                    if _explanation:
-                        if _is_empty_terminal:
-                            # Replace the bare "(empty)"/blank sentinel with
-                            # the actionable explanation.
-                            final_response = _explanation
-                        else:
-                            # Keep the partial fragment, append the reason so
-                            # the user sees both what arrived and why it
-                            # stopped.
-                            final_response = (
-                                _stripped + "\n\n" + _explanation
+                    for message in messages
+                    if isinstance(message, dict)
+                ]
+                _compacted = _compressor._micro_compact(messages)
+                # Micro-compaction defrag can rewrite a marker in place and
+                # invalidate the bounded append-only flush scan.
+                if getattr(
+                    _compressor, "_flush_scan_cursor_invalidated", False
+                ):
+                    _compressor._flush_scan_cursor_invalidated = False
+                    agent._db_flush_scan_prefix = None
+                if isinstance(_compacted, list) and _compacted:
+                    messages[:] = _compacted
+                _after_fingerprint = [
+                    (
+                        id(message),
+                        message.get("content"),
+                        message.get("_row_id"),
+                        message.get("_db_persisted"),
+                    )
+                    for message in messages
+                    if isinstance(message, dict)
+                ]
+                if _before_count != len(messages):
+                    logger.info(
+                        "Micro-compaction: %d -> %d messages",
+                        _before_count,
+                        len(messages),
+                    )
+                if _before_fingerprint != _after_fingerprint:
+                    # archive_and_compact normally persisted the rewritten set
+                    # already. Shrink the JSON mirror only after that commit is
+                    # confirmed; a failed/unknown archive retains the larger
+                    # snapshot while the existing append-only DB fallback runs.
+                    try:
+                        _db_compaction_committed = (
+                            getattr(
+                                _compressor,
+                                "_last_micro_compact_db_sync_succeeded",
+                                None,
                             )
-        except Exception as _exp_err:
-            logger.debug("turn-completion explainer failed: %s", _exp_err)
-
-    _response_transformed = False
-    _pre_transform_response = None
-
-    # Plugin hook: transform_llm_output
-    # Fired once per turn after the tool-calling loop completes.
-    # Plugins can transform the LLM's output text before it's returned.
-    # First hook to return a string wins; None/empty return leaves text unchanged.
-    if final_response and not interrupted:
-        try:
-            from hermes_cli.lifecycle import invoke_hook as _invoke_hook
-            _transform_results = _invoke_hook(
-                "transform_llm_output",
-                response_text=final_response,
-                session_id=agent.session_id or "",
-                model=agent.model,
-                platform=getattr(agent, "platform", None) or "",
-            )
-            for _hook_result in _transform_results:
-                if isinstance(_hook_result, str) and _hook_result:
-                    _pre_transform_response = final_response
-                    final_response = _hook_result
-                    _response_transformed = True
-                    break  # First non-empty string wins
-        except Exception as exc:
-            logger.warning("transform_llm_output hook failed: %s", exc)
+                            is True
+                        )
+                        agent._persist_session(
+                            messages,
+                            conversation_history,
+                            allow_json_snapshot_shrink=_db_compaction_committed,
+                            preserve_json_snapshot=not _db_compaction_committed,
+                        )
+                    except Exception as _post_compact_persist_err:
+                        _cleanup_errors.append(
+                            "persist_session_after_micro_compaction: "
+                            f"{_post_compact_persist_err}"
+                        )
+                        logger.error(
+                            "finalize_turn: post-micro-compaction persistence "
+                            "failed: %s",
+                            _post_compact_persist_err,
+                            exc_info=True,
+                        )
+        except Exception as _mc_err:
+            logger.info("Micro-compaction failed: %s", _mc_err)
 
     # Plugin hook: post_llm_call
     # Fired once per turn after the tool-calling loop completes.
@@ -705,17 +736,18 @@ def finalize_turn(
             last_reasoning = msg["reasoning"]
             break
 
-    # Class-level surrogate chokepoint (#80366, #55143, #55309, #19819):
-    # ``final_response`` is often the RAW SDK content
-    # (``assistant_message.content``), not the sanitized copy stored in
-    # history by ``build_assistant_message``. Any lone UTF-16 surrogate
-    # (U+D800–U+DFFF) in it crashes downstream consumers — oneshot stdout
-    # writes, Telegram's ``utf16_len`` length check, Signal formatting,
-    # JSON envelope encodes — on every provider (Ollama, NVIDIA NIM, …).
-    # Scrub once here, where model text leaves the conversation loop, so
-    # every delivery surface receives valid Unicode.
-    if isinstance(final_response, str):
-        final_response = _sanitize_surrogates(final_response)
+    # Exact durable identity for this turn's closing assistant message. Stop at
+    # the current user boundary so a persistence failure cannot fall back to a
+    # prior turn's row on a cached agent.
+    assistant_message_row_id = None
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") == "user":
+            break
+        if message.get("role") == "assistant":
+            assistant_message_row_id = message.get("_row_id")
+            break
 
     # Build result with interrupt info if applicable
     result = {
@@ -731,6 +763,7 @@ def finalize_turn(
         "response_transformed": _response_transformed,
         "pre_transform_response": _pre_transform_response,
         "response_previewed": getattr(agent, "_response_was_previewed", False),
+        "assistant_message_row_id": assistant_message_row_id,
         "model": agent.model,
         "provider": agent.provider,
         "base_url": agent.base_url,

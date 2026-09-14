@@ -3811,6 +3811,25 @@ class SessionStore:
             logger.debug("has_platform_message_id lookup failed", exc_info=True)
             return False
 
+    def record_assistant_delivery(
+        self,
+        session_id: str,
+        message_row_id: int,
+        receipt: Dict[str, Any],
+    ) -> bool:
+        """Persist one gateway receipt against an exact assistant row."""
+        if not self._db:
+            return False
+        try:
+            return self._db.record_assistant_delivery(
+                session_id,
+                message_row_id,
+                receipt,
+            )
+        except Exception:
+            logger.debug("gateway assistant delivery receipt write failed", exc_info=True)
+            return False
+
     def rewrite_transcript(
         self,
         session_id: str,

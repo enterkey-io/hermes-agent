@@ -5324,6 +5324,7 @@ class TurnRunner:
         # Set up stream consumer for token streaming or interim commentary.
         _stream_consumer = None
         _stream_delta_cb = None
+        _stream_final_cb = None
         # #60671 — streaming TTS consumer is created on the outer
         # event-loop thread before run_sync launches.  run_sync only
         # reads it via ``streaming_tts_consumer_holder[0]`` for delta
@@ -5386,6 +5387,9 @@ class TurnRunner:
                                 # Tee to the streaming-TTS consumer (#60671).
                                 if _stts_consumer_ref is not None:
                                     _stts_consumer_ref.on_delta(text)
+                        def _stream_final_cb(text: str) -> None:
+                            if ctx._run_still_current():
+                                _stream_consumer.finish_if_matches(text)
                     ctx.stream_consumer_holder[0] = _stream_consumer
             except Exception as _sc_err:
                 logger.debug("Could not set up stream consumer: %s", _sc_err)
@@ -5744,6 +5748,7 @@ class TurnRunner:
         )
         agent.step_callback = ctx._step_callback_sync if ctx._hooks_ref.loaded_hooks else None
         agent.stream_delta_callback = _stream_delta_cb
+        agent.stream_final_callback = _stream_final_cb
         agent.interim_assistant_callback = _interim_assistant_cb if _want_interim_messages else None
         agent.status_callback = ctx._status_callback_sync
         # Credits / out-of-band notices (usage bands, depletion, restored).
@@ -6481,6 +6486,9 @@ class TurnRunner:
             return {
                 "final_response": final_response,
                 "messages": result.get("messages", []),
+                "assistant_message_row_id": result.get(
+                    "assistant_message_row_id"
+                ),
                 "api_calls": result.get("api_calls", 0),
                 "failed": result.get("failed", False),
                 # Sibling of the non-empty-response return below (#64686):
@@ -6559,6 +6567,11 @@ class TurnRunner:
             "final_response": final_response,
             "last_reasoning": result.get("last_reasoning"),
             "messages": ctx.result_holder[0].get("messages", []) if ctx.result_holder[0] else [],
+            "assistant_message_row_id": (
+                ctx.result_holder[0].get("assistant_message_row_id")
+                if ctx.result_holder[0]
+                else None
+            ),
             "api_calls": ctx.result_holder[0].get("api_calls", 0) if ctx.result_holder[0] else 0,
             "failed": ctx.result_holder[0].get("failed", False) if ctx.result_holder[0] else False,
             "failure_reason": (
@@ -28989,6 +29002,115 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         return False
             return False
 
+        async def _recover_partial_final_edit(
+            consumer,
+            result,
+            final_text: str,
+        ) -> Optional[bool]:
+            """Return None for complete edits, else partial recovery outcome."""
+            raw_response = getattr(result, "raw_response", None)
+            if not (
+                isinstance(raw_response, dict)
+                and raw_response.get("partial_overflow")
+            ):
+                return None
+            recover = getattr(consumer, "recover_external_partial_overflow", None)
+            if not callable(recover):
+                return False
+            try:
+                return await recover(result, final_text) is True
+            except Exception:
+                logger.warning(
+                    "Post-stream partial-overflow recovery failed",
+                    exc_info=True,
+                )
+                return False
+
+        async def _persist_stream_delivery_receipt(
+            completed_response,
+            consumer,
+        ) -> None:
+            """Bind a confirmed platform delivery to its exact assistant row."""
+            if not (
+                isinstance(completed_response, dict)
+                and not completed_response.get("failed")
+                and consumer is not None
+            ):
+                return
+            final_text = completed_response.get("final_response") or ""
+            matches = getattr(consumer, "delivered_final_matches", None)
+            if not final_text or not callable(matches):
+                return
+            try:
+                current_delivery = matches(final_text) is True
+            except Exception:
+                current_delivery = False
+            if not current_delivery:
+                return
+
+            receipt_for = getattr(
+                consumer,
+                "final_delivery_metadata_for",
+                None,
+            )
+            receipt = (
+                receipt_for(final_text)
+                if callable(receipt_for)
+                else getattr(consumer, "final_delivery_metadata", None)
+            )
+            if not isinstance(receipt, dict):
+                return
+            has_platform_identity = bool(
+                receipt.get("platform_message_id")
+                or receipt.get("platform_message_ids")
+            )
+            if not (
+                has_platform_identity
+                and receipt.get("response_identity")
+            ):
+                return
+
+            assistant_row_id = completed_response.get("assistant_message_row_id")
+            message = next(
+                (
+                    item
+                    for item in reversed(completed_response.get("messages") or [])
+                    if isinstance(item, dict)
+                    and item.get("role") == "assistant"
+                    and item.get("_row_id") == assistant_row_id
+                ),
+                None,
+            )
+            if message is None or assistant_row_id is None:
+                logger.debug(
+                    "No persisted assistant row identity available for gateway "
+                    "delivery receipt (session=%s)",
+                    completed_response.get("session_id") or session_id,
+                )
+                return
+
+            delivery_session_id = completed_response.get("session_id") or session_id
+            try:
+                recorded = await self.async_session_store.record_assistant_delivery(
+                    delivery_session_id,
+                    assistant_row_id,
+                    receipt,
+                )
+            except Exception:
+                recorded = False
+                logger.debug(
+                    "Gateway delivery receipt persistence failed",
+                    exc_info=True,
+                )
+            if recorded:
+                metadata = dict(message.get("display_metadata") or {})
+                metadata["gateway_delivery"] = receipt
+                message["display_metadata"] = metadata
+                if receipt.get("platform_message_id"):
+                    message["platform_message_id"] = receipt[
+                        "platform_message_id"
+                    ]
+
         try:
             # Run in thread pool to not block.  Use an *inactivity*-based
             # timeout instead of a wall-clock limit: the agent can run for
@@ -29551,6 +29673,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             )
                         except Exception as e:
                             logger.warning("Failed to send first response before queued message: %s", e)
+                    # This branch returns recursively before the normal
+                    # post-stream receipt block. Persist the completed turn now,
+                    # after its stream task and queued-first delivery have settled.
+                    await _persist_stream_delivery_receipt(
+                        _delivery_result,
+                        _sc,
+                    )
                     # Release deferred bg-review notifications now that the
                     # first response has been delivered.  Pop from the
                     # adapter's callback dict (prevents double-fire in
@@ -29820,6 +29949,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _content_delivered,
                 )
                 response["already_sent"] = True
+            elif not _is_empty_sentinel and _transformed and _streamed:
+                # The post-loop callback carries the fully transformed payload.
+                # When its early replacement already landed, avoid editing the
+                # same final a second time after maintenance completes.
+                logger.info(
+                    "Suppressing transformed final resend for session %s: "
+                    "the exact post-transform payload was delivered early.",
+                    session_key or "?",
+                )
+                response["already_sent"] = True
             elif not _is_empty_sentinel and not _transformed and _stale_finalized and _sc is not None:
                 # Stale finalize (#71643): the streamed message holds only the
                 # last preview snapshot. Prefer editing it up to the complete
@@ -29848,8 +29987,28 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             content=_final,
                             finalize=True,
                         )
-                        if getattr(_reconcile_res, "success", True):
+                        _partial_recovered = await _recover_partial_final_edit(
+                            _sc,
+                            _reconcile_res,
+                            _final,
+                        )
+                        if _partial_recovered is True:
                             response["already_sent"] = True
+                            logger.info(
+                                "Recovered partial stale-finalize edit for "
+                                "session %s.",
+                                session_key or "?",
+                            )
+                        elif (
+                            _partial_recovered is None
+                            and getattr(_reconcile_res, "success", True)
+                        ):
+                            response["already_sent"] = True
+                            _sc.record_external_final_delivery(
+                                _final,
+                                getattr(_reconcile_res, "message_id", None) or _sc_msg_id,
+                                delivery_result=_reconcile_res,
+                            )
                             logger.info(
                                 "Reconciled stale streamed finalize for session %s: edited message %s with the complete response (#71643).",
                                 session_key or "?", _sc_msg_id,
@@ -29876,22 +30035,55 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _sc_msg_id = _sc.message_id
                 if _sc_msg_id:
                     try:
-                        await _sc.adapter.edit_message(
+                        _edit_res = await _sc.adapter.edit_message(
                             chat_id=source.chat_id,
                             message_id=_sc_msg_id,
                             content=response["final_response"],
                             finalize=True,
                         )
-                        response["already_sent"] = True
-                        logger.info(
-                            "Edited streamed message %s for session %s to include plugin-transformed content.",
-                            _sc_msg_id, session_key or "?",
+                        _partial_recovered = await _recover_partial_final_edit(
+                            _sc,
+                            _edit_res,
+                            response["final_response"],
                         )
+                        if _partial_recovered is True:
+                            response["already_sent"] = True
+                            logger.info(
+                                "Recovered partial transformed final edit for "
+                                "session %s.",
+                                session_key or "?",
+                            )
+                        elif (
+                            _partial_recovered is None
+                            and getattr(_edit_res, "success", True)
+                        ):
+                            response["already_sent"] = True
+                            _sc.record_external_final_delivery(
+                                response["final_response"],
+                                getattr(_edit_res, "message_id", None) or _sc_msg_id,
+                                delivery_result=_edit_res,
+                            )
+                            logger.info(
+                                "Edited streamed message %s for session %s to include plugin-transformed content.",
+                                _sc_msg_id, session_key or "?",
+                            )
+                        else:
+                            logger.warning(
+                                "Failed to edit streamed message for session %s (%s); sending transformed response via normal final send.",
+                                session_key or "?",
+                                getattr(_edit_res, "error", None),
+                            )
                     except Exception as _edit_err:
                         logger.warning(
                             "Failed to edit streamed message for session %s: %s",
                             session_key or "?", _edit_err,
                         )
+
+        # A stream final has already been persisted by the agent before its
+        # platform delivery result is known. Bind this consumer's receipt to
+        # the exact row id returned by that insert (or by a later in-place
+        # compaction rewrite); never recover identity by matching response text.
+        await _persist_stream_delivery_receipt(response, _sc)
 
         # Schedule deletion of tracked temporary progress bubbles after the
         # final response lands. Failed runs skip this so bubbles remain as

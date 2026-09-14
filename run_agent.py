@@ -1927,10 +1927,21 @@ class AIAgent:
                 if timestamp is not None:
                     msg["timestamp"] = timestamp
 
-    def _persist_session(self, messages: List[Dict], conversation_history: List[Dict] = None):
+    def _persist_session(
+        self,
+        messages: List[Dict],
+        conversation_history: List[Dict] = None,
+        *,
+        allow_json_snapshot_shrink: bool = False,
+        preserve_json_snapshot: bool = False,
+    ):
         """Save session state to both JSON log and SQLite on any exit path.
 
         Ensures conversations are never lost, even on errors or early returns.
+
+        ``preserve_json_snapshot`` keeps an existing optional JSON mirror byte-
+        stable while still flushing SQLite. It is used after an in-memory
+        micro-compaction whose authoritative DB archive did not commit.
 
         Trailing empty-response scaffolding is dropped from the live list in
         place (it is ephemeral junk the real transcript should shed). The
@@ -1951,7 +1962,11 @@ class AIAgent:
         def _persist_and_drain() -> None:
             self._drop_trailing_empty_response_scaffolding(messages)
             self._session_messages = messages
-            self._save_session_log(messages)
+            if not preserve_json_snapshot:
+                self._save_session_log(
+                    messages,
+                    allow_shrink=allow_json_snapshot_shrink,
+                )
             self._flush_messages_to_session_db(messages, conversation_history)
             # Drain async token-accounting deltas at every persist point (turn
             # finalize + error exits) so a crash after this line loses at most
@@ -2327,7 +2342,14 @@ class AIAgent:
                     )
                     or 300.0,
                 )
-                for _written in _batch_msgs:
+                for _row, _written in zip(_batch_rows, _batch_msgs):
+                    # ``append_messages_batch`` writes the durable row id back
+                    # onto each batch row. Carry it onto the live message dict
+                    # so post-persist consumers can bind presentation metadata
+                    # to this exact response rather than searching by text.
+                    _row_id = _row.get("_row_id")
+                    if _row_id is not None:
+                        _written["_row_id"] = _row_id
                     _written[_DB_PERSISTED_MARKER] = True
             # The intrinsic markers are now the sole source of truth. Reset the
             # one-shot seed so no id() outlives this flush to alias a message
@@ -3087,7 +3109,12 @@ class AIAgent:
             return redacted
         return content
 
-    def _save_session_log(self, messages: List[Dict[str, Any]] = None):
+    def _save_session_log(
+        self,
+        messages: List[Dict[str, Any]] = None,
+        *,
+        allow_shrink: bool = False,
+    ):
         """Optional per-session JSON snapshot writer.
 
         Gated by ``sessions.write_json_snapshots`` (default False).  state.db
@@ -3100,7 +3127,8 @@ class AIAgent:
         ``_clean_session_content`` to convert REASONING_SCRATCHPAD to think
         tags).  The truncation guard ("don't overwrite a larger log with
         fewer messages") is preserved so resume + branch don't clobber a
-        fuller existing snapshot.
+        fuller existing snapshot. ``allow_shrink`` is reserved for a caller
+        that just completed an in-place compaction of this same live session.
         """
         if not getattr(self, "_session_json_enabled", False):
             return
@@ -3147,7 +3175,7 @@ class AIAgent:
                 try:
                     existing = json.loads(log_file.read_text(encoding="utf-8"))
                     existing_count = existing.get("message_count", len(existing.get("messages", [])))
-                    if existing_count > len(cleaned):
+                    if existing_count > len(cleaned) and not allow_shrink:
                         logging.debug(
                             "Skipping session log overwrite: existing has %d messages, current has %d",
                             existing_count, len(cleaned),

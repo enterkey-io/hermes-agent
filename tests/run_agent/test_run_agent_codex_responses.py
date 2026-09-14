@@ -1722,6 +1722,14 @@ def test_mid_turn_compaction_does_not_double_persist_in_place_rows(monkeypatch, 
         f"compacted summary row double-persisted: {len(summary_rows)} copies "
         "(conversation_history flush cursor not re-baselined for in-place compaction)"
     )
+    final_row = next(
+        row
+        for row in active
+        if row["role"] == "assistant"
+        and row["content"] == "Summary after compaction."
+    )
+    assert result["assistant_message_row_id"] == final_row["id"]
+    assert result["messages"][-1]["_row_id"] == final_row["id"]
 
 
 def _codex_incomplete_with_reasoning(text: str, reasoning_id: str = "rs_default"):

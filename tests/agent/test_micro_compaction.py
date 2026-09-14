@@ -58,6 +58,26 @@ def _summary_markers(messages: list) -> list:
 
 
 class TestMicroCompaction:
+    def test_real_db_archive_sets_successful_sync_outcome(self, tmp_path):
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("micro-sync", source="telegram")
+        messages = _conversation()
+        db.append_messages_batch("micro-sync", messages)
+        cc = _compressor()
+        cc._session_db = db
+        cc._session_id = "micro-sync"
+
+        result = cc._micro_compact(list(messages))
+
+        assert cc._last_micro_compact_db_sync_succeeded is True
+        assert len(db.get_messages_as_conversation("micro-sync")) == len(result)
+
+        cc._micro_compact_enabled = False
+        assert cc._micro_compact(result) == result
+        assert cc._last_micro_compact_db_sync_succeeded is None
+
     def test_absorbs_one_exchange_and_leaves_a_summary_marker(self):
         cc = _compressor()
         messages = _conversation()

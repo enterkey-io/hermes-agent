@@ -21,6 +21,7 @@ import logging
 import queue
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -41,6 +42,7 @@ logger = logging.getLogger("gateway.stream_consumer")
 
 # Sentinel to signal the stream is complete
 _DONE = object()
+_EARLY_DONE = object()
 _NEW_SEGMENT = object()
 _COMMENTARY = object()
 
@@ -226,6 +228,12 @@ class GatewayStreamConsumer:
         # turn-final payload for multi-message deliveries (#78541).
         self._stream_ledger = ""
         self._message_id: Optional[str] = None
+        # A receipt belongs to this logical response, never to its text:
+        # adjacent turns may legitimately produce identical assistant replies.
+        self._response_identity = uuid.uuid4().hex
+        # Ordered platform IDs for the active answer segment. A set cannot
+        # preserve the visible ordering of an overflow-split final response.
+        self._platform_message_ids: list[str] = []
         # Wall-clock timestamp (time.monotonic) when ``_message_id`` was
         # first assigned from a successful first-send.  Used by the
         # fresh-final logic to detect long-lived previews whose edit
@@ -256,6 +264,9 @@ class GatewayStreamConsumer:
         # Telegram overflow delivery.  In that case the already-visible prefix
         # is intentional content, not a stale preview to delete.
         self._fallback_preserve_partial_messages = False
+        # A structured partial overflow without an exact adapter-input prefix
+        # must replace all partial chunks with the complete response.
+        self._fallback_replace_partial_messages = False
         # Keep fallback recovery responsive. Telegram's adapter already bounds
         # edit retries at five seconds; a final-delivery fallback must not hold
         # the stream task through a longer flood cooldown before retrying.
@@ -290,6 +301,12 @@ class GatewayStreamConsumer:
         # of what was delivered, and the gateway's final-send suppression
         # can't recognize an already-delivered response. (#65919 review)
         self._delivered_segment_texts: list[str] = []
+        # Exact visible text plus ordered platform IDs for finalized segments
+        # and commentary. A later verification/housekeeping fallback may reuse
+        # one of those messages as the logical final response after active
+        # segment state has been reset; retain enough provenance to bind that
+        # delivery to the new durable assistant row.
+        self._delivered_text_receipts: list[tuple[str, tuple[str, ...]]] = []
         # Cache adapter lifecycle capability: only platforms that need an
         # explicit finalize call (e.g. DingTalk AI Cards) force us to make
         # a redundant final edit.  Everyone else keeps the fast path.
@@ -322,6 +339,8 @@ class GatewayStreamConsumer:
         # this response and route through edit-based for graceful degradation.
         self._draft_failures = 0
         self._before_finalize_notified = False
+        self._finish_enqueued = False
+        self._early_finish_enqueued = False
 
     def _metadata_for_send(
         self,
@@ -373,6 +392,55 @@ class GatewayStreamConsumer:
     def message_id(self) -> str | None:
         """The Discord/chat message ID of the last-sent or edited message."""
         return self._message_id
+
+    @property
+    def response_identity(self) -> str:
+        """Opaque identity for this one logical assistant response."""
+        return self._response_identity
+
+    @property
+    def final_delivery_metadata(self) -> dict:
+        """Content-free receipt to persist with the finalized assistant row."""
+        ids = list(self._platform_message_ids)
+        if not ids and self._message_id and self._message_id != "__no_edit__":
+            ids = [str(self._message_id)]
+        metadata: dict[str, Any] = {"response_identity": self._response_identity}
+        if len(ids) == 1:
+            metadata["platform_message_id"] = ids[0]
+        elif ids:
+            metadata["platform_message_ids"] = ids
+        return metadata
+
+    def final_delivery_metadata_for(self, text: str) -> dict:
+        """Return the receipt for the delivery that exactly matches *text*."""
+        target = self._clean_for_display(text or "").strip()
+        if not target:
+            return {"response_identity": self._response_identity}
+
+        normalized_final = (
+            self._clean_for_display(self._delivered_final_text).strip()
+            if self._delivered_final_text is not None
+            else None
+        )
+        if normalized_final == ensure_closed_code_fences(target).strip():
+            return self.final_delivery_metadata
+
+        if not self._turn_split_delivery and self._visible_prefix().strip() == target:
+            return self.final_delivery_metadata
+
+        for delivered_text, platform_ids in reversed(self._delivered_text_receipts):
+            if delivered_text.strip() != target:
+                continue
+            metadata: dict[str, Any] = {
+                "response_identity": self._response_identity,
+            }
+            if len(platform_ids) == 1:
+                metadata["platform_message_id"] = platform_ids[0]
+            elif platform_ids:
+                metadata["platform_message_ids"] = list(platform_ids)
+            return metadata
+
+        return {"response_identity": self._response_identity}
 
     @property
     def final_content_delivered(self) -> bool:
@@ -451,7 +519,12 @@ class GatewayStreamConsumer:
             acked = acked[: -len(self.cfg.cursor)]
         self._record_turn_final_payload(acked)
 
-    def _record_turn_final_payload(self, text: str) -> None:
+    def _record_turn_final_payload(
+        self,
+        text: str,
+        *,
+        prefer_stream_ledger: bool = True,
+    ) -> None:
         """Record what the user has actually seen as this turn's final answer.
 
         Normalized the same way ``_send_or_edit`` normalizes outgoing text
@@ -467,11 +540,46 @@ class GatewayStreamConsumer:
         an answer the user already received (#78541).
         """
         source = text or ""
-        if self._turn_split_delivery and self._stream_ledger:
+        if prefer_stream_ledger and self._turn_split_delivery and self._stream_ledger:
             source = self._stream_ledger
         self._delivered_final_text = ensure_closed_code_fences(
             self._clean_for_display(source)
         ).strip()
+        self._record_final_platform_message_ids()
+
+    def _record_final_platform_message_ids(
+        self,
+        continuation_message_ids: tuple[str, ...] = (),
+        *,
+        include_current_message: bool = True,
+    ) -> None:
+        """Capture final platform IDs once, retaining deterministic order."""
+        current_ids = (self._message_id,) if include_current_message else ()
+        for message_id in (*current_ids, *continuation_message_ids):
+            if message_id and message_id != "__no_edit__":
+                normalized = str(message_id)
+                if normalized not in self._platform_message_ids:
+                    self._platform_message_ids.append(normalized)
+
+    def record_external_final_delivery(
+        self,
+        text: str,
+        message_id: Optional[str] = None,
+        *,
+        delivery_result: Any = None,
+    ) -> None:
+        """Record a gateway reconciliation edit made after streaming ends."""
+        if delivery_result is not None:
+            # A successful oversized edit can expose the original message plus
+            # several continuations. Ingest the complete result before adopting
+            # its last ID so the durable receipt retains visible order.
+            self._track_preview_ids_from_result(delivery_result)
+            message_id = getattr(delivery_result, "message_id", None) or message_id
+        if message_id:
+            self._message_id = str(message_id)
+        self._final_response_sent = True
+        self._final_content_delivered = True
+        self._record_turn_final_payload(text, prefer_stream_ledger=False)
 
     def delivered_final_matches(self, final_text: str) -> Optional[bool]:
         """Reconcile the recorded turn-final payload against ``final_text``.
@@ -498,9 +606,13 @@ class GatewayStreamConsumer:
         if not target:
             return None
         if self._delivered_final_text is None:
+            if self._historical_delivery_matches(final_text):
+                return True
             if self._turn_split_delivery:
                 # #78541: refuse legacy trust for payload-less split delivery.
                 return False
+            if self.has_delivered_text(final_text):
+                return True
             return None
         if self._delivered_final_text.strip() == target:
             return True
@@ -518,10 +630,38 @@ class GatewayStreamConsumer:
         visible_prefix = self._visible_prefix().strip()
         if visible_prefix == target:
             return True
+        return self._historical_delivery_matches(text)
+
+    def _historical_delivery_matches(self, text: str) -> bool:
+        """Return whether finalized commentary/segment text matches *text*."""
+        target = self._clean_for_display(text or "").strip()
+        if not target:
+            return False
         return any(
             sent.strip() == target
             for sent in (*self._delivered_commentary_texts, *self._delivered_segment_texts)
         )
+
+    def _remember_delivered_text_receipt(
+        self,
+        text: str,
+        platform_ids: tuple[str, ...],
+    ) -> None:
+        """Retain ordered platform provenance for an immutable visible message."""
+        delivered_text = self._clean_for_display(text or "").strip()
+        if not delivered_text:
+            return
+        normalized_ids: list[str] = []
+        for message_id in platform_ids:
+            if not message_id or message_id == "__no_edit__":
+                continue
+            normalized = str(message_id)
+            if normalized not in normalized_ids:
+                normalized_ids.append(normalized)
+        if normalized_ids:
+            self._delivered_text_receipts.append(
+                (delivered_text, tuple(normalized_ids))
+            )
 
     def on_segment_break(self) -> None:
         """Finalize the current stream segment and start a fresh message."""
@@ -586,12 +726,27 @@ class GatewayStreamConsumer:
         if preserve_no_edit and self._message_id == "__no_edit__":
             return
         # Retain the finalized visible text of the current segment before
-        # clearing ``_last_sent_text``, so ``has_delivered_text`` can still
-        # match it after a segment break. (#65919 review)
-        if self._last_sent_text:
-            finalized = self._clean_for_display(self._last_sent_text).strip()
+        # clearing its live buffers, so ``has_delivered_text`` can still match
+        # it after a segment break. A split segment uses its full ledger rather
+        # than the active tail because the receipt covers every sealed chunk.
+        # (#65919 review)
+        delivered_segment_text = (
+            self._stream_ledger
+            if self._turn_split_delivery and self._stream_ledger
+            else self._last_sent_text
+        )
+        if delivered_segment_text:
+            finalized = self._clean_for_display(delivered_segment_text).strip()
             if finalized:
                 self._delivered_segment_texts.append(finalized)
+                platform_ids = tuple(self._platform_message_ids)
+                if (
+                    not platform_ids
+                    and self._message_id
+                    and self._message_id != "__no_edit__"
+                ):
+                    platform_ids = (str(self._message_id),)
+                self._remember_delivered_text_receipt(finalized, platform_ids)
         self._message_id = None
         self._message_created_ts = None
         self._accumulated = ""
@@ -600,7 +755,9 @@ class GatewayStreamConsumer:
         self._fallback_final_send = False
         self._fallback_prefix = ""
         self._fallback_preserve_partial_messages = False
+        self._fallback_replace_partial_messages = False
         self._segment_preview_message_ids = set()
+        self._platform_message_ids = []
         # #29346: a tool/segment boundary means what we delivered was an interim
         # preamble, not the final answer — clear the flags so a premature setter
         # can't fool the gateway. Safe: got_done returns before any reset, and
@@ -634,7 +791,43 @@ class GatewayStreamConsumer:
 
     def finish(self) -> None:
         """Signal that the stream is complete."""
+        if self._finish_enqueued:
+            return
+        self._finish_enqueued = True
         self._queue.put(_DONE)
+
+    def finish_if_matches(self, final_text: str) -> None:
+        """Finalize from the authoritative completed response before cleanup.
+
+        The agent calls this after output transforms are complete but before
+        slow post-turn maintenance. FIFO queue ordering guarantees all prior
+        deltas are observed first. An exact match uses the normal in-place
+        finalization path. A transformed/footer mismatch replaces the preview
+        with the authoritative payload rather than waiting for maintenance.
+        """
+        if (
+            self._finish_enqueued
+            or self._early_finish_enqueued
+            or not isinstance(final_text, str)
+            or not final_text.strip()
+        ):
+            return
+        self._early_finish_enqueued = True
+        self._queue.put((_EARLY_DONE, final_text))
+
+    def _accumulated_matches_final(self, final_text: str) -> bool:
+        target = ensure_closed_code_fences(
+            self._clean_for_display(final_text or "")
+        ).strip()
+        source = (
+            self._stream_ledger
+            if self._turn_split_delivery and self._stream_ledger
+            else self._accumulated
+        )
+        streamed = ensure_closed_code_fences(
+            self._clean_for_display(source)
+        ).strip()
+        return bool(target) and streamed == target
 
     # ── Think-block filtering ────────────────────────────────────────
     # Models like MiniMax emit inline <think>...</think> blocks in their
@@ -839,6 +1032,7 @@ class GatewayStreamConsumer:
                 got_flush = False
                 flush_event = None
                 commentary_text = None
+                early_final_text = None
                 while True:
                     try:
                         item = self._queue.get_nowait()
@@ -847,6 +1041,9 @@ class GatewayStreamConsumer:
                             break
                         if item is _NEW_SEGMENT:
                             got_segment_break = True
+                            break
+                        if isinstance(item, tuple) and len(item) == 2 and item[0] is _EARLY_DONE:
+                            early_final_text = item[1]
                             break
                         if isinstance(item, tuple) and len(item) == 2 and item[0] is _COMMENTARY:
                             commentary_text = item[1]
@@ -862,6 +1059,37 @@ class GatewayStreamConsumer:
                         self._filter_and_accumulate(item)
                     except queue.Empty:
                         break
+
+                if early_final_text is not None:
+                    self._flush_think_buffer()
+                    if _is_intentional_silence_response(
+                        self._clean_for_display(early_final_text)
+                    ):
+                        await self._suppress_silence_marker()
+                        return
+                    if (
+                        self._delivered_final_text is not None
+                        and self.delivered_final_matches(early_final_text) is True
+                    ) or self._historical_delivery_matches(early_final_text):
+                        # A finalized segment/commentary already carried the
+                        # exact response. Adopt its retained receipt and stop.
+                        self._final_response_sent = True
+                        self._final_content_delivered = True
+                        return
+                    if self._accumulated_matches_final(early_final_text):
+                        got_done = True
+                    else:
+                        outcome = await self._send_empty_fallback_final(
+                            early_final_text
+                        )
+                        if outcome == "delivered":
+                            return
+                        logger.debug(
+                            "Early authoritative final replacement was %s; "
+                            "waiting for ordinary turn finalization (chat=%s)",
+                            outcome,
+                            self.chat_id,
+                        )
 
                 # Flush any held-back partial-tag buffer on stream end
                 # so trailing text that was waiting for a potential open
@@ -1323,6 +1551,8 @@ class GatewayStreamConsumer:
 
     def _continuation_text(self, final_text: str) -> str:
         """Return only the part of final_text the user has not already seen."""
+        if self._fallback_replace_partial_messages:
+            return final_text
         prefix = self._fallback_prefix or self._visible_prefix()
         if prefix and final_text.startswith(prefix):
             return final_text[len(prefix):].lstrip(' \t')
@@ -1498,6 +1728,15 @@ class GatewayStreamConsumer:
         chunks = self._split_text_chunks(continuation, safe_limit, len_fn=_len_fn)
 
         stale_message_id = self._message_id  # partial message to clean up
+        stale_message_ids = tuple(self._platform_message_ids)
+        replaces_preview = (
+            continuation == final_text
+            and not self._fallback_preserve_partial_messages
+        )
+        if replaces_preview:
+            # This fallback replaces (and tries to delete) the partial preview.
+            # Do not persist its stale ID as part of the final visible reply.
+            self._platform_message_ids = []
         last_message_id: Optional[str] = None
         last_successful_chunk = ""
         sent_any_chunk = False
@@ -1545,6 +1784,10 @@ class GatewayStreamConsumer:
             sent_any_chunk = True
             last_successful_chunk = chunk
             last_message_id = result.message_id or last_message_id
+            self._track_preview_ids_from_result(
+                result,
+                include_current_message=False,
+            )
             # Each fallback chunk is a fresh platform message — notify
             # so any stale tool-progress bubble gets closed off.
             self._notify_new_message()
@@ -1560,20 +1803,25 @@ class GatewayStreamConsumer:
         # active, bot lacks permission, message too old to delete), the
         # partial remains but at least the full answer was delivered.
         if (
-            stale_message_id
-            and stale_message_id != last_message_id
+            (stale_message_ids or stale_message_id)
             and not self._fallback_preserve_partial_messages
             and continuation == final_text
         ):
             delete_fn = getattr(self.adapter, "delete_message", None)
             if delete_fn is not None:
-                try:
-                    await delete_fn(self.chat_id, stale_message_id)
-                except Exception as e:
-                    logger.debug(
-                        "Fallback partial cleanup failed (%s): %s",
-                        stale_message_id, e,
-                    )
+                cleanup_ids = list(stale_message_ids)
+                if stale_message_id and stale_message_id not in cleanup_ids:
+                    cleanup_ids.append(stale_message_id)
+                for partial_message_id in cleanup_ids:
+                    if not partial_message_id or partial_message_id == last_message_id:
+                        continue
+                    try:
+                        await delete_fn(self.chat_id, partial_message_id)
+                    except Exception as e:
+                        logger.debug(
+                            "Fallback partial cleanup failed (%s): %s",
+                            partial_message_id, e,
+                        )
 
         self._message_id = last_message_id
         self._already_sent = True
@@ -1589,6 +1837,7 @@ class GatewayStreamConsumer:
         self._last_sent_text = chunks[-1]
         self._fallback_prefix = ""
         self._fallback_preserve_partial_messages = False
+        self._fallback_replace_partial_messages = False
 
     async def _send_empty_fallback_final(self, final_text: str) -> str:
         """Commit a completed answer after Telegram finalization fails.
@@ -1652,7 +1901,12 @@ class GatewayStreamConsumer:
                     )
 
         self._segment_preview_message_ids = set()
+        # This fresh message replaces the deleted preview, so rebuild the
+        # receipt from the successful send result. Adapter-provided ordered
+        # split IDs remain authoritative when the replacement itself overflowed.
+        self._platform_message_ids = []
         self._message_id = new_message_id or "__no_edit__"
+        self._track_preview_ids_from_result(result)
         self._already_sent = True
         self._final_response_sent = True
         self._final_content_delivered = True
@@ -1671,6 +1925,7 @@ class GatewayStreamConsumer:
         self._last_sent_text = final_text
         self._fallback_prefix = ""
         self._fallback_preserve_partial_messages = False
+        self._fallback_replace_partial_messages = False
         self._notify_new_message()
         return "delivered"
 
@@ -1867,6 +2122,10 @@ class GatewayStreamConsumer:
                 # an interim "preview" actually carried the final response, vs.
                 # unrelated commentary delivered during a session split (#14238).
                 self._delivered_commentary_texts.append(text)
+                self._remember_delivered_text_receipt(
+                    text,
+                    self._fresh_result_platform_message_ids(result),
+                )
             return result.success
         except Exception as e:
             logger.error("Commentary send error: %s", e)
@@ -1931,17 +2190,157 @@ class GatewayStreamConsumer:
             self._preview_message_ids.add(message_id)
             self._segment_preview_message_ids.add(message_id)
 
-    def _track_preview_ids_from_result(self, result: Any) -> None:
+    @staticmethod
+    def _fresh_result_platform_message_ids(result: Any) -> tuple[str, ...]:
+        """Return every ID from a fresh send in authoritative visible order."""
+        raw = getattr(result, "raw_response", None) or {}
+        if isinstance(raw, dict):
+            raw_ids = tuple(
+                str(mid) for mid in (raw.get("message_ids") or ()) if mid
+            )
+            if raw_ids:
+                return raw_ids
+
+        ordered_ids = tuple(
+            str(mid)
+            for mid in (
+                getattr(result, "continuation_message_ids", None) or ()
+            )
+            if mid
+        )
+        result_message_id = getattr(result, "message_id", None)
+        if result_message_id:
+            normalized_result_id = str(result_message_id)
+            if normalized_result_id not in ordered_ids:
+                ordered_ids += (normalized_result_id,)
+        return ordered_ids
+
+    def _track_preview_ids_from_result(
+        self,
+        result: Any,
+        *,
+        include_current_message: bool = True,
+    ) -> None:
         """Record every message id a send/edit result exposes: the primary id
         plus any continuation ids from an oversized split
-        (``continuation_message_ids`` or ``raw_response['message_ids']``)."""
+        (``continuation_message_ids`` or ``raw_response['message_ids']``).
+
+        A raw ID list is already in visible order. Without one, fresh sends use
+        the SendResult contract's continuation IDs followed by its last-message
+        ID; edits retain the existing target first, then their continuations.
+        """
         self._track_preview_id(getattr(result, "message_id", None))
         for mid in (getattr(result, "continuation_message_ids", None) or ()):
             self._track_preview_id(mid)
         raw = getattr(result, "raw_response", None) or {}
+        ordered_message_ids: tuple[str, ...] = ()
         if isinstance(raw, dict):
-            for mid in (raw.get("message_ids") or ()):
+            ordered_message_ids = tuple(
+                str(mid) for mid in (raw.get("message_ids") or ()) if mid
+            )
+            for mid in ordered_message_ids:
                 self._track_preview_id(mid)
+        if ordered_message_ids:
+            self._record_final_platform_message_ids(
+                ordered_message_ids,
+                include_current_message=False,
+            )
+        else:
+            result_message_id = getattr(result, "message_id", None)
+            normalized_result_id = (
+                str(result_message_id) if result_message_id else None
+            )
+            continuation_ids = tuple(
+                str(mid)
+                for mid in (
+                    getattr(result, "continuation_message_ids", None) or ()
+                )
+                if mid
+            )
+            ordered_result_ids = continuation_ids
+            if (
+                normalized_result_id
+                and normalized_result_id not in ordered_result_ids
+            ):
+                ordered_result_ids += (normalized_result_id,)
+
+            current_message_id = (
+                str(self._message_id)
+                if self._message_id and self._message_id != "__no_edit__"
+                else None
+            )
+            preserve_existing_target = bool(
+                include_current_message
+                and current_message_id
+                and current_message_id != normalized_result_id
+            )
+            self._record_final_platform_message_ids(
+                ordered_result_ids,
+                include_current_message=preserve_existing_target,
+            )
+
+    def _ingest_partial_overflow_result(self, result: Any, text: str) -> bool:
+        """Adopt an adapter's incomplete split result for fallback recovery."""
+        raw_response = getattr(result, "raw_response", None)
+        if not (
+            isinstance(raw_response, dict)
+            and raw_response.get("partial_overflow")
+        ):
+            return False
+
+        # An adapter delivered the original chunk plus zero or more
+        # continuations, but not the complete response. Some adapters report
+        # this as success and others as failure; the structured marker wins.
+        self._track_preview_ids_from_result(result)
+        continuation_ids = (
+            getattr(result, "continuation_message_ids", ()) or ()
+        )
+        if continuation_ids:
+            self._turn_split_delivery = True
+        self._message_id = str(
+            raw_response.get("last_message_id")
+            or result.message_id
+            or self._message_id
+        )
+        delivered_prefix = raw_response.get("delivered_prefix")
+        self._fallback_replace_partial_messages = False
+        if isinstance(delivered_prefix, str) and delivered_prefix:
+            self._last_sent_text = delivered_prefix
+            self._fallback_prefix = delivered_prefix
+            self._fallback_preserve_partial_messages = text.startswith(
+                delivered_prefix
+            )
+        else:
+            # Without an adapter-certified source prefix, the last streaming
+            # preview is not a safe boundary (platform formatting may have
+            # changed it). Send the full final, then remove all partials.
+            self._fallback_prefix = ""
+            self._fallback_preserve_partial_messages = False
+            self._fallback_replace_partial_messages = True
+        self._fallback_final_send = True
+        self._edit_supported = False
+        self._already_sent = True
+        self._final_response_sent = False
+        self._final_content_delivered = False
+        if continuation_ids:
+            self._notify_new_message()
+        return True
+
+    async def recover_external_partial_overflow(
+        self,
+        result: Any,
+        final_text: str,
+    ) -> bool:
+        """Complete an incomplete edit issued by the post-stream gateway."""
+        if not self._ingest_partial_overflow_result(result, final_text):
+            return False
+        await self._send_fallback_final(final_text)
+        if not (self._final_response_sent and self._final_content_delivered):
+            return False
+        # The external edit may contain transformed text that differs from the
+        # original stream ledger, so record the supplied completed payload.
+        self.record_external_final_delivery(final_text, self._message_id)
+        return self.delivered_final_matches(final_text) is True
 
     def _adapter_prefers_fresh_final(self, text: str) -> bool:
         """Return True when the adapter would rather finalize a streamed reply
@@ -2036,6 +2435,10 @@ class GatewayStreamConsumer:
                         stale_id, e,
                     )
         self._preview_message_ids = set()
+        # The fresh send replaces every preview, so this segment's receipt must
+        # not retain deleted IDs as if they were still-visible fragments. This
+        # applies to interim segment finalization as well as the turn final.
+        self._platform_message_ids = []
         if new_message_id:
             self._message_id = new_message_id
             self._message_created_ts = time.monotonic()
@@ -2045,6 +2448,7 @@ class GatewayStreamConsumer:
             # don't try to edit something we can't address.
             self._message_id = "__no_edit__"
             self._message_created_ts = None
+        self._track_preview_ids_from_result(result)
         self._already_sent = True
         self._last_sent_text = text
         if is_turn_final:
@@ -2247,6 +2651,8 @@ class GatewayStreamConsumer:
                         content=text,
                         finalize=finalize,
                     )
+                    if self._ingest_partial_overflow_result(result, text):
+                        return False
                     if result.success:
                         self._already_sent = True
                         # Record any continuation fragments an oversized edit
@@ -2308,35 +2714,6 @@ class GatewayStreamConsumer:
                             # already-visible answer, reintroducing the
                             # duplicate #45517 fixed (#36965 / #25349).
                             self._record_turn_final_payload(text)
-                        raw_response = getattr(result, "raw_response", None)
-                        if isinstance(raw_response, dict) and raw_response.get("partial_overflow"):
-                            # Telegram edited/sent one or more overflow chunks,
-                            # but not the complete response.  Preserve the
-                            # visible prefix so the got_done fallback sends the
-                            # missing tail instead of marking a clipped topic
-                            # reply as final delivery.
-                            self._message_id = str(
-                                raw_response.get("last_message_id")
-                                or result.message_id
-                                or self._message_id
-                            )
-                            delivered_prefix = raw_response.get("delivered_prefix")
-                            if isinstance(delivered_prefix, str) and delivered_prefix:
-                                self._last_sent_text = delivered_prefix
-                                self._fallback_prefix = delivered_prefix
-                                self._fallback_preserve_partial_messages = text.startswith(
-                                    delivered_prefix
-                                )
-                            else:
-                                self._fallback_prefix = self._visible_prefix()
-                                self._fallback_preserve_partial_messages = False
-                            self._fallback_final_send = True
-                            self._edit_supported = False
-                            self._already_sent = True
-                            if getattr(result, "continuation_message_ids", ()):
-                                self._notify_new_message()
-                            return False
-
                         # Edit failed.  If this looks like flood control / rate
                         # limiting, use adaptive backoff: double the edit interval
                         # and retry on the next cycle.  Only permanently disable

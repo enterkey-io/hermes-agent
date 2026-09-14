@@ -9526,6 +9526,106 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
 
         return bool(self._execute_write(_do))
 
+    def record_assistant_delivery(
+        self,
+        session_id: str,
+        message_row_id: int,
+        receipt: Dict[str, Any],
+    ) -> bool:
+        """Bind one gateway delivery receipt to one active assistant row.
+
+        The row id is carried from the transcript insert (and refreshed by an
+        in-place compaction rewrite), so equal response text on adjacent turns
+        can never select the wrong message. A single external message also
+        fills the existing ``platform_message_id`` column; split deliveries
+        retain their ordered ids in presentation-only metadata.
+
+        Conflicting receipts fail closed. Repeating the exact same receipt is
+        idempotent.
+        """
+        if not session_id or message_row_id is None or not isinstance(receipt, dict):
+            return False
+        response_identity = receipt.get("response_identity")
+        if not isinstance(response_identity, str) or not response_identity.strip():
+            return False
+
+        singular = receipt.get("platform_message_id")
+        plural = receipt.get("platform_message_ids")
+        if singular is not None and plural is not None:
+            return False
+
+        normalized: Dict[str, Any] = {
+            "response_identity": response_identity.strip(),
+        }
+        platform_message_id: Optional[str] = None
+        if singular is not None:
+            platform_message_id = str(singular).strip()
+            if not platform_message_id:
+                return False
+            normalized["platform_message_id"] = platform_message_id
+        elif plural is not None:
+            if not isinstance(plural, (list, tuple)):
+                return False
+            ids: List[str] = []
+            for value in plural:
+                normalized_id = str(value).strip()
+                if normalized_id and normalized_id not in ids:
+                    ids.append(normalized_id)
+            if len(ids) < 2:
+                return False
+            normalized["platform_message_ids"] = ids
+        else:
+            return False
+
+        try:
+            row_id = int(message_row_id)
+        except (TypeError, ValueError):
+            return False
+
+        def _do(conn):
+            row = conn.execute(
+                "SELECT id, platform_message_id, display_metadata FROM messages "
+                "WHERE id = ? AND session_id = ? AND role = 'assistant' AND active = 1",
+                (row_id, session_id),
+            ).fetchone()
+            if row is None:
+                return False
+
+            existing_metadata = self._decode_display_metadata(
+                row["display_metadata"]
+            ) or {}
+            existing_receipt = existing_metadata.get("gateway_delivery")
+            if existing_receipt is not None and existing_receipt != normalized:
+                return False
+
+            existing_platform_id = row["platform_message_id"]
+            if platform_message_id is not None:
+                if (
+                    existing_platform_id is not None
+                    and str(existing_platform_id) != platform_message_id
+                ):
+                    return False
+            elif existing_platform_id is not None:
+                # A split delivery must not silently reinterpret a row already
+                # bound to a different singular platform message.
+                return False
+
+            existing_metadata["gateway_delivery"] = normalized
+            cursor = conn.execute(
+                "UPDATE messages SET platform_message_id = COALESCE(platform_message_id, ?), "
+                "display_metadata = ? WHERE id = ? AND session_id = ? "
+                "AND role = 'assistant' AND active = 1",
+                (
+                    platform_message_id,
+                    self._encode_display_metadata(existing_metadata),
+                    row_id,
+                    session_id,
+                ),
+            )
+            return cursor.rowcount == 1
+
+        return bool(self._execute_write(_do))
+
     #: Key under which message reactions live inside ``display_metadata``.
     #: Reactions share the existing per-message JSON column rather than a side
     #: table so they survive rewind/compaction row rewrites with the row itself.

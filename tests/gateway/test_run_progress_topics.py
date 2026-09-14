@@ -3,6 +3,7 @@
 import asyncio
 import importlib
 import sys
+import threading
 import time
 import types
 from types import SimpleNamespace
@@ -144,6 +145,93 @@ class MetadataEditProgressCaptureAdapter(ProgressCaptureAdapter):
             }
         )
         return SendResult(success=True, message_id=message_id)
+
+
+class RejectedFinalEditProgressCaptureAdapter(MetadataEditProgressCaptureAdapter):
+    async def edit_message(
+        self, chat_id, message_id, content, *, finalize: bool = False, metadata=None
+    ) -> SendResult:
+        await super().edit_message(
+            chat_id,
+            message_id,
+            content,
+            finalize=finalize,
+            metadata=metadata,
+        )
+        return SendResult(success=False, error="platform rejected final edit")
+
+
+class PartialOverflowFinalEditProgressCaptureAdapter(
+    MetadataEditProgressCaptureAdapter
+):
+    async def edit_message(
+        self, chat_id, message_id, content, *, finalize: bool = False, metadata=None
+    ) -> SendResult:
+        await super().edit_message(
+            chat_id,
+            message_id,
+            content,
+            finalize=finalize,
+            metadata=metadata,
+        )
+        if finalize and "[plugin appended this]" in content:
+            return SendResult(
+                success=True,
+                message_id="continuation-1",
+                continuation_message_ids=("continuation-1",),
+                raw_response={
+                    "partial_overflow": True,
+                    "delivered_chunks": 2,
+                    "total_chunks": 3,
+                    "last_message_id": "continuation-1",
+                    "delivered_prefix": "original answer\n\n",
+                },
+            )
+        return SendResult(success=True, message_id=message_id)
+
+
+class SuccessfulSplitFinalEditProgressCaptureAdapter(
+    MetadataEditProgressCaptureAdapter
+):
+    async def edit_message(
+        self, chat_id, message_id, content, *, finalize: bool = False, metadata=None
+    ) -> SendResult:
+        await super().edit_message(
+            chat_id,
+            message_id,
+            content,
+            finalize=finalize,
+            metadata=metadata,
+        )
+        if finalize and "[plugin appended this]" in content:
+            return SendResult(
+                success=True,
+                message_id="continuation-2",
+                continuation_message_ids=("continuation-1", "continuation-2"),
+            )
+        return SendResult(success=True, message_id=message_id)
+
+
+class DraftProgressCaptureAdapter(ProgressCaptureAdapter):
+    def __init__(self, platform=Platform.TELEGRAM):
+        super().__init__(platform=platform)
+        self.drafts = []
+
+    def supports_draft_streaming(self, chat_type=None, metadata=None) -> bool:
+        return str(chat_type or "").lower() == "dm"
+
+    async def send_draft(
+        self, chat_id, draft_id, content, metadata=None
+    ) -> SendResult:
+        self.drafts.append(
+            {
+                "chat_id": chat_id,
+                "draft_id": draft_id,
+                "content": content,
+                "metadata": metadata,
+            }
+        )
+        return SendResult(success=True)
 
 
 class RetryableFirstEditProgressCaptureAdapter(ProgressCaptureAdapter):
@@ -1006,6 +1094,7 @@ async def _run_with_agent(
     adapter_cls=ProgressCaptureAdapter,
     user_id=None,
     scope_id=None,
+    configure_runner=None,
 ):
     if config_data:
         import yaml
@@ -1022,6 +1111,8 @@ async def _run_with_agent(
 
     adapter = adapter_cls(platform=platform)
     runner = _make_runner(adapter)
+    if configure_runner is not None:
+        configure_runner(runner)
     gateway_run = importlib.import_module("gateway.run")
     if config_data and "streaming" in config_data:
         runner.config.streaming = StreamingConfig.from_dict(config_data["streaming"])
@@ -1282,6 +1373,176 @@ class TransformedStreamAgent:
         }
 
 
+class TransformedStreamReceiptAgent(TransformedStreamAgent):
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        result = super().run_conversation(
+            message,
+            conversation_history=conversation_history,
+            task_id=task_id,
+        )
+        result["assistant_message_row_id"] = 701
+        result["messages"] = [
+            {
+                "role": "assistant",
+                "content": result["final_response"],
+                "_row_id": 701,
+            }
+        ]
+        return result
+
+
+class SequentialStreamReceiptAgent:
+    """Two logical turns with distinct streamed finals for delivery provenance."""
+
+    def __init__(self, **kwargs):
+        self.stream_delta_callback = kwargs.get("stream_delta_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        final = f"reply for {message}"
+        self.stream_delta_callback(final)
+        return {
+            "final_response": final,
+            "response_previewed": True,
+            "assistant_message_row_id": 101 if message == "first" else 102,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": final,
+                    "_row_id": 101 if message == "first" else 102,
+                }
+            ],
+            "api_calls": 1,
+        }
+
+
+class ReusedSegmentReceiptAgent:
+    """Reuse a pre-tool streamed segment as the current turn final."""
+
+    def __init__(self, **kwargs):
+        self.stream_delta_callback = kwargs.get("stream_delta_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        final = "answer completed before housekeeping"
+        self.stream_delta_callback(final)
+        self.stream_delta_callback(None)
+        return {
+            "final_response": final,
+            "response_previewed": True,
+            "assistant_message_row_id": 801,
+            "messages": [
+                {"role": "assistant", "content": final, "_row_id": 801}
+            ],
+            "api_calls": 2,
+        }
+
+
+class ReusedCommentaryReceiptAgent:
+    """Reuse a separately sent interim message as the current turn final."""
+
+    def __init__(self, **kwargs):
+        self.interim_assistant_callback = kwargs.get("interim_assistant_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        final = "answer completed before verification"
+        self.interim_assistant_callback(final, already_streamed=False)
+        return {
+            "final_response": final,
+            "response_previewed": True,
+            "assistant_message_row_id": 802,
+            "messages": [
+                {"role": "assistant", "content": final, "_row_id": 802}
+            ],
+            "api_calls": 2,
+        }
+
+
+class RotatingStreamReceiptAgent:
+    """Stream a final whose persisted row belongs to a compressed child session."""
+
+    def __init__(self, **kwargs):
+        self.stream_delta_callback = kwargs.get("stream_delta_callback")
+        self.session_id = kwargs.get("session_id")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        final = "reply persisted after compression rotation"
+        self.stream_delta_callback(final)
+        self.session_id = "session-child"
+        return {
+            "final_response": final,
+            "response_previewed": True,
+            "assistant_message_row_id": 601,
+            "messages": [
+                {"role": "assistant", "content": final, "_row_id": 601}
+            ],
+            "api_calls": 1,
+        }
+
+
+class BlockingPostTurnAgent:
+    """Expose a slow post-turn phase after the visible response is complete."""
+
+    maintenance_started = threading.Event()
+    maintenance_release = threading.Event()
+
+    def __init__(self, **kwargs):
+        self.stream_delta_callback = kwargs.get("stream_delta_callback")
+        self.stream_final_callback = None
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        final = "Complete answer before slow maintenance"
+        self.stream_delta_callback(final)
+        # Let the event-loop consumer publish at least one native draft frame.
+        time.sleep(0.1)
+        self.stream_final_callback(final)
+        type(self).maintenance_started.set()
+        assert type(self).maintenance_release.wait(timeout=5)
+        return {
+            "final_response": final,
+            "response_previewed": True,
+            "assistant_message_row_id": 501,
+            "messages": [
+                {"role": "assistant", "content": final, "_row_id": 501}
+            ],
+            "api_calls": 1,
+        }
+
+
+class BlockingTransformedPostTurnAgent:
+    """Queue a transformed final, then simulate blocking post-turn work."""
+
+    maintenance_started = threading.Event()
+    maintenance_release = threading.Event()
+
+    def __init__(self, **kwargs):
+        self.stream_delta_callback = kwargs.get("stream_delta_callback")
+        self.stream_final_callback = None
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        raw = "Raw answer before plugin transform"
+        final = raw + "\n\n[plugin appended this]"
+        self.stream_delta_callback(raw)
+        time.sleep(0.1)
+        self.stream_final_callback(final)
+        type(self).maintenance_started.set()
+        assert type(self).maintenance_release.wait(timeout=5)
+        return {
+            "final_response": final,
+            "response_previewed": True,
+            "response_transformed": True,
+            "assistant_message_row_id": 901,
+            "messages": [
+                {"role": "assistant", "content": raw, "_row_id": 901}
+            ],
+            "api_calls": 1,
+        }
+
+
 @pytest.mark.asyncio
 async def test_transformed_response_edits_streamed_message_in_place(monkeypatch, tmp_path):
     """When a transform_llm_output hook modifies the response after streaming,
@@ -1313,6 +1574,468 @@ async def test_transformed_response_edits_streamed_message_in_place(monkeypatch,
     assert any("[plugin appended this]" in text for text in edited_texts), (
         f"expected transformed text in adapter.edits, got: {edited_texts!r}"
     )
+
+
+@pytest.mark.asyncio
+async def test_rejected_transformed_final_edit_falls_through_to_normal_send(
+    monkeypatch, tmp_path
+):
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        TransformedStreamAgent,
+        session_id="sess-rejected-transformed-stream",
+        config_data={
+            "display": {"tool_progress": "off", "interim_assistant_messages": False},
+            "streaming": {"enabled": True, "edit_interval": 0.01, "buffer_threshold": 1},
+        },
+        platform=Platform.TELEGRAM,
+        chat_id="chat-1",
+        chat_type="dm",
+        thread_id=None,
+        adapter_cls=RejectedFinalEditProgressCaptureAdapter,
+    )
+
+    assert result.get("already_sent") is not True
+    assert "gateway_delivery" not in result.get("display_metadata", {})
+    assert any("[plugin appended this]" in edit["content"] for edit in adapter.edits)
+
+
+@pytest.mark.asyncio
+async def test_partial_transformed_final_edit_recovers_missing_tail(
+    monkeypatch, tmp_path
+):
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        TransformedStreamAgent,
+        session_id="sess-partial-transformed-stream",
+        config_data={
+            "display": {"tool_progress": "off", "interim_assistant_messages": False},
+            "streaming": {"enabled": True, "edit_interval": 0.01, "buffer_threshold": 1},
+        },
+        platform=Platform.DISCORD,
+        chat_id="discord-1",
+        chat_type="dm",
+        thread_id=None,
+        adapter_cls=PartialOverflowFinalEditProgressCaptureAdapter,
+    )
+
+    assert result.get("already_sent") is True
+    assert [send["content"] for send in adapter.sent][-1] == "[plugin appended this]"
+
+
+@pytest.mark.asyncio
+async def test_successful_split_transformed_edit_persists_every_message_id(
+    monkeypatch, tmp_path
+):
+    receipts = []
+
+    def configure_runner(runner):
+        runner.session_store.record_assistant_delivery = (
+            lambda session_id, row_id, receipt: receipts.append(
+                (session_id, row_id, receipt)
+            )
+            or True
+        )
+
+    _adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        TransformedStreamReceiptAgent,
+        session_id="sess-split-transformed-stream",
+        config_data={
+            "display": {"tool_progress": "off", "interim_assistant_messages": False},
+            "streaming": {"enabled": True, "edit_interval": 0.01, "buffer_threshold": 1},
+        },
+        platform=Platform.DISCORD,
+        chat_id="discord-1",
+        chat_type="dm",
+        thread_id=None,
+        adapter_cls=SuccessfulSplitFinalEditProgressCaptureAdapter,
+        configure_runner=configure_runner,
+    )
+
+    assert result.get("already_sent") is True
+    assert receipts[0][0:2] == ("sess-split-transformed-stream", 701)
+    assert receipts[0][2]["platform_message_ids"] == [
+        "progress-1",
+        "continuation-1",
+        "continuation-2",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_reused_stream_segment_persists_its_platform_receipt(
+    monkeypatch, tmp_path
+):
+    receipts = []
+
+    def configure_runner(runner):
+        runner.session_store.record_assistant_delivery = (
+            lambda session_id, row_id, receipt: receipts.append(
+                (session_id, row_id, receipt)
+            )
+            or True
+        )
+
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        ReusedSegmentReceiptAgent,
+        session_id="sess-reused-segment",
+        config_data={
+            "display": {"tool_progress": "off", "interim_assistant_messages": False},
+            "streaming": {"enabled": True, "edit_interval": 0.01, "buffer_threshold": 1},
+        },
+        platform=Platform.TELEGRAM,
+        chat_id="chat-1",
+        chat_type="group",
+        thread_id=None,
+        adapter_cls=MetadataEditProgressCaptureAdapter,
+        configure_runner=configure_runner,
+    )
+
+    assert [item["content"] for item in adapter.sent] == [
+        "answer completed before housekeeping"
+    ]
+    assert result.get("already_sent") is True
+    assert receipts[0][0:2] == ("sess-reused-segment", 801)
+    assert receipts[0][2]["platform_message_id"] == "progress-1"
+
+
+@pytest.mark.asyncio
+async def test_reused_commentary_persists_its_platform_receipt(
+    monkeypatch, tmp_path
+):
+    receipts = []
+
+    def configure_runner(runner):
+        runner.session_store.record_assistant_delivery = (
+            lambda session_id, row_id, receipt: receipts.append(
+                (session_id, row_id, receipt)
+            )
+            or True
+        )
+
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        ReusedCommentaryReceiptAgent,
+        session_id="sess-reused-commentary",
+        config_data={
+            "display": {"tool_progress": "off", "interim_assistant_messages": True},
+            "streaming": {"enabled": False},
+        },
+        platform=Platform.TELEGRAM,
+        chat_id="chat-1",
+        chat_type="group",
+        thread_id=None,
+        adapter_cls=MetadataEditProgressCaptureAdapter,
+        configure_runner=configure_runner,
+    )
+
+    assert [item["content"] for item in adapter.sent] == [
+        "answer completed before verification"
+    ]
+    assert result.get("already_sent") is True
+    assert receipts[0][0:2] == ("sess-reused-commentary", 802)
+    assert receipts[0][2]["platform_message_id"] == "progress-1"
+
+
+@pytest.mark.asyncio
+async def test_sequential_streamed_turns_do_not_reuse_persisted_delivery_receipts(
+    monkeypatch, tmp_path
+):
+    """A restored turn-one receipt cannot suppress a distinct streamed turn two."""
+    adapter = MetadataEditProgressCaptureAdapter(platform=Platform.TELEGRAM)
+    next_id = iter(("telegram-1", "telegram-2"))
+
+    async def send(chat_id, content, reply_to=None, metadata=None):
+        adapter.sent.append({"chat_id": chat_id, "content": content, "metadata": metadata})
+        return SendResult(success=True, message_id=next(next_id))
+
+    adapter.send = send
+    runner = _make_runner(adapter)
+    runner.config.streaming = StreamingConfig(enabled=True, edit_interval=0.01, buffer_threshold=1)
+    receipts = []
+    runner.session_store.record_assistant_delivery = (
+        lambda session_id, row_id, receipt: receipts.append(
+            (session_id, row_id, receipt)
+        )
+        or True
+    )
+    gateway_run = importlib.import_module("gateway.run")
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = SequentialStreamReceiptAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+    source = SessionSource(platform=Platform.TELEGRAM, chat_id="chat-1", chat_type="group")
+
+    first = await runner._run_agent("first", "", [], source, "session-1", session_key="same-session")
+    restored_history = first["messages"]
+    second = await runner._run_agent(
+        "second", "", restored_history, source, "session-1", session_key="same-session"
+    )
+
+    assert [call["content"] for call in adapter.sent] == ["reply for first", "reply for second"]
+    assert len(receipts) == 2
+    assert [receipt[1] for receipt in receipts] == [101, 102]
+    first_receipt = receipts[0][2]
+    second_receipt = receipts[1][2]
+    assert first_receipt["response_identity"] != second_receipt["response_identity"]
+    assert first_receipt["platform_message_id"] == "telegram-1"
+    assert second_receipt["platform_message_id"] == "telegram-2"
+    assert first["messages"][0]["display_metadata"]["gateway_delivery"] == first_receipt
+    assert second["messages"][0]["display_metadata"]["gateway_delivery"] == second_receipt
+
+
+@pytest.mark.asyncio
+async def test_queued_streamed_turn_persists_each_receipt_before_recursing(
+    monkeypatch, tmp_path
+):
+    adapter = MetadataEditProgressCaptureAdapter(platform=Platform.TELEGRAM)
+    next_id = iter(("telegram-1", "telegram-2"))
+
+    async def send(chat_id, content, reply_to=None, metadata=None):
+        adapter.sent.append(
+            {"chat_id": chat_id, "content": content, "metadata": metadata}
+        )
+        return SendResult(success=True, message_id=next(next_id))
+
+    adapter.send = send
+    runner = _make_runner(adapter)
+    runner.config.streaming = StreamingConfig(
+        enabled=True,
+        edit_interval=0.01,
+        buffer_threshold=1,
+    )
+    receipts = []
+    runner.session_store.record_assistant_delivery = (
+        lambda session_id, row_id, receipt: receipts.append(
+            (session_id, row_id, receipt)
+        )
+        or True
+    )
+    gateway_run = importlib.import_module("gateway.run")
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(
+        gateway_run,
+        "_resolve_runtime_agent_kwargs",
+        lambda: {"api_key": "***"},
+    )
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = SequentialStreamReceiptAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="chat-1",
+        chat_type="group",
+    )
+    session_key = "agent:main:telegram:group:chat-1"
+    adapter._pending_messages[session_key] = MessageEvent(
+        text="second",
+        message_type=MessageType.TEXT,
+        source=source,
+        message_id="queued-1",
+    )
+
+    result = await runner._run_agent(
+        "first",
+        "",
+        [],
+        source,
+        "session-1",
+        session_key=session_key,
+    )
+
+    assert [receipt[1] for receipt in receipts] == [101, 102]
+    assert receipts[0][2]["platform_message_id"] == "telegram-1"
+    assert receipts[1][2]["platform_message_id"] == "telegram-2"
+    assert result["assistant_message_row_id"] == 102
+    assert result["messages"][0]["display_metadata"]["gateway_delivery"] == receipts[1][2]
+
+
+@pytest.mark.asyncio
+async def test_stream_receipt_follows_compression_rotated_session(monkeypatch, tmp_path):
+    adapter = MetadataEditProgressCaptureAdapter(platform=Platform.TELEGRAM)
+    runner = _make_runner(adapter)
+    runner.config.streaming = StreamingConfig(
+        enabled=True, edit_interval=0.01, buffer_threshold=1
+    )
+    receipts = []
+    runner.session_store.record_assistant_delivery = (
+        lambda session_id, row_id, receipt: receipts.append(
+            (session_id, row_id, receipt)
+        )
+        or True
+    )
+    gateway_run = importlib.import_module("gateway.run")
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(
+        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
+    )
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = RotatingStreamReceiptAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="chat-1",
+        chat_type="group",
+    )
+
+    result = await runner._run_agent(
+        "question",
+        "",
+        [],
+        source,
+        "session-parent",
+        session_key="telegram:chat-1",
+    )
+
+    assert result["session_id"] == "session-child"
+    assert receipts[0][0:2] == ("session-child", 601)
+    assert result["messages"][0]["display_metadata"]["gateway_delivery"] == receipts[0][2]
+
+
+@pytest.mark.asyncio
+async def test_completed_native_draft_is_persisted_before_slow_post_turn_work(
+    monkeypatch, tmp_path
+):
+    BlockingPostTurnAgent.maintenance_started = threading.Event()
+    BlockingPostTurnAgent.maintenance_release = threading.Event()
+    adapter = DraftProgressCaptureAdapter(platform=Platform.TELEGRAM)
+    runner = _make_runner(adapter)
+    runner.config.streaming = StreamingConfig(
+        enabled=True,
+        transport="auto",
+        edit_interval=0.01,
+        buffer_threshold=1,
+    )
+    receipts = []
+    runner.session_store.record_assistant_delivery = (
+        lambda session_id, row_id, receipt: receipts.append(
+            (session_id, row_id, receipt)
+        )
+        or True
+    )
+    gateway_run = importlib.import_module("gateway.run")
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(
+        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
+    )
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = BlockingPostTurnAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="chat-1",
+        chat_type="dm",
+    )
+
+    task = asyncio.create_task(
+        runner._run_agent(
+            "question",
+            "",
+            [],
+            source,
+            "session-1",
+            session_key="telegram:chat-1",
+        )
+    )
+    try:
+        assert await asyncio.to_thread(
+            BlockingPostTurnAgent.maintenance_started.wait, 2
+        )
+        for _ in range(100):
+            if adapter.sent:
+                break
+            await asyncio.sleep(0.01)
+
+        assert task.done() is False
+        assert adapter.drafts
+        assert [item["content"] for item in adapter.sent] == [
+            "Complete answer before slow maintenance"
+        ]
+    finally:
+        BlockingPostTurnAgent.maintenance_release.set()
+
+    result = await asyncio.wait_for(task, timeout=5)
+    assert len(adapter.sent) == 1
+    assert receipts[0][0:2] == ("session-1", 501)
+    assert receipts[0][2]["platform_message_id"] == "progress-1"
+    assert result["messages"][0]["platform_message_id"] == "progress-1"
+
+
+@pytest.mark.asyncio
+async def test_transformed_native_draft_is_replaced_before_post_turn_work(
+    monkeypatch,
+    tmp_path,
+):
+    BlockingTransformedPostTurnAgent.maintenance_started = threading.Event()
+    BlockingTransformedPostTurnAgent.maintenance_release = threading.Event()
+    adapter = DraftProgressCaptureAdapter(platform=Platform.TELEGRAM)
+    runner = _make_runner(adapter)
+    runner.config.streaming = StreamingConfig(
+        enabled=True,
+        transport="auto",
+        edit_interval=0.01,
+        buffer_threshold=1,
+    )
+    receipts = []
+    runner.session_store.record_assistant_delivery = (
+        lambda session_id, row_id, receipt: receipts.append(
+            (session_id, row_id, receipt)
+        )
+        or True
+    )
+    gateway_run = importlib.import_module("gateway.run")
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(
+        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
+    )
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = BlockingTransformedPostTurnAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="chat-1",
+        chat_type="dm",
+    )
+
+    task = asyncio.create_task(
+        runner._run_agent(
+            "question",
+            "",
+            [],
+            source,
+            "session-1",
+            session_key="telegram:chat-1",
+        )
+    )
+    try:
+        assert await asyncio.to_thread(
+            BlockingTransformedPostTurnAgent.maintenance_started.wait, 2
+        )
+        for _ in range(100):
+            if adapter.sent:
+                break
+            await asyncio.sleep(0.01)
+
+        assert task.done() is False
+        assert [item["content"] for item in adapter.sent] == [
+            "Raw answer before plugin transform\n\n[plugin appended this]"
+        ]
+    finally:
+        BlockingTransformedPostTurnAgent.maintenance_release.set()
+
+    result = await asyncio.wait_for(task, timeout=5)
+    assert len(adapter.sent) == 1
+    assert adapter.edits == []
+    assert result.get("already_sent") is True
+    assert receipts[0][0:2] == ("session-1", 901)
+    assert receipts[0][2]["platform_message_id"] == "progress-1"
 
 
 @pytest.mark.asyncio
