@@ -3150,13 +3150,33 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_runs'"
     ).fetchone() is not None
     if runs_exist:
-        historical = conn.execute(
-            "SELECT t.id, (SELECT r.metadata FROM task_runs r "
-            "WHERE r.task_id = t.id AND r.outcome = 'completed' "
-            "ORDER BY COALESCE(r.ended_at, r.started_at, 0) DESC, r.id DESC LIMIT 1) "
-            "AS metadata FROM tasks t "
-            "WHERE t.status = 'done' AND t.terminal_outcome IS NULL"
-        ).fetchall()
+        run_cols = {
+            row["name"] for row in conn.execute("PRAGMA table_info(task_runs)")
+        }
+        verdict_capable = {"id", "task_id", "outcome", "metadata"} <= run_cols
+        if verdict_capable:
+            if {"ended_at", "started_at"} <= run_cols:
+                order_sql = (
+                    "COALESCE(r.ended_at, r.started_at, 0) DESC, r.id DESC"
+                )
+            elif "started_at" in run_cols:
+                order_sql = "r.started_at DESC, r.id DESC"
+            else:
+                order_sql = "r.id DESC"
+            historical = conn.execute(
+                "SELECT t.id, (SELECT r.metadata FROM task_runs r "
+                "WHERE r.task_id = t.id AND r.outcome = 'completed' "
+                f"ORDER BY {order_sql} LIMIT 1) AS metadata FROM tasks t "
+                "WHERE t.status = 'done' AND t.terminal_outcome IS NULL"
+            ).fetchall()
+        else:
+            # Earliest task_runs schemas recorded only identity/status/timing.
+            # They could not encode a verdict, so their done rows retain the
+            # historical successful-terminal meaning.
+            historical = conn.execute(
+                "SELECT id, NULL AS metadata FROM tasks "
+                "WHERE status = 'done' AND terminal_outcome IS NULL"
+            ).fetchall()
         for row in historical:
             metadata: Any = None
             if row["metadata"]:
