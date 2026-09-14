@@ -316,6 +316,99 @@ def test_success_gated_dependency_rejects_failed_qa_but_completion_edge_accepts_
         assert "remediat" in graph["next_action"].lower()
 
 
+@pytest.mark.parametrize("source_status", ["ready", "running", "blocked", "review"])
+def test_archiving_unfinished_parent_releases_only_completion_edge(
+    followthrough_env: Path, source_status: str
+) -> None:
+    with kb.connect() as conn:
+        parent_id = kb.create_task(conn, title=f"Cancelled {source_status} parent")
+        if source_status == "running":
+            assert kb.claim_task(conn, parent_id) is not None
+        elif source_status == "blocked":
+            assert kb.block_task(conn, parent_id, reason="Cancelled dependency")
+        elif source_status == "review":
+            implementation = kb.claim_task(conn, parent_id)
+            assert implementation is not None
+            assert kb.request_review(
+                conn,
+                parent_id,
+                reviewer="reese",
+                summary="Candidate awaiting review.",
+                metadata={"candidate_revision": "cancelled"},
+                expected_run_id=implementation.current_run_id,
+            )
+
+        success_child = kb.create_task(
+            conn, title="Unsafe release", parents=[parent_id]
+        )
+        completion_child = kb.create_task(
+            conn,
+            title="Cancellation report",
+            parents=[parent_id],
+            parent_outcome="completion",
+        )
+        assert kb.get_task(conn, success_child).status == "todo"
+        assert kb.get_task(conn, completion_child).status == "todo"
+
+        assert kb.archive_task(conn, parent_id)
+
+        assert kb.task_terminal_outcome(conn, parent_id) == {
+            "outcome": "failure",
+            "verdict": None,
+            "terminal": True,
+        }
+        assert kb.get_task(conn, success_child).status == "todo"
+        assert kb.claim_task(conn, success_child) is None
+        assert kb.get_task(conn, completion_child).status == "ready"
+
+
+def test_archiving_done_parent_preserves_frozen_success_or_failure(
+    followthrough_env: Path,
+) -> None:
+    with kb.connect() as conn:
+        successful = kb.create_task(conn, title="Successful prerequisite")
+        failed = kb.create_task(conn, title="Failed prerequisite")
+        assert kb.complete_task(conn, successful, metadata={"verdict": "pass"})
+        assert kb.complete_task(conn, failed, metadata={"verdict": "fail"})
+
+        assert kb.archive_task(conn, successful)
+        assert kb.archive_task(conn, failed)
+
+        assert kb.task_terminal_outcome(conn, successful) == {
+            "outcome": "success",
+            "verdict": "pass",
+            "terminal": True,
+        }
+        assert kb.task_terminal_outcome(conn, failed) == {
+            "outcome": "failure",
+            "verdict": "fail",
+            "terminal": True,
+        }
+
+
+def test_archiving_unfinished_coordination_work_enters_guardrail(
+    followthrough_env: Path,
+) -> None:
+    with kb.connect() as conn:
+        root_id, request = _accept_telegram_request(conn)
+        repair_id = _managed_repair(conn, root_id)
+
+        assert kb.archive_task(conn, repair_id)
+
+        refreshed = kb.get_coordination_request(conn, request.id)
+        assert refreshed is not None and refreshed.status == "return_pending"
+        assert _events(conn, repair_id, "terminal_outcome_failed") == [
+            {
+                "request_root_id": request.id,
+                "required_outcome": None,
+                "observed_outcome": "failure",
+                "verdict": None,
+                "blocked_children": [],
+            }
+        ]
+        assert len(_events(conn, root_id, "coordination_guardrail_reached")) == 1
+
+
 def test_terminal_outcome_is_immutable_after_completed_metadata_edit(
     followthrough_env: Path,
 ) -> None:

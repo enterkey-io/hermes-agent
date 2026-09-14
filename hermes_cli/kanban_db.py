@@ -11959,6 +11959,13 @@ def pass_review(
         return False, "summary is required"
     if not isinstance(metadata, dict) or not metadata:
         return False, "metadata must contain independent PASS evidence"
+    verdict = _completion_metadata_verdict(metadata)
+    if verdict is not None and verdict not in _SUCCESS_VERDICTS:
+        return (
+            False,
+            "review PASS evidence has a non-passing verdict; use "
+            "kanban_request_changes",
+        )
 
     # The receiver is card-derived. Resolve it and any response-lost retry
     # under one write transaction so lifecycle opt-in or routing cannot change
@@ -13070,11 +13077,15 @@ def decompose_triage_task(
 
 
 def archive_task(conn: sqlite3.Connection, task_id: str) -> bool:
+    now = int(time.time())
     with write_txn(conn):
         cur = conn.execute(
             "UPDATE tasks SET status = 'archived', "
             "    claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, "
-            "    terminal_outcome = COALESCE(terminal_outcome, 'success') "
+            "    terminal_outcome = CASE WHEN status = 'done' "
+            "        THEN COALESCE(terminal_outcome, 'success') ELSE 'failure' END, "
+            "    terminal_verdict = CASE WHEN status = 'done' "
+            "        THEN terminal_verdict ELSE NULL END "
             "WHERE id = ? AND status != 'archived'",
             (task_id,),
         )
@@ -13089,9 +13100,12 @@ def archive_task(conn: sqlite3.Connection, task_id: str) -> bool:
             summary="task archived with run still active",
         )
         _append_event(conn, task_id, "archived", None, run_id=run_id)
-    # ``archived`` parents no longer block children, same as ``done``.
-    # Promote newly-unblocked dependents immediately instead of waiting
-    # for a later dispatcher tick.
+        _guardrail_failed_terminal_outcome_in_txn(
+            conn, task_id, timestamp=now
+        )
+    # Archived parents are terminal. A completed-success archive satisfies
+    # success edges; a cancelled unfinished archive satisfies only explicit
+    # completion edges. Recompute both cases immediately.
     recompute_ready(conn)
     # Reap the workspace on archive too — tasks archived without ever
     # completing previously kept their scratch dir / worktree forever.
@@ -13147,7 +13161,7 @@ def archive_stale_task(
         conn.execute(
             "UPDATE tasks SET status = 'archived', claim_lock = NULL, "
             "claim_expires = NULL, worker_pid = NULL, current_run_id = NULL, "
-            "terminal_outcome = COALESCE(terminal_outcome, 'success') "
+            "terminal_outcome = 'failure', terminal_verdict = NULL "
             "WHERE id = ?",
             (task_id,),
         )
@@ -13167,6 +13181,9 @@ def archive_stale_task(
                 "author": author,
                 "kind": "stale_reconciliation",
             },
+        )
+        _guardrail_failed_terminal_outcome_in_txn(
+            conn, task_id, timestamp=now
         )
     recompute_ready(conn)
     _cleanup_workspace(conn, task_id)

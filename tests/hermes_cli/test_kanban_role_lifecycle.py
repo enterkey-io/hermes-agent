@@ -1543,6 +1543,142 @@ def test_pass_review_tool_rejects_legacy_card(lifecycle_env, monkeypatch) -> Non
     assert "lifecycle" in response["error"]
 
 
+@pytest.mark.parametrize(
+    "verdict", ["fail", " FAILED ", "rejected", False, 0, [], {}]
+)
+def test_pass_review_rejects_explicit_nonpassing_verdict_without_mutation(
+    lifecycle_env, monkeypatch, verdict
+) -> None:
+    monkeypatch.setattr(kb, "lifecycle_enforcement_enabled", lambda *_a, **_k: True)
+    with kb.connect() as conn:
+        task_id = _managed_task(
+            conn,
+            title=f"reject verdict {verdict!r}",
+            idempotency_key=f"reject-review-verdict-{type(verdict).__name__}-{verdict!r}",
+        )
+        implementation = kb.claim_task(conn, task_id)
+        assert implementation is not None
+        assert kb.request_review(
+            conn,
+            task_id,
+            summary="Implementation is ready for review.",
+            metadata={"tests": ["focused"]},
+            expected_run_id=implementation.current_run_id,
+        )
+        review = kb.claim_review_task(conn, task_id)
+        assert review is not None
+        before_event_count = len(kb.list_events(conn, task_id))
+
+        ok, reason = kb.pass_review(
+            conn,
+            task_id,
+            summary="Contradictory PASS report.",
+            metadata={"verdict": verdict, "candidate_revision": "bad"},
+            expected_run_id=review.current_run_id,
+        )
+
+        assert ok is False
+        assert "request_changes" in str(reason)
+        task = kb.get_task(conn, task_id)
+        assert task is not None
+        assert (task.status, task.assignee, task.current_phase) == (
+            "running",
+            "reese",
+            "technical_review",
+        )
+        assert len(kb.list_events(conn, task_id)) == before_event_count
+        assert _events(conn, task_id, "review_passed") == []
+
+
+def test_pass_review_rejects_contradictory_response_lost_retry(
+    lifecycle_env, monkeypatch
+) -> None:
+    monkeypatch.setattr(kb, "lifecycle_enforcement_enabled", lambda *_a, **_k: True)
+    with kb.connect() as conn:
+        task_id = _managed_task(
+            conn,
+            title="reject contradictory retry",
+            idempotency_key="reject-contradictory-review-retry-v1",
+        )
+        implementation = kb.claim_task(conn, task_id)
+        assert implementation is not None
+        assert kb.request_review(
+            conn,
+            task_id,
+            summary="Implementation is ready for review.",
+            metadata={"tests": ["focused"]},
+            expected_run_id=implementation.current_run_id,
+        )
+        review = kb.claim_review_task(conn, task_id)
+        assert review is not None
+        assert kb.pass_review(
+            conn,
+            task_id,
+            summary="PASS after independent review.",
+            metadata={"verdict": "pass"},
+            expected_run_id=review.current_run_id,
+        ) == (True, "aurora")
+        before_event_count = len(kb.list_events(conn, task_id))
+
+        ok, reason = kb.pass_review(
+            conn,
+            task_id,
+            summary="Contradictory retry.",
+            metadata={"verdict": "fail"},
+            expected_run_id=review.current_run_id,
+            retry_actor="reese",
+            retry_only=True,
+        )
+
+        assert ok is False
+        assert "request_changes" in str(reason)
+        assert len(kb.list_events(conn, task_id)) == before_event_count
+
+
+def test_pass_review_tool_rejects_explicit_failed_verdict(
+    lifecycle_env, monkeypatch
+) -> None:
+    from tools import kanban_tools as kt
+
+    monkeypatch.setattr(kb, "lifecycle_enforcement_enabled", lambda *_a, **_k: True)
+    with kb.connect() as conn:
+        task_id = _managed_task(
+            conn,
+            title="tool rejects failed review verdict",
+            idempotency_key="tool-rejects-failed-review-verdict-v1",
+        )
+        implementation = kb.claim_task(conn, task_id)
+        assert implementation is not None
+        assert kb.request_review(
+            conn,
+            task_id,
+            summary="Implementation is ready for review.",
+            metadata={"tests": ["focused"]},
+            expected_run_id=implementation.current_run_id,
+        )
+        review = kb.claim_review_task(conn, task_id)
+        assert review is not None
+    monkeypatch.setenv("HERMES_KANBAN_TASK", task_id)
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(review.current_run_id))
+    monkeypatch.setenv("HERMES_PROFILE", "reese")
+
+    response = json.loads(
+        kt._handle_pass_review(
+            {
+                "summary": "Contradictory PASS report.",
+                "evidence": {"verdict": "fail", "candidate_revision": "bad"},
+            }
+        )
+    )
+
+    assert "ok" not in response
+    assert "request_changes" in response["error"]
+    with kb.connect() as conn:
+        task = kb.get_task(conn, task_id)
+        assert task is not None and task.status == "running"
+        assert _events(conn, task_id, "review_passed") == []
+
+
 def test_pass_review_retry_holds_opt_in_lock_through_idempotency_check(
     lifecycle_env, monkeypatch
 ) -> None:

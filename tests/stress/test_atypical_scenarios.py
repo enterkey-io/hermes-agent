@@ -951,11 +951,15 @@ def _(home, kb):
         p_blocked = kb.create_task(conn, title="p-blocked", assignee="w")
         kb.block_task(conn, p_blocked, reason="stuck")
         p_triage = kb.create_task(conn, title="p-triage", assignee="w", triage=True)
-        p_archived = kb.create_task(conn, title="p-archived", assignee="w")
-        kb.archive_task(conn, p_archived)
+        p_cancelled = kb.create_task(conn, title="p-cancelled", assignee="w")
+        kb.archive_task(conn, p_cancelled)
         p_done = kb.create_task(conn, title="p-done", assignee="w")
         kb.claim_task(conn, p_done)
         kb.complete_task(conn, p_done)
+        p_done_archived = kb.create_task(conn, title="p-done-archived", assignee="w")
+        kb.claim_task(conn, p_done_archived)
+        kb.complete_task(conn, p_done_archived)
+        kb.archive_task(conn, p_done_archived)
 
         # Child with just one parent, cycle it through each state
         for parent, expected in [
@@ -963,8 +967,9 @@ def _(home, kb):
             (p_running, "todo"),
             (p_blocked, "todo"),
             (p_triage, "todo"),
-            (p_archived, "ready"),  # archived is an intentional terminal state
+            (p_cancelled, "todo"),  # terminal cancellation is not success
             (p_done, "ready"),
+            (p_done_archived, "ready"),  # archived completed success stays success
         ]:
             child = kb.create_task(
                 conn, title=f"child-of-{parent}", assignee="w", parents=[parent],
