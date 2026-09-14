@@ -5324,6 +5324,7 @@ class TurnRunner:
         # Set up stream consumer for token streaming or interim commentary.
         _stream_consumer = None
         _stream_delta_cb = None
+        _stream_final_cb = None
         # #60671 — streaming TTS consumer is created on the outer
         # event-loop thread before run_sync launches.  run_sync only
         # reads it via ``streaming_tts_consumer_holder[0]`` for delta
@@ -5386,6 +5387,9 @@ class TurnRunner:
                                 # Tee to the streaming-TTS consumer (#60671).
                                 if _stts_consumer_ref is not None:
                                     _stts_consumer_ref.on_delta(text)
+                        def _stream_final_cb(text: str) -> None:
+                            if ctx._run_still_current():
+                                _stream_consumer.finish_if_matches(text)
                     ctx.stream_consumer_holder[0] = _stream_consumer
             except Exception as _sc_err:
                 logger.debug("Could not set up stream consumer: %s", _sc_err)
@@ -5744,6 +5748,7 @@ class TurnRunner:
         )
         agent.step_callback = ctx._step_callback_sync if ctx._hooks_ref.loaded_hooks else None
         agent.stream_delta_callback = _stream_delta_cb
+        agent.stream_final_callback = _stream_final_cb
         agent.interim_assistant_callback = _interim_assistant_cb if _want_interim_messages else None
         agent.status_callback = ctx._status_callback_sync
         # Credits / out-of-band notices (usage bands, depletion, restored).
@@ -6481,6 +6486,9 @@ class TurnRunner:
             return {
                 "final_response": final_response,
                 "messages": result.get("messages", []),
+                "assistant_message_row_id": result.get(
+                    "assistant_message_row_id"
+                ),
                 "api_calls": result.get("api_calls", 0),
                 "failed": result.get("failed", False),
                 # Sibling of the non-empty-response return below (#64686):
@@ -6559,6 +6567,11 @@ class TurnRunner:
             "final_response": final_response,
             "last_reasoning": result.get("last_reasoning"),
             "messages": ctx.result_holder[0].get("messages", []) if ctx.result_holder[0] else [],
+            "assistant_message_row_id": (
+                ctx.result_holder[0].get("assistant_message_row_id")
+                if ctx.result_holder[0]
+                else None
+            ),
             "api_calls": ctx.result_holder[0].get("api_calls", 0) if ctx.result_holder[0] else 0,
             "failed": ctx.result_holder[0].get("failed", False) if ctx.result_holder[0] else False,
             "failure_reason": (
@@ -29880,20 +29893,28 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _sc_msg_id = _sc.message_id
                 if _sc_msg_id:
                     try:
-                        await _sc.adapter.edit_message(
+                        _edit_res = await _sc.adapter.edit_message(
                             chat_id=source.chat_id,
                             message_id=_sc_msg_id,
                             content=response["final_response"],
                             finalize=True,
                         )
-                        response["already_sent"] = True
-                        _sc.record_external_final_delivery(
-                            response["final_response"], _sc_msg_id
-                        )
-                        logger.info(
-                            "Edited streamed message %s for session %s to include plugin-transformed content.",
-                            _sc_msg_id, session_key or "?",
-                        )
+                        if getattr(_edit_res, "success", True):
+                            response["already_sent"] = True
+                            _sc.record_external_final_delivery(
+                                response["final_response"],
+                                getattr(_edit_res, "message_id", None) or _sc_msg_id,
+                            )
+                            logger.info(
+                                "Edited streamed message %s for session %s to include plugin-transformed content.",
+                                _sc_msg_id, session_key or "?",
+                            )
+                        else:
+                            logger.warning(
+                                "Failed to edit streamed message for session %s (%s); sending transformed response via normal final send.",
+                                session_key or "?",
+                                getattr(_edit_res, "error", None),
+                            )
                     except Exception as _edit_err:
                         logger.warning(
                             "Failed to edit streamed message for session %s: %s",
@@ -29901,9 +29922,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         )
 
         # A stream final has already been persisted by the agent before its
-        # platform delivery result is known. Attach only a receipt for this
-        # consumer's own reconciled current payload; prior-turn flags or equal
-        # text can never supply a receipt for this new response.
+        # platform delivery result is known. Bind this consumer's receipt to
+        # the exact row id returned by that insert (or by a later in-place
+        # compaction rewrite); never recover identity by matching response text.
         if isinstance(response, dict) and not response.get("failed") and _sc is not None:
             _final = response.get("final_response") or ""
             _matches = getattr(_sc, "delivered_final_matches", None)
@@ -29914,28 +29935,48 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _current_delivery = False
                 if _current_delivery:
                     _receipt = getattr(_sc, "final_delivery_metadata", None)
-                    if isinstance(_receipt, dict) and _receipt.get("response_identity"):
-                        for _message in reversed(response.get("messages") or []):
-                            if (
-                                isinstance(_message, dict)
-                                and _message.get("role") == "assistant"
-                                and _message.get("content") == _final
-                            ):
+                    _has_platform_identity = isinstance(_receipt, dict) and bool(
+                        _receipt.get("platform_message_id")
+                        or _receipt.get("platform_message_ids")
+                    )
+                    if _has_platform_identity and _receipt.get("response_identity"):
+                        _assistant_row_id = response.get("assistant_message_row_id")
+                        _message = next(
+                            (
+                                item
+                                for item in reversed(response.get("messages") or [])
+                                if isinstance(item, dict)
+                                and item.get("role") == "assistant"
+                                and item.get("_row_id") == _assistant_row_id
+                            ),
+                            None,
+                        )
+                        if _message is not None and _assistant_row_id is not None:
+                            try:
+                                _recorded = await self.async_session_store.record_assistant_delivery(
+                                    session_id,
+                                    _assistant_row_id,
+                                    _receipt,
+                                )
+                            except Exception:
+                                _recorded = False
+                                logger.debug(
+                                    "Gateway delivery receipt persistence failed",
+                                    exc_info=True,
+                                )
+                            if _recorded:
                                 _metadata = dict(_message.get("display_metadata") or {})
                                 _metadata["gateway_delivery"] = _receipt
                                 _message["display_metadata"] = _metadata
-                                break
-                        _merge_receipt = getattr(
-                            self.session_store,
-                            "merge_latest_matching_message_display_metadata",
-                            None,
-                        )
-                        if callable(_merge_receipt):
-                            _merge_receipt(
+                                if _receipt.get("platform_message_id"):
+                                    _message["platform_message_id"] = _receipt[
+                                        "platform_message_id"
+                                    ]
+                        else:
+                            logger.debug(
+                                "No persisted assistant row identity available for "
+                                "gateway delivery receipt (session=%s)",
                                 session_id,
-                                role="assistant",
-                                content=_final,
-                                metadata={"gateway_delivery": _receipt},
                             )
 
         # Schedule deletion of tracked temporary progress bubbles after the

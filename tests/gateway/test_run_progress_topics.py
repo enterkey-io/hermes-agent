@@ -3,6 +3,7 @@
 import asyncio
 import importlib
 import sys
+import threading
 import time
 import types
 from types import SimpleNamespace
@@ -144,6 +145,42 @@ class MetadataEditProgressCaptureAdapter(ProgressCaptureAdapter):
             }
         )
         return SendResult(success=True, message_id=message_id)
+
+
+class RejectedFinalEditProgressCaptureAdapter(MetadataEditProgressCaptureAdapter):
+    async def edit_message(
+        self, chat_id, message_id, content, *, finalize: bool = False, metadata=None
+    ) -> SendResult:
+        await super().edit_message(
+            chat_id,
+            message_id,
+            content,
+            finalize=finalize,
+            metadata=metadata,
+        )
+        return SendResult(success=False, error="platform rejected final edit")
+
+
+class DraftProgressCaptureAdapter(ProgressCaptureAdapter):
+    def __init__(self, platform=Platform.TELEGRAM):
+        super().__init__(platform=platform)
+        self.drafts = []
+
+    def supports_draft_streaming(self, chat_type=None, metadata=None) -> bool:
+        return str(chat_type or "").lower() == "dm"
+
+    async def send_draft(
+        self, chat_id, draft_id, content, metadata=None
+    ) -> SendResult:
+        self.drafts.append(
+            {
+                "chat_id": chat_id,
+                "draft_id": draft_id,
+                "content": content,
+                "metadata": metadata,
+            }
+        )
+        return SendResult(success=True)
 
 
 class RetryableFirstEditProgressCaptureAdapter(ProgressCaptureAdapter):
@@ -1295,7 +1332,44 @@ class SequentialStreamReceiptAgent:
         return {
             "final_response": final,
             "response_previewed": True,
-            "messages": [{"role": "assistant", "content": final}],
+            "assistant_message_row_id": 101 if message == "first" else 102,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": final,
+                    "_row_id": 101 if message == "first" else 102,
+                }
+            ],
+            "api_calls": 1,
+        }
+
+
+class BlockingPostTurnAgent:
+    """Expose a slow post-turn phase after the visible response is complete."""
+
+    maintenance_started = threading.Event()
+    maintenance_release = threading.Event()
+
+    def __init__(self, **kwargs):
+        self.stream_delta_callback = kwargs.get("stream_delta_callback")
+        self.stream_final_callback = None
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        final = "Complete answer before slow maintenance"
+        self.stream_delta_callback(final)
+        # Let the event-loop consumer publish at least one native draft frame.
+        time.sleep(0.1)
+        self.stream_final_callback(final)
+        type(self).maintenance_started.set()
+        assert type(self).maintenance_release.wait(timeout=5)
+        return {
+            "final_response": final,
+            "response_previewed": True,
+            "assistant_message_row_id": 501,
+            "messages": [
+                {"role": "assistant", "content": final, "_row_id": 501}
+            ],
             "api_calls": 1,
         }
 
@@ -1334,6 +1408,31 @@ async def test_transformed_response_edits_streamed_message_in_place(monkeypatch,
 
 
 @pytest.mark.asyncio
+async def test_rejected_transformed_final_edit_falls_through_to_normal_send(
+    monkeypatch, tmp_path
+):
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        TransformedStreamAgent,
+        session_id="sess-rejected-transformed-stream",
+        config_data={
+            "display": {"tool_progress": "off", "interim_assistant_messages": False},
+            "streaming": {"enabled": True, "edit_interval": 0.01, "buffer_threshold": 1},
+        },
+        platform=Platform.TELEGRAM,
+        chat_id="chat-1",
+        chat_type="dm",
+        thread_id=None,
+        adapter_cls=RejectedFinalEditProgressCaptureAdapter,
+    )
+
+    assert result.get("already_sent") is not True
+    assert "gateway_delivery" not in result.get("display_metadata", {})
+    assert any("[plugin appended this]" in edit["content"] for edit in adapter.edits)
+
+
+@pytest.mark.asyncio
 async def test_sequential_streamed_turns_do_not_reuse_persisted_delivery_receipts(
     monkeypatch, tmp_path
 ):
@@ -1349,8 +1448,11 @@ async def test_sequential_streamed_turns_do_not_reuse_persisted_delivery_receipt
     runner = _make_runner(adapter)
     runner.config.streaming = StreamingConfig(enabled=True, edit_interval=0.01, buffer_threshold=1)
     receipts = []
-    runner.session_store.merge_latest_matching_message_display_metadata = (
-        lambda session_id, **kwargs: receipts.append((session_id, kwargs)) or True
+    runner.session_store.record_assistant_delivery = (
+        lambda session_id, row_id, receipt: receipts.append(
+            (session_id, row_id, receipt)
+        )
+        or True
     )
     gateway_run = importlib.import_module("gateway.run")
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
@@ -1368,13 +1470,83 @@ async def test_sequential_streamed_turns_do_not_reuse_persisted_delivery_receipt
 
     assert [call["content"] for call in adapter.sent] == ["reply for first", "reply for second"]
     assert len(receipts) == 2
-    first_receipt = receipts[0][1]["metadata"]["gateway_delivery"]
-    second_receipt = receipts[1][1]["metadata"]["gateway_delivery"]
+    assert [receipt[1] for receipt in receipts] == [101, 102]
+    first_receipt = receipts[0][2]
+    second_receipt = receipts[1][2]
     assert first_receipt["response_identity"] != second_receipt["response_identity"]
     assert first_receipt["platform_message_id"] == "telegram-1"
     assert second_receipt["platform_message_id"] == "telegram-2"
     assert first["messages"][0]["display_metadata"]["gateway_delivery"] == first_receipt
     assert second["messages"][0]["display_metadata"]["gateway_delivery"] == second_receipt
+
+
+@pytest.mark.asyncio
+async def test_completed_native_draft_is_persisted_before_slow_post_turn_work(
+    monkeypatch, tmp_path
+):
+    BlockingPostTurnAgent.maintenance_started = threading.Event()
+    BlockingPostTurnAgent.maintenance_release = threading.Event()
+    adapter = DraftProgressCaptureAdapter(platform=Platform.TELEGRAM)
+    runner = _make_runner(adapter)
+    runner.config.streaming = StreamingConfig(
+        enabled=True,
+        transport="auto",
+        edit_interval=0.01,
+        buffer_threshold=1,
+    )
+    receipts = []
+    runner.session_store.record_assistant_delivery = (
+        lambda session_id, row_id, receipt: receipts.append(
+            (session_id, row_id, receipt)
+        )
+        or True
+    )
+    gateway_run = importlib.import_module("gateway.run")
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(
+        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
+    )
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = BlockingPostTurnAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="chat-1",
+        chat_type="dm",
+    )
+
+    task = asyncio.create_task(
+        runner._run_agent(
+            "question",
+            "",
+            [],
+            source,
+            "session-1",
+            session_key="telegram:chat-1",
+        )
+    )
+    try:
+        assert await asyncio.to_thread(
+            BlockingPostTurnAgent.maintenance_started.wait, 2
+        )
+        for _ in range(100):
+            if adapter.sent:
+                break
+            await asyncio.sleep(0.01)
+
+        assert task.done() is False
+        assert adapter.drafts
+        assert [item["content"] for item in adapter.sent] == [
+            "Complete answer before slow maintenance"
+        ]
+    finally:
+        BlockingPostTurnAgent.maintenance_release.set()
+
+    result = await asyncio.wait_for(task, timeout=5)
+    assert len(adapter.sent) == 1
+    assert receipts[0][0:2] == ("session-1", 501)
+    assert receipts[0][2]["platform_message_id"] == "progress-1"
+    assert result["messages"][0]["platform_message_id"] == "progress-1"
 
 
 @pytest.mark.asyncio

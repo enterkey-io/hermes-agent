@@ -3811,26 +3811,23 @@ class SessionStore:
             logger.debug("has_platform_message_id lookup failed", exc_info=True)
             return False
 
-    def merge_latest_matching_message_display_metadata(
+    def record_assistant_delivery(
         self,
         session_id: str,
-        *,
-        role: str,
-        content: str,
-        metadata: Dict[str, Any],
+        message_row_id: int,
+        receipt: Dict[str, Any],
     ) -> bool:
-        """Persist gateway presentation metadata without changing transcript text."""
+        """Persist one gateway receipt against an exact assistant row."""
         if not self._db:
             return False
         try:
-            return self._db.merge_latest_matching_message_display_metadata(
+            return self._db.record_assistant_delivery(
                 session_id,
-                role=role,
-                content=content,
-                metadata=metadata,
+                message_row_id,
+                receipt,
             )
         except Exception:
-            logger.debug("gateway display metadata merge failed", exc_info=True)
+            logger.debug("gateway assistant delivery receipt write failed", exc_info=True)
             return False
 
     def rewrite_transcript(

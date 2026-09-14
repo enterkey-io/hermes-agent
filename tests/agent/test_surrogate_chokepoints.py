@@ -48,6 +48,8 @@ def test_finalize_turn_scrubs_lone_surrogate_from_final_response(monkeypatch):
     """
     monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
     agent = FakeAgent()
+    early_finals = []
+    agent.stream_final_callback = early_finals.append
     dirty = f"answer {LONE_HIGH} and {LONE_LOW} here"
     messages = [
         {"role": "user", "content": "q"},
@@ -76,6 +78,7 @@ def test_finalize_turn_scrubs_lone_surrogate_from_final_response(monkeypatch):
     final.encode("utf-16-le")
     assert "\ufffd" in final
     assert "answer " in final and " here" in final
+    assert early_finals == [final]
 
 
 def test_finalize_turn_leaves_non_string_final_response_alone(monkeypatch):

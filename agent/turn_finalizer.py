@@ -422,57 +422,9 @@ def finalize_turn(
         if callable(_apply_override):
             _apply_override(messages)
 
-        # ── Post-turn micro-compaction ────────────────────────────
-        # After the assistant response is finalized but before the session is
-        # persisted, run micro-compaction to absorb the oldest uncompacted
-        # exchange into the rolling summary.  This amortizes compression
-        # across turns rather than batching it into one big pause.
-        if not interrupted and not failed:
-            try:
-                _compressor = getattr(agent, "context_compressor", None)
-                # Strict `is True` + isinstance gates: plugin context engines
-                # (and MagicMock compressors in tests) satisfy getattr/duck
-                # checks with truthy auto-attributes — a bare truthiness check
-                # here called _micro_compact on a mock and spliced its (empty-
-                # iterating) return value over the transcript, wiping it.
-                if (
-                    _compressor
-                    and getattr(_compressor, '_micro_compact_enabled', False) is True
-                    and callable(getattr(_compressor, '_micro_compact', None))
-                    and final_response
-                    # Persistence-isolated agents (background review fork)
-                    # must not micro-compact: the pass burns a real aux-LLM
-                    # call on a throwaway replay transcript, and if the
-                    # compressor ever holds a session_db binding it would
-                    # archive_and_compact the CANONICAL session rows — the
-                    # exact write class _persist_disabled exists to stop.
-                    and not getattr(agent, "_persist_disabled", False)
-                ):
-                    _before = len(messages)
-                    _compacted = _compressor._micro_compact(messages)
-                    # Micro-compaction defrag rewrites the newest MICRO
-                    # marker's content and pops _db_persisted from the live
-                    # dict in place — the sibling of the pop site above. The
-                    # compressor has no agent reference, so it raises a flag
-                    # for us to invalidate the bounded flush-scan cursor;
-                    # otherwise the rewritten marker row is identity-skipped
-                    # and the stale summary persists to state.db.
-                    if getattr(
-                        _compressor, "_flush_scan_cursor_invalidated", False
-                    ):
-                        _compressor._flush_scan_cursor_invalidated = False
-                        agent._db_flush_scan_prefix = None
-                    if isinstance(_compacted, list) and _compacted:
-                        messages[:] = _compacted
-                    _after = len(messages)
-                    if _before != _after:
-                        logger.info(
-                            "Micro-compaction: %d -> %d messages",
-                            _before, _after,
-                        )
-            except Exception as _mc_err:
-                logger.info("Micro-compaction failed: %s", _mc_err)
-
+        # Establish the durable assistant-row identity before any slow
+        # post-turn maintenance. The stream consumer can then finalize the
+        # visible response while micro-compaction works in the background.
         agent._persist_session(messages, conversation_history)
     except Exception as _persist_err:
         _cleanup_errors.append(f"persist_session: {_persist_err}")
@@ -639,6 +591,102 @@ def finalize_turn(
         except Exception as exc:
             logger.warning("transform_llm_output hook failed: %s", exc)
 
+    # The gateway stream consumer runs on the event-loop thread while this
+    # finalizer runs in its worker. Queue the completed, transformed payload
+    # before micro-compaction: native Telegram drafts otherwise expire during
+    # a slow auxiliary summary call and make the eventual persistent message
+    # look like a second answer. The consumer finalizes only on an exact match;
+    # footer/transform mismatches wait for the ordinary post-run finish path.
+    if final_response and not interrupted and not failed:
+        try:
+            _stream_final_callback = getattr(agent, "stream_final_callback", None)
+            if callable(_stream_final_callback):
+                _stream_final_text = (
+                    _sanitize_surrogates(final_response)
+                    if isinstance(final_response, str)
+                    else final_response
+                )
+                _stream_final_callback(_stream_final_text)
+        except Exception as _stream_final_err:
+            logger.debug(
+                "early stream final callback failed: %s", _stream_final_err
+            )
+
+    # ── Post-turn micro-compaction ────────────────────────────
+    # The answer is now durable and eligible for early platform finalization.
+    # Absorb one old exchange before post-turn observers run, preserving their
+    # existing view of the compacted transcript.
+    if not interrupted and not failed:
+        try:
+            _compressor = getattr(agent, "context_compressor", None)
+            # Strict `is True` + callable gates keep MagicMock/plugin context
+            # engines from being treated as the built-in compressor.
+            if (
+                _compressor
+                and getattr(_compressor, "_micro_compact_enabled", False) is True
+                and callable(getattr(_compressor, "_micro_compact", None))
+                and final_response
+                # Persistence-isolated background review forks must never
+                # archive the canonical session or spend an auxiliary call.
+                and not getattr(agent, "_persist_disabled", False)
+            ):
+                _before_count = len(messages)
+                _before_fingerprint = [
+                    (
+                        id(message),
+                        message.get("content"),
+                        message.get("_row_id"),
+                        message.get("_db_persisted"),
+                    )
+                    for message in messages
+                    if isinstance(message, dict)
+                ]
+                _compacted = _compressor._micro_compact(messages)
+                # Micro-compaction defrag can rewrite a marker in place and
+                # invalidate the bounded append-only flush scan.
+                if getattr(
+                    _compressor, "_flush_scan_cursor_invalidated", False
+                ):
+                    _compressor._flush_scan_cursor_invalidated = False
+                    agent._db_flush_scan_prefix = None
+                if isinstance(_compacted, list) and _compacted:
+                    messages[:] = _compacted
+                _after_fingerprint = [
+                    (
+                        id(message),
+                        message.get("content"),
+                        message.get("_row_id"),
+                        message.get("_db_persisted"),
+                    )
+                    for message in messages
+                    if isinstance(message, dict)
+                ]
+                if _before_count != len(messages):
+                    logger.info(
+                        "Micro-compaction: %d -> %d messages",
+                        _before_count,
+                        len(messages),
+                    )
+                if _before_fingerprint != _after_fingerprint:
+                    # archive_and_compact normally persisted the rewritten set
+                    # already. This refreshes the JSON mirror and retains the
+                    # existing append-only fallback when that archive failed.
+                    try:
+                        agent._persist_session(messages, conversation_history)
+                    except Exception as _post_compact_persist_err:
+                        _cleanup_errors.append(
+                            "persist_session_after_micro_compaction: "
+                            f"{_post_compact_persist_err}"
+                        )
+                        logger.error(
+                            "finalize_turn: post-micro-compaction persistence "
+                            "failed: %s",
+                            _post_compact_persist_err,
+                            exc_info=True,
+                        )
+        except Exception as _mc_err:
+            logger.info("Micro-compaction failed: %s", _mc_err)
+
     # Plugin hook: post_llm_call
     # Fired once per turn after the tool-calling loop completes.
     # Plugins can use this to persist conversation data (e.g. sync
@@ -717,6 +765,19 @@ def finalize_turn(
     if isinstance(final_response, str):
         final_response = _sanitize_surrogates(final_response)
 
+    # Exact durable identity for this turn's closing assistant message. Stop at
+    # the current user boundary so a persistence failure cannot fall back to a
+    # prior turn's row on a cached agent.
+    assistant_message_row_id = None
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") == "user":
+            break
+        if message.get("role") == "assistant":
+            assistant_message_row_id = message.get("_row_id")
+            break
+
     # Build result with interrupt info if applicable
     result = {
         "final_response": final_response,
@@ -731,6 +792,7 @@ def finalize_turn(
         "response_transformed": _response_transformed,
         "pre_transform_response": _pre_transform_response,
         "response_previewed": getattr(agent, "_response_was_previewed", False),
+        "assistant_message_row_id": assistant_message_row_id,
         "model": agent.model,
         "provider": agent.provider,
         "base_url": agent.base_url,

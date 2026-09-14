@@ -62,16 +62,27 @@ async def test_fresh_final_receipt_excludes_deleted_preview_identity():
     }
 
 
-def test_gateway_delivery_metadata_merges_into_the_current_assistant_row(tmp_path):
+def test_gateway_delivery_receipt_targets_exact_active_row_across_compaction(tmp_path):
     db_path = tmp_path / "state.db"
     db = SessionDB(db_path=db_path)
     db.create_session("session-1", source="telegram")
-    db.append_message(
-        session_id="session-1",
-        role="assistant",
-        content="same final text",
-        display_metadata={"existing": {"keep": True}},
-    )
+    first_turn = [
+        {"role": "user", "content": "first"},
+        {
+            "role": "assistant",
+            "content": "same final text",
+            "display_metadata": {"existing": {"keep": True}},
+        },
+    ]
+    db.append_messages_batch("session-1", first_turn)
+    archived_first_row_id = first_turn[1]["_row_id"]
+
+    # Micro-compaction archives the predecessor and writes the replacement
+    # row id back onto the surviving live message dict.
+    db.archive_and_compact("session-1", first_turn)
+    active_first_row_id = first_turn[1]["_row_id"]
+    assert active_first_row_id != archived_first_row_id
+
     first_receipt = {"response_identity": "a" * 32, "platform_message_id": "first"}
     second_receipt = {
         "response_identity": "b" * 32,
@@ -79,36 +90,46 @@ def test_gateway_delivery_metadata_merges_into_the_current_assistant_row(tmp_pat
     }
 
     try:
-        assert db.merge_latest_matching_message_display_metadata(
-            "session-1",
-            role="assistant",
-            content="same final text",
-            metadata={"gateway_delivery": first_receipt},
+        assert db.record_assistant_delivery(
+            "session-1", active_first_row_id, first_receipt
         )
-        # Simulate micro-compaction's durable-state boundary: a reload must
-        # preserve first-turn metadata without allowing it to identify turn two.
-        db.close()
-        db = SessionDB(db_path=db_path)
-        db.append_message(
-            session_id="session-1",
-            role="assistant",
-            content="same final text",
+        second_turn = [
+            {"role": "user", "content": "second"},
+            {"role": "assistant", "content": "same final text"},
+        ]
+        db.append_messages_batch("session-1", second_turn)
+        assert db.record_assistant_delivery(
+            "session-1", second_turn[1]["_row_id"], second_receipt
         )
-        assert db.merge_latest_matching_message_display_metadata(
-            "session-1",
-            role="assistant",
-            content="same final text",
-            metadata={"gateway_delivery": second_receipt},
-        )
-        messages = db.get_messages_as_conversation("session-1", include_row_ids=True)
-        assert messages[0]["display_metadata"] == {
+
+        rows = db.get_messages("session-1", include_inactive=True)
+        archived = next(row for row in rows if row["id"] == archived_first_row_id)
+        active_first = next(row for row in rows if row["id"] == active_first_row_id)
+        active_second = next(row for row in rows if row["id"] == second_turn[1]["_row_id"])
+
+        assert archived["display_metadata"] == {"existing": {"keep": True}}
+        assert active_first["display_metadata"] == {
             "existing": {"keep": True},
             "gateway_delivery": first_receipt,
         }
-        assert messages[1]["display_metadata"] == {"gateway_delivery": second_receipt}
-        assert (
-            messages[0]["display_metadata"]["gateway_delivery"]["response_identity"]
-            != messages[1]["display_metadata"]["gateway_delivery"]["response_identity"]
+        assert active_first["platform_message_id"] == "first"
+        assert active_second["display_metadata"] == {
+            "gateway_delivery": second_receipt
+        }
+        assert active_second["platform_message_id"] is None
+
+        # Exact retry is idempotent; a conflicting receipt or archived row is
+        # rejected without changing either turn.
+        assert db.record_assistant_delivery(
+            "session-1", active_first_row_id, first_receipt
+        )
+        assert not db.record_assistant_delivery(
+            "session-1",
+            active_first_row_id,
+            {"response_identity": "c" * 32, "platform_message_id": "wrong"},
+        )
+        assert not db.record_assistant_delivery(
+            "session-1", archived_first_row_id, first_receipt
         )
     finally:
         db.close()

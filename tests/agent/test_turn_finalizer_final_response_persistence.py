@@ -271,3 +271,131 @@ def test_final_response_fill_invalidates_flush_scan_cursor():
     )
 
     assert agent._db_flush_scan_prefix is None
+
+
+def test_visible_final_is_signaled_after_persist_and_before_micro_compaction(
+    monkeypatch,
+):
+    events = []
+    agent = FakeAgent()
+    agent._persist_session = lambda *_args: events.append("persist")
+    agent.stream_final_callback = lambda text: events.append(("visible", text))
+
+    def micro_compact(messages):
+        events.append("micro_compact")
+        return messages
+
+    agent.context_compressor = SimpleNamespace(
+        last_prompt_tokens=0,
+        _micro_compact_enabled=True,
+        _micro_compact=micro_compact,
+    )
+
+    def invoke_hook(name, **_kwargs):
+        if name == "transform_llm_output":
+            return ["Raw answer\n\n[transformed]"]
+        return []
+
+    monkeypatch.setattr("hermes_cli.lifecycle.invoke_hook", invoke_hook)
+    messages = [
+        {"role": "user", "content": "question"},
+        {"role": "assistant", "content": "Raw answer"},
+    ]
+
+    result = finalize_turn(
+        agent,
+        final_response="Raw answer",
+        api_call_count=1,
+        interrupted=False,
+        failed=False,
+        messages=messages,
+        conversation_history=[],
+        effective_task_id="task",
+        turn_id="turn",
+        user_message="question",
+        original_user_message="question",
+        _should_review_memory=False,
+        _turn_exit_reason="text_response(final)",
+    )
+
+    assert result["final_response"] == "Raw answer\n\n[transformed]"
+    assert events[:3] == [
+        "persist",
+        ("visible", "Raw answer\n\n[transformed]"),
+        "micro_compact",
+    ]
+
+
+def test_current_assistant_row_identity_never_falls_back_to_prior_turn(monkeypatch):
+    monkeypatch.setattr("hermes_cli.lifecycle.invoke_hook", lambda *_a, **_kw: [])
+    agent = FakeAgent()
+    messages = [
+        {"role": "user", "content": "earlier"},
+        {"role": "assistant", "content": "earlier answer", "_row_id": 77},
+        {"role": "user", "content": "current"},
+        {"role": "assistant", "content": "current answer"},
+    ]
+
+    result = finalize_turn(
+        agent,
+        final_response="current answer",
+        api_call_count=1,
+        interrupted=False,
+        failed=False,
+        messages=messages,
+        conversation_history=messages[:2],
+        effective_task_id="task",
+        turn_id="turn",
+        user_message="current",
+        original_user_message="current",
+        _should_review_memory=False,
+        _turn_exit_reason="text_response(final)",
+    )
+
+    assert result["assistant_message_row_id"] is None
+
+
+def test_post_micro_compaction_persist_failure_is_reported(monkeypatch):
+    monkeypatch.setattr("hermes_cli.lifecycle.invoke_hook", lambda *_a, **_kw: [])
+    agent = FakeAgent()
+    persist_calls = 0
+
+    def persist(*_args):
+        nonlocal persist_calls
+        persist_calls += 1
+        if persist_calls == 2:
+            raise RuntimeError("mirror write failed")
+
+    def micro_compact(messages):
+        messages[-1]["_row_id"] = 99
+        return messages
+
+    agent._persist_session = persist
+    agent.context_compressor = SimpleNamespace(
+        last_prompt_tokens=0,
+        _micro_compact_enabled=True,
+        _micro_compact=micro_compact,
+    )
+
+    result = finalize_turn(
+        agent,
+        final_response="answer",
+        api_call_count=1,
+        interrupted=False,
+        failed=False,
+        messages=[
+            {"role": "user", "content": "question"},
+            {"role": "assistant", "content": "answer"},
+        ],
+        conversation_history=[],
+        effective_task_id="task",
+        turn_id="turn",
+        user_message="question",
+        original_user_message="question",
+        _should_review_memory=False,
+        _turn_exit_reason="text_response(final)",
+    )
+
+    assert result["cleanup_errors"] == [
+        "persist_session_after_micro_compaction: mirror write failed"
+    ]

@@ -2327,7 +2327,14 @@ class AIAgent:
                     )
                     or 300.0,
                 )
-                for _written in _batch_msgs:
+                for _row, _written in zip(_batch_rows, _batch_msgs):
+                    # ``append_messages_batch`` writes the durable row id back
+                    # onto each batch row. Carry it onto the live message dict
+                    # so post-persist consumers can bind presentation metadata
+                    # to this exact response rather than searching by text.
+                    _row_id = _row.get("_row_id")
+                    if _row_id is not None:
+                        _written["_row_id"] = _row_id
                     _written[_DB_PERSISTED_MARKER] = True
             # The intrinsic markers are now the sole source of truth. Reset the
             # one-shot seed so no id() outlives this flush to alias a message

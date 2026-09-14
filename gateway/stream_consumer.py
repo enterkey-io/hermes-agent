@@ -42,6 +42,7 @@ logger = logging.getLogger("gateway.stream_consumer")
 
 # Sentinel to signal the stream is complete
 _DONE = object()
+_EARLY_DONE = object()
 _NEW_SEGMENT = object()
 _COMMENTARY = object()
 
@@ -329,6 +330,8 @@ class GatewayStreamConsumer:
         # this response and route through edit-based for graceful degradation.
         self._draft_failures = 0
         self._before_finalize_notified = False
+        self._finish_enqueued = False
+        self._early_finish_enqueued = False
 
     def _metadata_for_send(
         self,
@@ -679,7 +682,37 @@ class GatewayStreamConsumer:
 
     def finish(self) -> None:
         """Signal that the stream is complete."""
+        if self._finish_enqueued:
+            return
+        self._finish_enqueued = True
         self._queue.put(_DONE)
+
+    def finish_if_matches(self, final_text: str) -> None:
+        """Finalize early only if queued deltas equal the completed response.
+
+        The agent calls this after output transforms are complete but before
+        slow post-turn maintenance. FIFO queue ordering guarantees all prior
+        deltas are observed first. A mismatch leaves the consumer running for
+        the ordinary :meth:`finish` call, preserving transform/footer safety.
+        """
+        if (
+            self._finish_enqueued
+            or self._early_finish_enqueued
+            or not isinstance(final_text, str)
+            or not final_text.strip()
+        ):
+            return
+        self._early_finish_enqueued = True
+        self._queue.put((_EARLY_DONE, final_text))
+
+    def _accumulated_matches_final(self, final_text: str) -> bool:
+        target = ensure_closed_code_fences(
+            self._clean_for_display(final_text or "")
+        ).strip()
+        streamed = ensure_closed_code_fences(
+            self._clean_for_display(self._accumulated)
+        ).strip()
+        return bool(target) and streamed == target
 
     # ── Think-block filtering ────────────────────────────────────────
     # Models like MiniMax emit inline <think>...</think> blocks in their
@@ -884,6 +917,7 @@ class GatewayStreamConsumer:
                 got_flush = False
                 flush_event = None
                 commentary_text = None
+                early_final_text = None
                 while True:
                     try:
                         item = self._queue.get_nowait()
@@ -892,6 +926,9 @@ class GatewayStreamConsumer:
                             break
                         if item is _NEW_SEGMENT:
                             got_segment_break = True
+                            break
+                        if isinstance(item, tuple) and len(item) == 2 and item[0] is _EARLY_DONE:
+                            early_final_text = item[1]
                             break
                         if isinstance(item, tuple) and len(item) == 2 and item[0] is _COMMENTARY:
                             commentary_text = item[1]
@@ -907,6 +944,17 @@ class GatewayStreamConsumer:
                         self._filter_and_accumulate(item)
                     except queue.Empty:
                         break
+
+                if early_final_text is not None:
+                    self._flush_think_buffer()
+                    if self._accumulated_matches_final(early_final_text):
+                        got_done = True
+                    else:
+                        logger.debug(
+                            "Early stream final did not match completed response; "
+                            "waiting for ordinary turn finalization (chat=%s)",
+                            self.chat_id,
+                        )
 
                 # Flush any held-back partial-tag buffer on stream end
                 # so trailing text that was waiting for a potential open
