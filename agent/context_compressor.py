@@ -2925,6 +2925,10 @@ class ContextCompressor(ContextEngine):
         self._flush_scan_cursor_invalidated: bool = False
         self._micro_compact_passes: int = 0
         self._micro_compact_tokens_saved_total: int = 0
+        # Per-invocation archive result consumed by turn finalization. JSON
+        # mirrors may shrink only after the compacted transcript committed to
+        # the authoritative session DB; None covers no-op/not-attempted passes.
+        self._last_micro_compact_db_sync_succeeded: Optional[bool] = None
         # Cadence: run a pass every Nth completed turn. Each pass rewrites
         # already-sent history and so breaks the prompt-cache prefix, which
         # makes this the dial that sets how often that break is paid. 1 =
@@ -6456,6 +6460,7 @@ This compaction should PRIORITISE preserving all information related to the focu
         ``archive_and_compact`` on the session DB to soft-archive old rows
         and insert the compacted set atomically.
         """
+        self._last_micro_compact_db_sync_succeeded = None
         if not self._micro_compact_enabled:
             return messages
 
@@ -6510,7 +6515,9 @@ This compaction should PRIORITISE preserving all information related to the focu
         if self._needs_defrag():
             defragged = self._defrag_rolling_summary(messages)
             if defragged:
-                self._sync_micro_compact_to_db(messages)
+                self._last_micro_compact_db_sync_succeeded = (
+                    self._sync_micro_compact_to_db(messages)
+                )
                 self._micro_compact_consecutive_failures = 0
                 self._micro_compact_last_failure_cursor = -1
             self._emit_micro_compaction_telemetry(
@@ -6576,7 +6583,9 @@ This compaction should PRIORITISE preserving all information related to the focu
             messages, exchange_start, exchange_end, supersede=_cumulative,
         )
         self._micro_compact_cursor = self._cursor_after_splice(result, exchange_start + 1)
-        self._sync_micro_compact_to_db(result)
+        self._last_micro_compact_db_sync_succeeded = (
+            self._sync_micro_compact_to_db(result)
+        )
         self._emit_micro_compaction_telemetry(
             outcome="absorbed",
             messages_before=_messages_before,
@@ -6705,7 +6714,7 @@ This compaction should PRIORITISE preserving all information related to the focu
     def _sync_micro_compact_to_db(
         self,
         compacted_messages: List[Dict[str, Any]],
-    ) -> None:
+    ) -> bool:
         """Persist the micro-compacted message set to the session DB.
 
         Soft-archives every currently-active message row (``active = 0``)
@@ -6715,24 +6724,27 @@ This compaction should PRIORITISE preserving all information related to the focu
         ``_flush_messages_to_session_db_unlocked``) skips them: they are
         already correctly stored.
 
-        Without this, the in-memory-only splice leaves old exchange rows at
+        Returns True only when that atomic archive committed. Without this,
+        the in-memory-only splice leaves old exchange rows at
         ``active=1``, and a session resume double-loads both the summary and
         the original messages — blowing past the model's context limit.
         """
         session_db = getattr(self, "_session_db", None)
         session_id = getattr(self, "_session_id", "")
         if not session_db or not session_id:
-            return
+            return False
         try:
             session_db.archive_and_compact(session_id, compacted_messages)
             for msg in compacted_messages:
                 if isinstance(msg, dict):
                     msg[_DB_PERSISTED_MARKER] = True
+            return True
         except Exception:
             logger.info(
                 "Micro-compaction DB sync failed — resume will double-load "
                 "compacted messages until the next batch compression"
             )
+            return False
 
     def _splice_micro_compact_result(
         self,

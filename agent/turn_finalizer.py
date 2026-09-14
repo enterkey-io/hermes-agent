@@ -669,13 +669,23 @@ def finalize_turn(
                     )
                 if _before_fingerprint != _after_fingerprint:
                     # archive_and_compact normally persisted the rewritten set
-                    # already. This refreshes the JSON mirror and retains the
-                    # existing append-only fallback when that archive failed.
+                    # already. Shrink the JSON mirror only after that commit is
+                    # confirmed; a failed/unknown archive retains the larger
+                    # snapshot while the existing append-only DB fallback runs.
                     try:
+                        _db_compaction_committed = (
+                            getattr(
+                                _compressor,
+                                "_last_micro_compact_db_sync_succeeded",
+                                None,
+                            )
+                            is True
+                        )
                         agent._persist_session(
                             messages,
                             conversation_history,
-                            allow_json_snapshot_shrink=True,
+                            allow_json_snapshot_shrink=_db_compaction_committed,
+                            preserve_json_snapshot=not _db_compaction_committed,
                         )
                     except Exception as _post_compact_persist_err:
                         _cleanup_errors.append(

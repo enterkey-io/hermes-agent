@@ -349,7 +349,10 @@ def test_post_micro_compaction_rewrites_enabled_json_snapshot(monkeypatch, tmp_p
         _conversation_history,
         *,
         allow_json_snapshot_shrink=False,
+        preserve_json_snapshot=False,
     ):
+        if preserve_json_snapshot:
+            return
         if allow_json_snapshot_shrink:
             agent._save_session_log(messages, allow_shrink=True)
         else:
@@ -364,6 +367,7 @@ def test_post_micro_compaction_rewrites_enabled_json_snapshot(monkeypatch, tmp_p
         last_prompt_tokens=0,
         _micro_compact_enabled=True,
         _micro_compact=micro_compact,
+        _last_micro_compact_db_sync_succeeded=True,
     )
     messages = [
         {"role": "user", "content": "older question"},
@@ -396,6 +400,137 @@ def test_post_micro_compaction_rewrites_enabled_json_snapshot(monkeypatch, tmp_p
         "current question",
         "current answer",
     ]
+
+
+def test_failed_db_micro_compaction_cannot_shrink_json_snapshot(
+    monkeypatch,
+    tmp_path,
+):
+    from agent.context_compressor import ContextCompressor
+    from hermes_state import SessionDB
+    from run_agent import AIAgent
+
+    class ArchiveFailingSessionDB(SessionDB):
+        def archive_and_compact(self, *_args, **_kwargs):
+            raise RuntimeError("injected archive failure")
+
+    monkeypatch.setattr("hermes_cli.lifecycle.invoke_hook", lambda *_a, **_kw: [])
+    db_path = tmp_path / "state.db"
+    db = ArchiveFailingSessionDB(db_path=db_path)
+    db.create_session("sess-test", source="telegram")
+
+    agent = FakeAgent()
+    agent._session_json_enabled = True
+    agent.logs_dir = tmp_path / "sessions"
+    agent.logs_dir.mkdir()
+    agent.session_start = datetime.now()
+    agent.platform = "telegram"
+    agent._cached_system_prompt = ""
+    agent.tools = []
+    agent.verbose_logging = False
+    agent._clean_session_content = lambda content: content
+    agent._redact_message_content = lambda content: content
+    agent._session_db = db
+    agent._session_db_created = True
+    agent._persist_disabled = False
+    agent._session_persist_lock = None
+    agent._flushed_db_message_ids = set()
+    agent._flushed_db_message_session_id = None
+    agent._last_flushed_db_idx = 0
+    agent._db_flush_scan_prefix = None
+    agent._pending_cli_user_message = None
+    agent._active_compression_lock_holder = None
+    agent._active_session_turn_lease_holder = None
+    agent._active_session_turn_lease_ttl_seconds = 300.0
+    agent._last_persistence_error_cause = None
+    agent._compression_adoption_failed = False
+    agent._inflight_turn_id = None
+    agent._inflight_turn_session_id = None
+    agent._ensure_db_session = lambda: None
+    real_save_session_log = AIAgent._save_session_log.__get__(agent)
+    json_save_calls = []
+
+    def save_session_log(*args, **kwargs):
+        json_save_calls.append(kwargs.get("allow_shrink", False))
+        return real_save_session_log(*args, **kwargs)
+
+    agent._save_session_log = save_session_log
+    agent._flush_messages_to_session_db = (
+        AIAgent._flush_messages_to_session_db.__get__(agent)
+    )
+    agent._flush_messages_to_session_db_unlocked = (
+        AIAgent._flush_messages_to_session_db_unlocked.__get__(agent)
+    )
+    agent._persist_session = AIAgent._persist_session.__get__(agent)
+
+    compressor = ContextCompressor(
+        model="test-model",
+        threshold_percent=0.75,
+        protect_first_n=0,
+        protect_last_n=2,
+        quiet_mode=True,
+        config_context_length=40960,
+        provider="test",
+    )
+    compressor._micro_compact_enabled = True
+    compressor._micro_summarize_one = lambda _text: "ROLLING SUMMARY"
+    compressor._session_db = db
+    compressor._session_id = agent.session_id
+    agent.context_compressor = compressor
+    messages = [
+        {"role": "user", "content": "question 0"},
+        {
+            "role": "assistant",
+            "content": "checking",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "content": "result",
+            "tool_call_id": "call-1",
+        },
+        {"role": "user", "content": "question 1"},
+        {"role": "assistant", "content": "answer 1"},
+        {"role": "user", "content": "question 2"},
+        {"role": "assistant", "content": "answer 2"},
+    ]
+    original_contents = [message["content"] for message in messages]
+
+    finalize_turn(
+        agent,
+        final_response="answer 2",
+        api_call_count=1,
+        interrupted=False,
+        failed=False,
+        messages=messages,
+        conversation_history=[],
+        effective_task_id="task",
+        turn_id="turn",
+        user_message="question 2",
+        original_user_message="question 2",
+        _should_review_memory=False,
+        _turn_exit_reason="text_response(final)",
+    )
+
+    snapshot = json.loads(
+        (agent.logs_dir / "session_sess-test.json").read_text(encoding="utf-8")
+    )
+    assert compressor._last_micro_compact_db_sync_succeeded is False
+    assert json_save_calls == [False]
+    assert snapshot["message_count"] == len(original_contents)
+    assert [message["content"] for message in snapshot["messages"]] == original_contents
+
+    durable = db.get_messages_as_conversation(agent.session_id)
+    assert len(durable) > len(original_contents)
+    assert [message["content"] for message in durable[: len(original_contents)]] == (
+        original_contents
+    )
 
 
 def test_current_assistant_row_identity_never_falls_back_to_prior_turn(monkeypatch):
@@ -436,7 +571,10 @@ def test_post_micro_compaction_persist_failure_is_reported(monkeypatch):
         nonlocal persist_calls
         persist_calls += 1
         if persist_calls == 2:
-            assert kwargs == {"allow_json_snapshot_shrink": True}
+            assert kwargs == {
+                "allow_json_snapshot_shrink": True,
+                "preserve_json_snapshot": False,
+            }
             raise RuntimeError("mirror write failed")
 
     def micro_compact(messages):
@@ -448,6 +586,7 @@ def test_post_micro_compaction_persist_failure_is_reported(monkeypatch):
         last_prompt_tokens=0,
         _micro_compact_enabled=True,
         _micro_compact=micro_compact,
+        _last_micro_compact_db_sync_succeeded=True,
     )
 
     result = finalize_turn(

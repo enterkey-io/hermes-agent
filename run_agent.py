@@ -1933,10 +1933,15 @@ class AIAgent:
         conversation_history: List[Dict] = None,
         *,
         allow_json_snapshot_shrink: bool = False,
+        preserve_json_snapshot: bool = False,
     ):
         """Save session state to both JSON log and SQLite on any exit path.
 
         Ensures conversations are never lost, even on errors or early returns.
+
+        ``preserve_json_snapshot`` keeps an existing optional JSON mirror byte-
+        stable while still flushing SQLite. It is used after an in-memory
+        micro-compaction whose authoritative DB archive did not commit.
 
         Trailing empty-response scaffolding is dropped from the live list in
         place (it is ephemeral junk the real transcript should shed). The
@@ -1957,10 +1962,11 @@ class AIAgent:
         def _persist_and_drain() -> None:
             self._drop_trailing_empty_response_scaffolding(messages)
             self._session_messages = messages
-            self._save_session_log(
-                messages,
-                allow_shrink=allow_json_snapshot_shrink,
-            )
+            if not preserve_json_snapshot:
+                self._save_session_log(
+                    messages,
+                    allow_shrink=allow_json_snapshot_shrink,
+                )
             self._flush_messages_to_session_db(messages, conversation_history)
             # Drain async token-accounting deltas at every persist point (turn
             # finalize + error exits) so a crash after this line loses at most
