@@ -122,8 +122,9 @@ terminal result; it is not a release bypass.
 
 `kanban_show.graph_status` is the authoritative connected-graph view. Check its
 overall state, active and blocked work, failed success gates, next owner/action,
-and automatic final-report state before deciding that a workflow has finished
-or stalled. A failed review stays on the same card and uses
+failed terminal outcomes (including failed leaves), and automatic final-report
+state before deciding that a workflow has finished or stalled. A failed review
+stays on the same card and uses
 `kanban_request_changes`; never encode it as `kanban_complete(verdict="fail")`.
 
 ## Final Check

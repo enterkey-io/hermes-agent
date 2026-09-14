@@ -1175,9 +1175,15 @@ def _set_status_direct(
             "UPDATE tasks SET status = ?, "
             "  claim_lock = CASE WHEN ? = 'running' THEN claim_lock ELSE NULL END, "
             "  claim_expires = CASE WHEN ? = 'running' THEN claim_expires ELSE NULL END, "
-            "  worker_pid = CASE WHEN ? = 'running' THEN worker_pid ELSE NULL END "
+            "  worker_pid = CASE WHEN ? = 'running' THEN worker_pid ELSE NULL END, "
+            "  terminal_outcome = CASE WHEN ? IN ('done','archived') "
+            "    THEN terminal_outcome ELSE NULL END, "
+            "  terminal_verdict = CASE WHEN ? IN ('done','archived') "
+            "    THEN terminal_verdict ELSE NULL END "
             "WHERE id = ?",
             (
+                effective_status,
+                effective_status,
                 effective_status,
                 effective_status,
                 effective_status,

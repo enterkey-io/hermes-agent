@@ -1340,6 +1340,10 @@ class Task:
     current_phase: Optional[str] = None
     lifecycle_type: Optional[str] = None
     return_to: Optional[str] = None
+    # Immutable dependency-visible result captured by complete_task. Later
+    # edits may enrich run metadata without reclassifying released gates.
+    terminal_outcome: Optional[str] = None
+    terminal_verdict: Optional[str] = None
     # Trusted in-memory dispatch annotation. Never persisted or accepted from
     # task/tool input; the review lane sets it after an authorized claim.
     coordination_purpose: Optional[str] = None
@@ -1463,6 +1467,12 @@ class Task:
                 row["lifecycle_type"] if "lifecycle_type" in keys else None
             ),
             return_to=row["return_to"] if "return_to" in keys else None,
+            terminal_outcome=(
+                row["terminal_outcome"] if "terminal_outcome" in keys else None
+            ),
+            terminal_verdict=(
+                row["terminal_verdict"] if "terminal_verdict" in keys else None
+            ),
         )
 
 
@@ -1763,7 +1773,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     closure_owner        TEXT,
     current_phase        TEXT,
     lifecycle_type       TEXT,
-    return_to            TEXT
+    return_to            TEXT,
+    -- Immutable dependency-visible completion classification. Run metadata
+    -- remains editable for operator annotations without reopening gates.
+    terminal_outcome     TEXT,
+    terminal_verdict     TEXT
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
@@ -3118,6 +3132,46 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
                 f"{lifecycle_column} TEXT",
             )
 
+    for terminal_column in ("terminal_outcome", "terminal_verdict"):
+        if terminal_column not in cols:
+            _add_column_if_missing(
+                conn,
+                "tasks",
+                terminal_column,
+                f"{terminal_column} TEXT",
+            )
+
+    # Freeze every historical done row once during upgrade. Ordinary legacy
+    # completions had no verdict and therefore remain successful; an explicit
+    # non-passing verdict retains the failure semantics introduced with
+    # outcome-aware dependency gates. Future run-metadata edits cannot change
+    # this task-owned snapshot.
+    runs_exist = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_runs'"
+    ).fetchone() is not None
+    if runs_exist:
+        historical = conn.execute(
+            "SELECT t.id, (SELECT r.metadata FROM task_runs r "
+            "WHERE r.task_id = t.id AND r.outcome = 'completed' "
+            "ORDER BY COALESCE(r.ended_at, r.started_at, 0) DESC, r.id DESC LIMIT 1) "
+            "AS metadata FROM tasks t "
+            "WHERE t.status = 'done' AND t.terminal_outcome IS NULL"
+        ).fetchall()
+        for row in historical:
+            metadata: Any = None
+            if row["metadata"]:
+                try:
+                    metadata = json.loads(row["metadata"])
+                except (TypeError, json.JSONDecodeError):
+                    metadata = None
+            verdict = _completion_metadata_verdict(metadata)
+            outcome = _terminal_outcome_for_verdict(verdict)
+            conn.execute(
+                "UPDATE tasks SET terminal_outcome = ?, terminal_verdict = ? "
+                "WHERE id = ? AND status = 'done' AND terminal_outcome IS NULL",
+                (outcome, verdict, row["id"]),
+            )
+
     # Dependency edges created before outcome contracts existed meant
     # "wait until the parent finishes", even when that parent truthfully
     # finished with a failing QA verdict. Preserve that meaning exactly on
@@ -3847,6 +3901,30 @@ def _lifecycle_manager_for(task: Task) -> Optional[str]:
         return None
 
 
+_LIFECYCLE_INCIDENT_BOUNDARY_EVENTS = (
+    "created",
+    "assigned",
+    "claimed",
+    "promoted",
+    "scheduled",
+    "status",
+    "unblocked",
+    "review_requested",
+    "review_reopened",
+    "review_passed",
+    "changes_requested",
+    "handoff_created",
+    "blocked",
+    "triaged",
+    "lifecycle_preflight_failed",
+    "reclaimed",
+    "stale",
+    "timed_out",
+    "crashed",
+    "gave_up",
+)
+
+
 def _append_lifecycle_manager_notification(
     conn: sqlite3.Connection,
     task_id: str,
@@ -3854,15 +3932,22 @@ def _append_lifecycle_manager_notification(
     kind: str,
     detail: Optional[str] = None,
 ) -> bool:
-    """Append one deduplicated manager-notification event without model spend."""
+    """Append one notification per lifecycle incident without model spend."""
     task = get_task(conn, task_id)
     if task is None or not task.lifecycle_type:
         return False
     manager = _lifecycle_manager_for(task)
     if not manager:
         return False
+    placeholders = ",".join("?" for _ in _LIFECYCLE_INCIDENT_BOUNDARY_EVENTS)
+    boundary = conn.execute(
+        "SELECT MAX(id) AS id FROM task_events WHERE task_id = ? "
+        f"AND kind IN ({placeholders})",
+        (task_id, *_LIFECYCLE_INCIDENT_BOUNDARY_EVENTS),
+    ).fetchone()
+    boundary_id = int(boundary["id"] or 0)
     rows = conn.execute(
-        "SELECT payload FROM task_events WHERE task_id = ? "
+        "SELECT id, payload FROM task_events WHERE task_id = ? "
         "AND kind = 'lifecycle_manager_notified' ORDER BY id DESC",
         (task_id,),
     ).fetchall()
@@ -3871,7 +3956,10 @@ def _append_lifecycle_manager_notification(
             payload = json.loads(row["payload"] or "{}")
         except (TypeError, json.JSONDecodeError):
             continue
-        if payload.get("exception_kind") == kind:
+        if (
+            payload.get("exception_kind") == kind
+            and int(row["id"]) > boundary_id
+        ):
             return False
     _append_event(
         conn,
@@ -3882,6 +3970,7 @@ def _append_lifecycle_manager_notification(
             "exception_kind": kind,
             "detail": str(detail or "")[:400] or None,
             "model_calls": 0,
+            "incident_event_id": boundary_id or None,
         },
     )
     return True
@@ -4076,29 +4165,6 @@ def _activation_preflight_fingerprint(task: Task) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def _has_verified_activation_recovery_checkpoint(
-    conn: sqlite3.Connection, task: Task,
-) -> bool:
-    if task.current_phase != "activation":
-        return False
-    row = conn.execute(
-        "SELECT payload FROM task_events WHERE task_id = ? "
-        "AND kind = 'activation_recovery_checkpoint' ORDER BY id DESC LIMIT 1",
-        (task.id,),
-    ).fetchone()
-    if row is None or not row["payload"]:
-        return False
-    try:
-        payload = json.loads(row["payload"])
-    except (TypeError, ValueError):
-        return False
-    return (
-        isinstance(payload, dict)
-        and payload.get("preflight_fingerprint")
-        == _activation_preflight_fingerprint(task)
-    )
-
-
 def _record_lifecycle_preflight_failure(
     conn: sqlite3.Connection,
     task_id: str,
@@ -4123,8 +4189,6 @@ def _record_lifecycle_preflight_failure(
 def _preflight_claim(conn: sqlite3.Connection, task_id: str) -> bool:
     task = get_task(conn, task_id)
     if task is None or not task.lifecycle_type or not lifecycle_enforcement_enabled():
-        return True
-    if _has_verified_activation_recovery_checkpoint(conn, task):
         return True
     errors = lifecycle_preflight_errors(conn, task)
     if not errors:
@@ -5487,14 +5551,35 @@ def begin_coordination_final_return_if_ready(
         if root is None or root.status in {"done", "archived"}:
             return False
         cohort = conn.execute(
-            "SELECT status FROM tasks WHERE request_root_id = ? AND id != ?",
+            "SELECT id, status FROM tasks WHERE request_root_id = ? AND id != ?",
             (request.id, request.root_task_id),
         ).fetchall()
         if (
             not cohort
             or any(row["status"] not in {"done", "archived"} for row in cohort)
-            or not _parents_satisfied(conn, request.root_task_id)
         ):
+            return False
+        failed = next(
+            (
+                row["id"]
+                for row in cohort
+                if task_terminal_outcome(conn, row["id"])["outcome"] == "failure"
+            ),
+            None,
+        )
+        if failed is not None:
+            _mark_coordination_guardrail_in_txn(
+                conn,
+                request.id,
+                task_id=failed,
+                reason=(
+                    f"coordination task {failed} completed with a failing terminal "
+                    "outcome; remediation is required"
+                ),
+                timestamp=timestamp,
+            )
+            return False
+        if not _parents_satisfied(conn, request.root_task_id):
             return False
         changed = conn.execute(
             "UPDATE coordination_requests SET status = 'return_pending', "
@@ -6432,13 +6517,13 @@ def _mark_coordination_guardrail_in_txn(
     return True
 
 
-def _guardrail_failed_success_edges_in_txn(
+def _guardrail_failed_terminal_outcome_in_txn(
     conn: sqlite3.Connection,
     task_id: str,
     *,
     timestamp: int,
 ) -> bool:
-    """Stop an origin request when a terminal failure closes a success gate."""
+    """Stop an origin request when any cohort task has a terminal failure."""
     task = get_task(conn, task_id)
     if task is None or not task.request_root_id:
         return False
@@ -6458,16 +6543,14 @@ def _guardrail_failed_success_edges_in_txn(
         "AND required_outcome = 'success' ORDER BY child_id",
         (task_id,),
     ).fetchall()
-    if not gated_children:
-        return False
     child_ids = [row["child_id"] for row in gated_children]
     _append_event(
         conn,
         task_id,
-        "outcome_gate_failed",
+        "outcome_gate_failed" if child_ids else "terminal_outcome_failed",
         {
             "request_root_id": request.id,
-            "required_outcome": "success",
+            "required_outcome": "success" if child_ids else None,
             "observed_outcome": "failure",
             "verdict": observed["verdict"],
             "blocked_children": child_ids,
@@ -6478,7 +6561,7 @@ def _guardrail_failed_success_edges_in_txn(
         request.id,
         task_id=task_id,
         reason=(
-            f"success-gated task {task_id} completed with verdict "
+            f"coordination task {task_id} completed with verdict "
             f"{observed['verdict']!r}; remediation is required"
         ),
         timestamp=timestamp,
@@ -6905,6 +6988,10 @@ def _completion_metadata_verdict(metadata: Any) -> Optional[str]:
     return verdict or None
 
 
+def _terminal_outcome_for_verdict(verdict: Optional[str]) -> str:
+    return "success" if verdict is None or verdict in _SUCCESS_VERDICTS else "failure"
+
+
 def task_terminal_outcome(
     conn: sqlite3.Connection, task_id: str
 ) -> dict[str, Any]:
@@ -6915,36 +7002,25 @@ def task_terminal_outcome(
     edges may consume it, while success edges remain closed.
     """
     task = conn.execute(
-        "SELECT status FROM tasks WHERE id = ?", (task_id,)
+        "SELECT status, terminal_outcome, terminal_verdict "
+        "FROM tasks WHERE id = ?", (task_id,)
     ).fetchone()
     if task is None:
         return {"outcome": "missing", "verdict": None, "terminal": False}
     status = str(task["status"])
-    if status == "archived":
-        return {"outcome": "success", "verdict": None, "terminal": True}
-    if status != "done":
+    if status not in {"done", "archived"}:
         return {"outcome": "incomplete", "verdict": None, "terminal": False}
-
-    run = conn.execute(
-        "SELECT metadata FROM task_runs WHERE task_id = ? "
-        "AND outcome = 'completed' "
-        "ORDER BY id DESC LIMIT 1",
-        (task_id,),
-    ).fetchone()
-    metadata: Any = None
-    if run is not None and run["metadata"]:
-        try:
-            metadata = json.loads(run["metadata"])
-        except (TypeError, json.JSONDecodeError):
-            metadata = None
-    verdict = _completion_metadata_verdict(metadata)
-    if verdict is None or verdict in _SUCCESS_VERDICTS:
-        outcome = "success"
-    else:
-        # Unknown/custom explicit verdicts fail closed. This prevents a typo or
-        # an inconclusive diagnostic from silently releasing a success edge.
+    # All current completion/archive writers and the additive migration set
+    # this snapshot. The success fallback keeps manually-created historical
+    # terminal rows operable without consulting mutable task_runs metadata.
+    outcome = task["terminal_outcome"] or "success"
+    if outcome not in {"success", "failure"}:
         outcome = "failure"
-    return {"outcome": outcome, "verdict": verdict, "terminal": True}
+    return {
+        "outcome": outcome,
+        "verdict": task["terminal_verdict"],
+        "terminal": True,
+    }
 
 
 def _task_satisfies_link_outcome(
@@ -7193,6 +7269,19 @@ def task_graph_status(conn: sqlite3.Connection, task_id: str) -> dict[str, Any]:
     by_id = {row["id"]: row for row in task_rows}
     root_id = request.root_task_id if request is not None else None
 
+    failed_outcomes: list[dict[str, Any]] = []
+    for row in task_rows:
+        if row["id"] == root_id:
+            continue
+        observed = task_terminal_outcome(conn, row["id"])
+        if observed["outcome"] == "failure":
+            failed_outcomes.append({
+                "task_id": row["id"],
+                "task_title": row["title"],
+                "observed_outcome": "failure",
+                "verdict": observed["verdict"],
+            })
+
     link_rows = conn.execute(
         "SELECT l.parent_id, l.child_id, l.required_outcome, "
         "p.title AS parent_title, c.title AS child_title "
@@ -7298,7 +7387,7 @@ def task_graph_status(conn: sqlite3.Connection, task_id: str) -> dict[str, Any]:
 
     if workload_blocked:
         overall_state = "stalled"
-    elif failed_gates:
+    elif failed_gates or failed_outcomes:
         overall_state = "failed"
     elif blocked:
         overall_state = "stalled"
@@ -7329,6 +7418,16 @@ def task_graph_status(conn: sqlite3.Connection, task_id: str) -> dict[str, Any]:
             "Remediate the failed success gate, produce a fresh candidate, and "
             "repeat independent verification."
         )
+    elif failed_outcomes:
+        failed_task = by_id.get(failed_outcomes[0]["task_id"])
+        next_owner = (
+            failed_task["implementer"] or failed_task["assignee"]
+            if failed_task is not None
+            else None
+        )
+        next_action = (
+            "Remediate the failed terminal outcome and repeat independent verification."
+        )
     elif active:
         next_owner = active[0]["assignee"]
         next_action = (
@@ -7355,6 +7454,7 @@ def task_graph_status(conn: sqlite3.Connection, task_id: str) -> dict[str, Any]:
         "completed": completed,
         "blocked": blocked,
         "failed_gates": failed_gates,
+        "failed_outcomes": failed_outcomes,
         "failed_reviews": failed_reviews,
         "next_owner": next_owner,
         "next_action": next_action,
@@ -10088,6 +10188,8 @@ def complete_task(
     metadata = _merge_completion_prose_artifacts(
         conn, task_id, metadata, summary=summary, result=result,
     )
+    terminal_verdict = _completion_metadata_verdict(metadata)
+    terminal_outcome = _terminal_outcome_for_verdict(terminal_verdict)
     with write_txn(conn):
         # Re-read and revalidate under the same write lock as the state
         # transition. The advisory check above gives fast feedback before
@@ -10133,6 +10235,8 @@ def complete_task(
                        worker_pid   = NULL,
                        block_kind   = NULL,
                        block_recurrences = 0,
+                       terminal_outcome = ?,
+                       terminal_verdict = ?,
                        current_phase = CASE WHEN lifecycle_type IS NOT NULL
                                             THEN 'closure' ELSE current_phase END,
                        return_to = CASE WHEN lifecycle_type IS NOT NULL
@@ -10140,7 +10244,7 @@ def complete_task(
                  WHERE id = ?
                    AND status IN ('running', 'ready', 'blocked', 'review')
                 """,
-                (result, now, task_id),
+                (result, now, terminal_outcome, terminal_verdict, task_id),
             )
         else:
             cur = conn.execute(
@@ -10154,6 +10258,8 @@ def complete_task(
                        worker_pid   = NULL,
                        block_kind   = NULL,
                        block_recurrences = 0,
+                       terminal_outcome = ?,
+                       terminal_verdict = ?,
                        current_phase = CASE WHEN lifecycle_type IS NOT NULL
                                             THEN 'closure' ELSE current_phase END,
                        return_to = CASE WHEN lifecycle_type IS NOT NULL
@@ -10162,7 +10268,14 @@ def complete_task(
                    AND status IN ('running', 'ready', 'blocked', 'review')
                    AND current_run_id = ?
                 """,
-                (result, now, task_id, int(expected_run_id)),
+                (
+                    result,
+                    now,
+                    terminal_outcome,
+                    terminal_verdict,
+                    task_id,
+                    int(expected_run_id),
+                ),
             )
         if cur.rowcount != 1:
             return False
@@ -10239,7 +10352,7 @@ def complete_task(
             completed_payload,
             run_id=run_id,
         )
-        _guardrail_failed_success_edges_in_txn(
+        _guardrail_failed_terminal_outcome_in_txn(
             conn, task_id, timestamp=now
         )
         _record_coordination_root_completion(conn, task_id, now=now)
@@ -11629,25 +11742,36 @@ def handoff_task(
         return False, "recheck_condition is required"
     _require_operational_assignee(receiver)
 
-    retry = _idempotent_lifecycle_result(
-        conn,
-        task_id,
-        expected_run_id,
-        outcome="handoff_created",
-        event_kind="handoff_created",
-        receiver=receiver,
-        next_phase=phase,
-    )
-    if retry is not None:
-        actor_check = retry_only or retry_actor is not None
-        if actor_check and not _lifecycle_run_owned_by_actor(
+    # Handoff is an opt-in lifecycle verb, including response-lost retries.
+    # Check under a write transaction so lifecycle_type cannot disappear
+    # between the boundary check and acceptance of a prior committed result.
+    with write_txn(conn):
+        opted_in = conn.execute(
+            "SELECT lifecycle_type FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if opted_in is None:
+            return False, "task not found"
+        if not opted_in["lifecycle_type"]:
+            return False, "lifecycle handoff requires lifecycle_type opt-in"
+        retry = _idempotent_lifecycle_result(
             conn,
             task_id,
             expected_run_id,
-            retry_actor,
-        ):
-            return False, "retry run is not owned by the caller"
-        return retry
+            outcome="handoff_created",
+            event_kind="handoff_created",
+            receiver=receiver,
+            next_phase=phase,
+        )
+        if retry is not None:
+            actor_check = retry_only or retry_actor is not None
+            if actor_check and not _lifecycle_run_owned_by_actor(
+                conn,
+                task_id,
+                expected_run_id,
+                retry_actor,
+            ):
+                return False, "retry run is not owned by the caller"
+            return retry
     if retry_only:
         return False, "no matching committed lifecycle transition"
 
@@ -11658,6 +11782,8 @@ def handoff_task(
         if row is None:
             return False, "task not found"
         task = Task.from_row(row)
+        if not task.lifecycle_type:
+            return False, "lifecycle handoff requires lifecycle_type opt-in"
         if task.status != "running" or task.current_run_id is None:
             return False, "task is not in an active worker run"
         if expected_run_id is not None and task.current_run_id != int(expected_run_id):
@@ -12501,7 +12627,8 @@ def invalidate_descendants_for_parent_reopen(
             conn.execute(
                 "UPDATE tasks SET status = 'todo', completed_at = NULL, "
                 "claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, "
-                "current_run_id = NULL, consecutive_failures = 0 WHERE id = ?",
+                "current_run_id = NULL, consecutive_failures = 0, "
+                "terminal_outcome = NULL, terminal_verdict = NULL WHERE id = ?",
                 (row["id"],),
             )
             _append_event(
@@ -12906,7 +13033,8 @@ def archive_task(conn: sqlite3.Connection, task_id: str) -> bool:
     with write_txn(conn):
         cur = conn.execute(
             "UPDATE tasks SET status = 'archived', "
-            "    claim_lock = NULL, claim_expires = NULL, worker_pid = NULL "
+            "    claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, "
+            "    terminal_outcome = COALESCE(terminal_outcome, 'success') "
             "WHERE id = ? AND status != 'archived'",
             (task_id,),
         )
@@ -12978,7 +13106,8 @@ def archive_stale_task(
         now = int(time.time())
         conn.execute(
             "UPDATE tasks SET status = 'archived', claim_lock = NULL, "
-            "claim_expires = NULL, worker_pid = NULL, current_run_id = NULL "
+            "claim_expires = NULL, worker_pid = NULL, current_run_id = NULL, "
+            "terminal_outcome = COALESCE(terminal_outcome, 'success') "
             "WHERE id = ?",
             (task_id,),
         )
@@ -14737,8 +14866,8 @@ def _record_task_failure(
 
     ``lifecycle_recovery_checkpoint`` is accepted only for a currently
     running lifecycle activation. It writes a fixed, redacted checkpoint in
-    the same transaction as the failure transition, allowing an unchanged
-    activation retry to resume its already-verified preflight.
+    the same transaction as the failure transition so the retry retains
+    completed-work context. Every later claim still reruns mutable preflight.
 
     ``expected_run_id`` / ``expected_claim_lock`` optionally bind an
     in-process worker fallback to the exact dispatcher-issued run. A stale
@@ -14792,11 +14921,10 @@ def _record_task_failure(
         )
         failures = int(row["consecutive_failures"]) + 1
 
-        # A budget-exhausted activation can safely resume after the exact
-        # verified preflight only when its durable routing/workspace inputs are
-        # unchanged. Persist just the hashed identity plus fixed, redacted
-        # checkpoint facts — never raw paths, task body, tool output, or model
-        # text from the interrupted worker.
+        # Preserve the prior verified step as bounded recovery context. Claim
+        # still reruns mutable profile/skill/workspace checks before dispatch;
+        # the fingerprint identifies which persisted task shape produced this
+        # checkpoint without exposing raw paths or model text.
         if (
             lifecycle_recovery_checkpoint
             and row["lifecycle_type"]

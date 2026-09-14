@@ -316,6 +316,43 @@ def test_success_gated_dependency_rejects_failed_qa_but_completion_edge_accepts_
         assert "remediat" in graph["next_action"].lower()
 
 
+def test_terminal_outcome_is_immutable_after_completed_metadata_edit(
+    followthrough_env: Path,
+) -> None:
+    with kb.connect() as conn:
+        parent_id = kb.create_task(conn, title="Failed QA", assignee="reese")
+        child_id = kb.create_task(
+            conn, title="Release", assignee="root", parents=[parent_id]
+        )
+        assert kb.complete_task(
+            conn,
+            parent_id,
+            summary="QA failed.",
+            metadata={"verdict": "fail"},
+        )
+        frozen = kb.get_task(conn, parent_id)
+        assert frozen is not None
+        assert (frozen.terminal_outcome, frozen.terminal_verdict) == (
+            "failure",
+            "fail",
+        )
+
+        assert kb.edit_completed_task_result(
+            conn,
+            parent_id,
+            result="Operator added a later note.",
+            metadata={"verdict": "pass"},
+        )
+        assert kb.task_terminal_outcome(conn, parent_id) == {
+            "outcome": "failure",
+            "verdict": "fail",
+            "terminal": True,
+        }
+        child = kb.get_task(conn, child_id)
+        assert child is not None and child.status == "todo"
+        assert not kb._parents_satisfied(conn, child_id)
+
+
 def test_failed_review_cannot_be_encoded_as_successful_completion(
     followthrough_env: Path,
 ) -> None:
@@ -428,6 +465,59 @@ def test_legacy_link_migration_preserves_completion_semantics_for_existing_edges
             (new_parent, new_child),
         ).fetchone()
         assert new["required_outcome"] == "success"
+
+
+def test_legacy_done_outcome_backfill_freezes_latest_completion_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    db_path = home / "kanban.db"
+    legacy = sqlite3.connect(db_path)
+    legacy.executescript(
+        """
+        CREATE TABLE tasks (
+            id TEXT PRIMARY KEY, title TEXT NOT NULL, body TEXT, assignee TEXT,
+            status TEXT NOT NULL, priority INTEGER NOT NULL DEFAULT 0,
+            created_by TEXT, created_at INTEGER NOT NULL, started_at INTEGER,
+            completed_at INTEGER, workspace_kind TEXT NOT NULL DEFAULT 'scratch',
+            workspace_path TEXT, claim_lock TEXT, claim_expires INTEGER
+        );
+        CREATE TABLE task_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL,
+            profile TEXT, step_key TEXT, status TEXT NOT NULL, claim_lock TEXT,
+            claim_expires INTEGER, worker_pid INTEGER, max_runtime_seconds INTEGER,
+            last_heartbeat_at INTEGER, started_at INTEGER NOT NULL, ended_at INTEGER,
+            outcome TEXT, summary TEXT, metadata TEXT, error TEXT
+        );
+        INSERT INTO tasks (id,title,status,created_at,completed_at,workspace_kind)
+            VALUES ('legacy-fail','old QA','done',1,2,'scratch');
+        INSERT INTO task_runs (
+            task_id,status,started_at,ended_at,outcome,metadata
+        ) VALUES (
+            'legacy-fail','done',1,2,'completed','{"verdict":"fail"}'
+        );
+        """
+    )
+    legacy.commit()
+    legacy.close()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    kb._INITIALIZED_PATHS.clear()
+    kb.init_db(db_path)
+
+    with kb.connect(db_path) as conn:
+        task = kb.get_task(conn, "legacy-fail")
+        assert task is not None
+        assert (task.terminal_outcome, task.terminal_verdict) == (
+            "failure",
+            "fail",
+        )
+        assert kb.task_terminal_outcome(conn, task.id) == {
+            "outcome": "failure",
+            "verdict": "fail",
+            "terminal": True,
+        }
 
 
 def test_blocked_coordination_child_stalls_graph_and_returns_once(
@@ -553,6 +643,44 @@ def test_failed_success_gate_reports_failed_even_when_guardrail_blocks_root(
         assert graph["failed_gates"][0]["parent_id"] == qa_id
         assert graph["next_owner"] == "sloane"
         assert graph["automatic_final_report"]["status"] == "return_pending"
+
+
+def test_failed_coordination_leaf_triggers_guardrail_and_failed_graph(
+    followthrough_env: Path,
+) -> None:
+    with kb.connect() as conn:
+        root_id, request = _accept_telegram_request(conn)
+        leaf_id = kb.create_task(
+            conn,
+            title="Independent acceptance",
+            assignee="reese",
+            coordination_source_task_id=root_id,
+        )
+
+        assert kb.complete_task(
+            conn,
+            leaf_id,
+            summary="Acceptance found a release-blocking defect.",
+            metadata={"verdict": "fail"},
+        )
+
+        current_request = kb.get_coordination_request(conn, request.id)
+        root = kb.get_task(conn, root_id)
+        assert current_request is not None
+        assert current_request.status == "return_pending"
+        assert root is not None and root.status == "blocked"
+        assert not kb.begin_coordination_final_return_if_ready(conn, request.id)
+        graph = kb.task_graph_status(conn, root_id)
+        assert graph["overall_state"] == "failed"
+        assert graph["failed_outcomes"] == [
+            {
+                "task_id": leaf_id,
+                "task_title": "Independent acceptance",
+                "observed_outcome": "failure",
+                "verdict": "fail",
+            }
+        ]
+        assert graph["next_owner"] == "reese"
 
 
 def test_show_surface_includes_whole_graph_status(followthrough_env: Path) -> None:

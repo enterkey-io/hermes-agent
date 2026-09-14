@@ -1119,7 +1119,11 @@ def apply_reconciliation(
                     conn.execute("UPDATE wc_reconcile_actions SET state='quarantined' WHERE action_id=?", (action_id,))
                     results.append({"action_id": action_id, "state": "quarantined", "reason": "outcome lacks passing verification"})
                     continue
-                conn.execute("UPDATE tasks SET status='done',completed_at=? WHERE id=?", (_now(), task_id))
+                conn.execute(
+                    "UPDATE tasks SET status='done',completed_at=?,"
+                    "terminal_outcome='success',terminal_verdict=NULL WHERE id=?",
+                    (_now(), task_id),
+                )
                 conn.execute("UPDATE wc_items SET current_state='complete',updated_at=? WHERE task_id=?", (_now(), task_id))
                 kanban_db._append_event(conn, task_id, "workforce_reconciled_complete", {"actor": actor, "evidence": evidence})
             elif classification in {"duplicate", "superseded"}:
@@ -1128,7 +1132,12 @@ def apply_reconciliation(
                     "INSERT OR IGNORE INTO wc_relations(source_task_id,relation,target_task_id,evidence_json,confidence,created_by,created_at) VALUES(?,?,?,?,?,'aurora',?)",
                     (task_id, relation, target_id, _json(evidence), "high", _now()),
                 )
-                conn.execute("UPDATE tasks SET status='archived',claim_lock=NULL,claim_expires=NULL,worker_pid=NULL WHERE id=?", (task_id,))
+                conn.execute(
+                    "UPDATE tasks SET status='archived',claim_lock=NULL,"
+                    "claim_expires=NULL,worker_pid=NULL,"
+                    "terminal_outcome=COALESCE(terminal_outcome,'success') WHERE id=?",
+                    (task_id,),
+                )
                 conn.execute("UPDATE wc_items SET current_state=?,updated_at=? WHERE task_id=?", (classification, _now(), task_id))
                 kanban_db._append_event(conn, task_id, "workforce_reconciled_archived", {"classification": classification, "target_task_id": target_id})
             elif classification == "failed_verification":

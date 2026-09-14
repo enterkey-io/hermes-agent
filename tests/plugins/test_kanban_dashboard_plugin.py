@@ -403,6 +403,33 @@ def test_reopening_parent_demotes_ready_child(client):
     assert child_after_reopen["status"] == "todo"
 
 
+def test_reopening_done_task_clears_frozen_terminal_outcome(client):
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="failed result", assignee="reviewer")
+        assert kb.complete_task(
+            conn,
+            task_id,
+            summary="Review failed.",
+            metadata={"verdict": "fail"},
+        )
+        row = conn.execute(
+            "SELECT terminal_outcome, terminal_verdict FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        assert tuple(row) == ("failure", "fail")
+
+    reopened = client.patch(
+        f"/api/plugins/kanban/tasks/{task_id}", json={"status": "todo"}
+    )
+    assert reopened.status_code == 200, reopened.text
+    with kb.connect() as conn:
+        row = conn.execute(
+            "SELECT terminal_outcome, terminal_verdict FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        assert tuple(row) == (None, None)
+
+
 def test_reopening_parent_retracts_review_and_blocks_approval(client):
     with kb.connect() as conn:
         parent_id = kb.create_task(conn, title="parent", assignee="planner")

@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -136,6 +138,8 @@ def test_additive_migration_preserves_legacy_rows(tmp_path: Path, monkeypatch) -
             "current_phase",
             "lifecycle_type",
             "return_to",
+            "terminal_outcome",
+            "terminal_verdict",
         } <= columns
         task = kb.get_task(migrated, "legacy")
         assert task is not None
@@ -862,10 +866,10 @@ def test_creation_preflight_rejects_unusable_lifecycle_worktree_anchor(
         assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == before
 
 
-def test_activation_budget_checkpoint_resumes_without_repeating_preflight(
+def test_activation_budget_checkpoint_resumes_after_repeating_preflight(
     lifecycle_env, monkeypatch
 ) -> None:
-    """An activation retry uses the durable checkpoint, not another preflight."""
+    """A retry preserves its checkpoint but revalidates mutable runtime inputs."""
     monkeypatch.setattr(kb, "lifecycle_enforcement_enabled", lambda *_a, **_k: True)
     with kb.connect() as conn:
         task_id = _managed_task(
@@ -912,8 +916,48 @@ def test_activation_budget_checkpoint_resumes_without_repeating_preflight(
 
         retried = kb.claim_task(conn, task_id)
         assert retried is not None
-        assert calls == [task_id]
+        assert calls == [task_id, task_id]
         assert "activation_recovery_checkpoint" in kb.build_worker_context(conn, task_id)
+
+
+def test_activation_checkpoint_cannot_bypass_changed_profile_preflight(
+    lifecycle_env, monkeypatch
+) -> None:
+    monkeypatch.setattr(kb, "lifecycle_enforcement_enabled", lambda *_a, **_k: True)
+    with kb.connect() as conn:
+        task_id = _managed_task(
+            conn,
+            title="activation route drift",
+            assignee="alina",
+            current_phase="activation",
+            idempotency_key="activation-route-drift-v1",
+        )
+        first_run = kb.claim_task(conn, task_id)
+        assert first_run is not None
+        assert not kb._record_task_failure(
+            conn,
+            task_id,
+            "Iteration budget exhausted (10/10)",
+            outcome="timed_out",
+            release_claim=True,
+            end_run=True,
+            lifecycle_recovery_checkpoint={
+                "reason": "iteration_budget_exhausted",
+                "budget": {"used": 10, "max": 10},
+            },
+        )
+
+        task = kb.get_task(conn, task_id)
+        assert task is not None
+        profile = Path(load_organization().resolve_profile(task.assignee).profile_path)
+        profile.joinpath("config.yaml").write_text("{}\n", encoding="utf-8")
+
+        assert kb.claim_task(conn, task_id) is None
+        blocked = kb.get_task(conn, task_id)
+        assert blocked is not None
+        assert (blocked.status, blocked.current_phase) == ("blocked", "recovery")
+        failure = _events(conn, task_id, "lifecycle_preflight_failed")[-1]
+        assert "model/provider route" in failure["reason"]
 
 
 @pytest.mark.parametrize(
@@ -1009,6 +1053,50 @@ def test_deterministic_observer_routes_stale_assignment_once(
         ]
         assert second == []
         assert len(_events(conn, task_id, "lifecycle_manager_notified")) == 1
+
+
+def test_lifecycle_observer_notifies_again_after_assignment_progress(
+    lifecycle_env, monkeypatch
+) -> None:
+    monkeypatch.setattr(kb, "lifecycle_enforcement_enabled", lambda *_a, **_k: True)
+    now = int(time.time())
+    with kb.connect() as conn:
+        task_id = _managed_task(conn, idempotency_key="stale-again-v1")
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET created_at = ? WHERE id = ?", (now - 120, task_id)
+            )
+
+        assert len(kb.observe_lifecycle_handoffs(
+            conn, now=now, stale_after_seconds=60
+        )) == 1
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET assignee = 'aurora', current_phase = 'intent_review', "
+                "return_to = 'aurora' WHERE id = ?",
+                (task_id,),
+            )
+            kb._append_event(
+                conn,
+                task_id,
+                "handoff_created",
+                {"next_assignee": "aurora", "next_phase": "intent_review"},
+            )
+
+        assert kb.observe_lifecycle_handoffs(
+            conn, now=now, stale_after_seconds=60
+        ) == []
+        later = kb.observe_lifecycle_handoffs(
+            conn, now=now + 120, stale_after_seconds=60
+        )
+        assert later == [
+            {
+                "task_id": task_id,
+                "kind": "stale_assignment",
+                "manager": "aurora",
+            }
+        ]
+        assert len(_events(conn, task_id, "lifecycle_manager_notified")) == 2
 
 
 def test_deterministic_observer_routes_missing_assignee_via_recorded_implementer(
@@ -1149,6 +1237,93 @@ def test_lifecycle_tool_schemas_are_registered() -> None:
     assert set(
         kt.KANBAN_CREATE_SCHEMA["parameters"]["properties"]["lifecycle_type"]["enum"]
     ) == kb.VALID_LIFECYCLE_TYPES
+
+
+def test_handoff_rejects_legacy_cards_before_mutation_or_idempotent_retry(
+    lifecycle_env, monkeypatch
+) -> None:
+    monkeypatch.setattr(kb, "lifecycle_enforcement_enabled", lambda *_a, **_k: True)
+    kwargs: dict[str, Any] = {
+        "next_assignee": "aurora",
+        "next_phase": "intent_review",
+        "summary": "Implementation is ready for intent review.",
+        "evidence": {"tests": ["focused"]},
+        "expected_outcome": "Validate the requested behavior.",
+        "recheck_condition": "Acceptance remains satisfied.",
+    }
+    with kb.connect() as conn:
+        legacy_id = kb.create_task(conn, title="legacy card", assignee="sloane")
+        legacy_run = kb.claim_task(conn, legacy_id)
+        assert legacy_run is not None
+        ok, reason = kb.handoff_task(
+            conn,
+            legacy_id,
+            expected_run_id=legacy_run.current_run_id,
+            **kwargs,
+        )
+        assert ok is False
+        assert "lifecycle" in str(reason)
+        legacy = kb.get_task(conn, legacy_id)
+        assert legacy is not None
+        assert (legacy.status, legacy.assignee, legacy.current_phase) == (
+            "running",
+            "sloane",
+            None,
+        )
+
+        managed_id = _managed_task(
+            conn, title="removed opt-in", idempotency_key="removed-opt-in-v1"
+        )
+        managed_run = kb.claim_task(conn, managed_id)
+        assert managed_run is not None
+        assert kb.handoff_task(
+            conn,
+            managed_id,
+            expected_run_id=managed_run.current_run_id,
+            **kwargs,
+        ) == (True, "aurora")
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET lifecycle_type = NULL WHERE id = ?", (managed_id,)
+            )
+        retry_ok, retry_reason = kb.handoff_task(
+            conn,
+            managed_id,
+            expected_run_id=managed_run.current_run_id,
+            retry_actor="sloane",
+            retry_only=True,
+            **kwargs,
+        )
+        assert retry_ok is False
+        assert "lifecycle" in str(retry_reason)
+
+
+def test_handoff_tool_rejects_legacy_card(lifecycle_env, monkeypatch) -> None:
+    from tools import kanban_tools as kt
+
+    monkeypatch.setattr(kb, "lifecycle_enforcement_enabled", lambda *_a, **_k: True)
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="legacy tool card", assignee="sloane")
+        run = kb.claim_task(conn, task_id)
+        assert run is not None
+    monkeypatch.setenv("HERMES_KANBAN_TASK", task_id)
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(run.current_run_id))
+    monkeypatch.setenv("HERMES_PROFILE", "sloane")
+
+    response = json.loads(
+        kt._handle_handoff(
+            {
+                "next_assignee": "aurora",
+                "next_phase": "intent_review",
+                "summary": "Attempted lifecycle transition.",
+                "evidence": {"tests": ["focused"]},
+                "expected_outcome": "Validate the requested behavior.",
+                "recheck_condition": "Card remains under legacy rules.",
+            }
+        )
+    )
+    assert "ok" not in response
+    assert "lifecycle" in response["error"]
 
 
 def test_handoff_tool_rejects_a_caller_who_is_not_the_current_assignee(

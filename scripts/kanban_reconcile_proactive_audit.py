@@ -235,7 +235,8 @@ def main() -> int:
                 )
                 conn.execute(
                     "UPDATE tasks SET status='archived',claim_lock=NULL,"
-                    "claim_expires=NULL,worker_pid=NULL,current_run_id=NULL "
+                    "claim_expires=NULL,worker_pid=NULL,current_run_id=NULL,"
+                    "terminal_outcome=COALESCE(terminal_outcome,'success') "
                     "WHERE id=?",
                     (task_id,),
                 )
@@ -261,7 +262,8 @@ def main() -> int:
                 conn.execute(
                     "UPDATE tasks SET status='done',completed_at=?,claim_lock=NULL,"
                     "claim_expires=NULL,worker_pid=NULL,current_run_id=NULL,"
-                    "block_kind=NULL,consecutive_failures=0,last_failure_error=NULL "
+                    "block_kind=NULL,consecutive_failures=0,last_failure_error=NULL,"
+                    "terminal_outcome='success',terminal_verdict=NULL "
                     "WHERE id=?",
                     (now, task_id),
                 )
