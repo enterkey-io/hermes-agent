@@ -482,7 +482,12 @@ class GatewayStreamConsumer:
             acked = acked[: -len(self.cfg.cursor)]
         self._record_turn_final_payload(acked)
 
-    def _record_turn_final_payload(self, text: str) -> None:
+    def _record_turn_final_payload(
+        self,
+        text: str,
+        *,
+        prefer_stream_ledger: bool = True,
+    ) -> None:
         """Record what the user has actually seen as this turn's final answer.
 
         Normalized the same way ``_send_or_edit`` normalizes outgoing text
@@ -498,7 +503,7 @@ class GatewayStreamConsumer:
         an answer the user already received (#78541).
         """
         source = text or ""
-        if self._turn_split_delivery and self._stream_ledger:
+        if prefer_stream_ledger and self._turn_split_delivery and self._stream_ledger:
             source = self._stream_ledger
         self._delivered_final_text = ensure_closed_code_fences(
             self._clean_for_display(source)
@@ -525,7 +530,7 @@ class GatewayStreamConsumer:
             self._message_id = str(message_id)
         self._final_response_sent = True
         self._final_content_delivered = True
-        self._record_turn_final_payload(text)
+        self._record_turn_final_payload(text, prefer_stream_ledger=False)
 
     def delivered_final_matches(self, final_text: str) -> Optional[bool]:
         """Reconcile the recorded turn-final payload against ``final_text``.
@@ -2067,12 +2072,90 @@ class GatewayStreamConsumer:
         for mid in (getattr(result, "continuation_message_ids", None) or ()):
             self._track_preview_id(mid)
         raw = getattr(result, "raw_response", None) or {}
+        ordered_message_ids: tuple[str, ...] = ()
         if isinstance(raw, dict):
-            for mid in (raw.get("message_ids") or ()):
+            ordered_message_ids = tuple(
+                str(mid) for mid in (raw.get("message_ids") or ()) if mid
+            )
+            for mid in ordered_message_ids:
                 self._track_preview_id(mid)
-        self._record_final_platform_message_ids(
-            tuple(str(mid) for mid in (getattr(result, "continuation_message_ids", None) or ()))
+        if ordered_message_ids:
+            self._record_final_platform_message_ids(
+                ordered_message_ids,
+                include_current_message=False,
+            )
+        else:
+            self._record_final_platform_message_ids(
+                tuple(
+                    str(mid)
+                    for mid in (
+                        getattr(result, "continuation_message_ids", None) or ()
+                    )
+                )
+            )
+
+    def _ingest_partial_overflow_result(self, result: Any, text: str) -> bool:
+        """Adopt an adapter's incomplete split result for fallback recovery."""
+        raw_response = getattr(result, "raw_response", None)
+        if not (
+            isinstance(raw_response, dict)
+            and raw_response.get("partial_overflow")
+        ):
+            return False
+
+        # An adapter delivered the original chunk plus zero or more
+        # continuations, but not the complete response. Some adapters report
+        # this as success and others as failure; the structured marker wins.
+        self._track_preview_ids_from_result(result)
+        continuation_ids = (
+            getattr(result, "continuation_message_ids", ()) or ()
         )
+        if continuation_ids:
+            self._turn_split_delivery = True
+        self._message_id = str(
+            raw_response.get("last_message_id")
+            or result.message_id
+            or self._message_id
+        )
+        delivered_prefix = raw_response.get("delivered_prefix")
+        self._fallback_replace_partial_messages = False
+        if isinstance(delivered_prefix, str) and delivered_prefix:
+            self._last_sent_text = delivered_prefix
+            self._fallback_prefix = delivered_prefix
+            self._fallback_preserve_partial_messages = text.startswith(
+                delivered_prefix
+            )
+        else:
+            # Without an adapter-certified source prefix, the last streaming
+            # preview is not a safe boundary (platform formatting may have
+            # changed it). Send the full final, then remove all partials.
+            self._fallback_prefix = ""
+            self._fallback_preserve_partial_messages = False
+            self._fallback_replace_partial_messages = True
+        self._fallback_final_send = True
+        self._edit_supported = False
+        self._already_sent = True
+        self._final_response_sent = False
+        self._final_content_delivered = False
+        if continuation_ids:
+            self._notify_new_message()
+        return True
+
+    async def recover_external_partial_overflow(
+        self,
+        result: Any,
+        final_text: str,
+    ) -> bool:
+        """Complete an incomplete edit issued by the post-stream gateway."""
+        if not self._ingest_partial_overflow_result(result, final_text):
+            return False
+        await self._send_fallback_final(final_text)
+        if not (self._final_response_sent and self._final_content_delivered):
+            return False
+        # The external edit may contain transformed text that differs from the
+        # original stream ledger, so record the supplied completed payload.
+        self.record_external_final_delivery(final_text, self._message_id)
+        return self.delivered_final_matches(final_text) is True
 
     def _adapter_prefers_fresh_final(self, text: str) -> bool:
         """Return True when the adapter would rather finalize a streamed reply
@@ -2383,50 +2466,7 @@ class GatewayStreamConsumer:
                         content=text,
                         finalize=finalize,
                     )
-                    raw_response = getattr(result, "raw_response", None)
-                    if (
-                        isinstance(raw_response, dict)
-                        and raw_response.get("partial_overflow")
-                    ):
-                        # An adapter delivered the original chunk plus zero or
-                        # more continuations, but not the complete response.
-                        # Some adapters report this as success and others as
-                        # failure; the structured partial marker takes
-                        # precedence over that coarse status bit.
-                        self._track_preview_ids_from_result(result)
-                        continuation_ids = (
-                            getattr(result, "continuation_message_ids", ()) or ()
-                        )
-                        if continuation_ids:
-                            self._turn_split_delivery = True
-                        self._message_id = str(
-                            raw_response.get("last_message_id")
-                            or result.message_id
-                            or self._message_id
-                        )
-                        delivered_prefix = raw_response.get("delivered_prefix")
-                        self._fallback_replace_partial_messages = False
-                        if isinstance(delivered_prefix, str) and delivered_prefix:
-                            self._last_sent_text = delivered_prefix
-                            self._fallback_prefix = delivered_prefix
-                            self._fallback_preserve_partial_messages = text.startswith(
-                                delivered_prefix
-                            )
-                        else:
-                            # Without an adapter-certified source prefix, the
-                            # last streaming preview is not a safe boundary
-                            # (platform formatting may have changed it). Send
-                            # the full final response, then remove all partials.
-                            self._fallback_prefix = ""
-                            self._fallback_preserve_partial_messages = False
-                            self._fallback_replace_partial_messages = True
-                        self._fallback_final_send = True
-                        self._edit_supported = False
-                        self._already_sent = True
-                        self._final_response_sent = False
-                        self._final_content_delivered = False
-                        if continuation_ids:
-                            self._notify_new_message()
+                    if self._ingest_partial_overflow_result(result, text):
                         return False
                     if result.success:
                         self._already_sent = True

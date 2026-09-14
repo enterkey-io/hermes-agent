@@ -45,6 +45,31 @@ def test_final_delivery_metadata_uses_single_or_split_platform_identity():
     }
 
 
+@pytest.mark.parametrize(
+    ("message_id", "continuation_ids"),
+    [
+        ("first", ()),
+        ("third", ("first", "second")),
+    ],
+)
+def test_raw_response_message_ids_are_authoritative_receipt_order(
+    message_id, continuation_ids
+):
+    consumer = GatewayStreamConsumer(adapter=object(), chat_id="chat-1")
+    consumer._message_id = message_id
+    result = SimpleNamespace(
+        message_id=message_id,
+        continuation_message_ids=continuation_ids,
+        raw_response={"message_ids": ["first", "second", "third"]},
+    )
+
+    consumer._track_preview_ids_from_result(result)
+
+    assert consumer.final_delivery_metadata == {
+        "response_identity": consumer.response_identity,
+        "platform_message_ids": ["first", "second", "third"],
+    }
+
 @pytest.mark.asyncio
 async def test_fresh_final_receipt_excludes_deleted_preview_identity():
     adapter = SimpleNamespace(

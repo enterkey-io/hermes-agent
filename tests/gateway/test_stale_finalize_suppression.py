@@ -85,6 +85,33 @@ class FinalizeCaptureAdapter(BasePlatformAdapter):
         return {"id": chat_id}
 
 
+class PartialOverflowReconcileAdapter(FinalizeCaptureAdapter):
+    async def edit_message(
+        self, chat_id, message_id, content, *, finalize: bool = False, metadata=None
+    ) -> SendResult:
+        await super().edit_message(
+            chat_id,
+            message_id,
+            content,
+            finalize=finalize,
+            metadata=metadata,
+        )
+        if finalize and content == FULL_RESPONSE:
+            return SendResult(
+                success=True,
+                message_id="partial-continuation",
+                continuation_message_ids=("partial-continuation",),
+                raw_response={
+                    "partial_overflow": True,
+                    "delivered_chunks": 2,
+                    "total_chunks": 3,
+                    "last_message_id": "partial-continuation",
+                    "delivered_prefix": STREAMED_PREFIX,
+                },
+            )
+        return SendResult(success=True, message_id=message_id)
+
+
 STREAMED_PREFIX = "The photo shows a dog on a beach"
 MISSING_TAIL = " with a red frisbee in its mouth, mid-leap over the surf."
 FULL_RESPONSE = STREAMED_PREFIX + MISSING_TAIL
@@ -158,7 +185,13 @@ def _make_runner(adapter):
     return runner
 
 
-async def _run_streaming_turn(monkeypatch, tmp_path, agent_cls, session_id):
+async def _run_streaming_turn(
+    monkeypatch,
+    tmp_path,
+    agent_cls,
+    session_id,
+    adapter_cls=FinalizeCaptureAdapter,
+):
     import yaml
 
     (tmp_path / "config.yaml").write_text(
@@ -183,7 +216,7 @@ async def _run_streaming_turn(monkeypatch, tmp_path, agent_cls, session_id):
     fake_run_agent.AIAgent = agent_cls
     monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
 
-    adapter = FinalizeCaptureAdapter()
+    adapter = adapter_cls()
     runner = _make_runner(adapter)
     gateway_run = importlib.import_module("gateway.run")
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
@@ -238,6 +271,22 @@ async def test_stale_finalize_does_not_suppress_complete_response(
         assert any(
             e["content"] == FULL_RESPONSE and e["finalize"] for e in adapter.edits
         ), "already_sent=True but no edit carried the complete response"
+
+
+@pytest.mark.asyncio
+async def test_partial_stale_reconciliation_recovers_missing_tail(
+    monkeypatch, tmp_path
+):
+    adapter, result = await _run_streaming_turn(
+        monkeypatch,
+        tmp_path,
+        StalePrefixAgent,
+        "sess-71643-partial-reconcile",
+        adapter_cls=PartialOverflowReconcileAdapter,
+    )
+
+    assert result.get("already_sent") is True
+    assert [send["content"] for send in adapter.sent][-1] == MISSING_TAIL.lstrip()
 
 
 @pytest.mark.asyncio

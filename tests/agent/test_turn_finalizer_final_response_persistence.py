@@ -1,3 +1,5 @@
+import json
+from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -326,6 +328,76 @@ def test_visible_final_is_signaled_after_persist_and_before_micro_compaction(
     ]
 
 
+def test_post_micro_compaction_rewrites_enabled_json_snapshot(monkeypatch, tmp_path):
+    from run_agent import AIAgent
+
+    monkeypatch.setattr("hermes_cli.lifecycle.invoke_hook", lambda *_a, **_kw: [])
+    agent = FakeAgent()
+    agent._session_json_enabled = True
+    agent.logs_dir = tmp_path
+    agent.session_start = datetime.now()
+    agent.platform = "telegram"
+    agent._cached_system_prompt = ""
+    agent.tools = []
+    agent.verbose_logging = False
+    agent._clean_session_content = lambda content: content
+    agent._redact_message_content = lambda content: content
+    agent._save_session_log = AIAgent._save_session_log.__get__(agent)
+
+    def persist(
+        messages,
+        _conversation_history,
+        *,
+        allow_json_snapshot_shrink=False,
+    ):
+        if allow_json_snapshot_shrink:
+            agent._save_session_log(messages, allow_shrink=True)
+        else:
+            agent._save_session_log(messages)
+
+    agent._persist_session = persist
+
+    def micro_compact(messages):
+        return messages[-2:]
+
+    agent.context_compressor = SimpleNamespace(
+        last_prompt_tokens=0,
+        _micro_compact_enabled=True,
+        _micro_compact=micro_compact,
+    )
+    messages = [
+        {"role": "user", "content": "older question"},
+        {"role": "assistant", "content": "older answer"},
+        {"role": "user", "content": "current question"},
+        {"role": "assistant", "content": "current answer"},
+    ]
+
+    finalize_turn(
+        agent,
+        final_response="current answer",
+        api_call_count=1,
+        interrupted=False,
+        failed=False,
+        messages=messages,
+        conversation_history=[],
+        effective_task_id="task",
+        turn_id="turn",
+        user_message="current question",
+        original_user_message="current question",
+        _should_review_memory=False,
+        _turn_exit_reason="text_response(final)",
+    )
+
+    snapshot = json.loads(
+        (tmp_path / "session_sess-test.json").read_text(encoding="utf-8")
+    )
+    assert snapshot["message_count"] == 2
+    assert [message["content"] for message in snapshot["messages"]] == [
+        "current question",
+        "current answer",
+    ]
+
+
 def test_current_assistant_row_identity_never_falls_back_to_prior_turn(monkeypatch):
     monkeypatch.setattr("hermes_cli.lifecycle.invoke_hook", lambda *_a, **_kw: [])
     agent = FakeAgent()
@@ -360,10 +432,11 @@ def test_post_micro_compaction_persist_failure_is_reported(monkeypatch):
     agent = FakeAgent()
     persist_calls = 0
 
-    def persist(*_args):
+    def persist(*_args, **kwargs):
         nonlocal persist_calls
         persist_calls += 1
         if persist_calls == 2:
+            assert kwargs == {"allow_json_snapshot_shrink": True}
             raise RuntimeError("mirror write failed")
 
     def micro_compact(messages):

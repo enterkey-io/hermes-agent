@@ -672,7 +672,11 @@ def finalize_turn(
                     # already. This refreshes the JSON mirror and retains the
                     # existing append-only fallback when that archive failed.
                     try:
-                        agent._persist_session(messages, conversation_history)
+                        agent._persist_session(
+                            messages,
+                            conversation_history,
+                            allow_json_snapshot_shrink=True,
+                        )
                     except Exception as _post_compact_persist_err:
                         _cleanup_errors.append(
                             "persist_session_after_micro_compaction: "

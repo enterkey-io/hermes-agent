@@ -532,6 +532,31 @@ class TestSessionJsonSnapshotOptIn:
             "Opt-in writer must produce session_{sid}.json under logs_dir"
         )
 
+    def test_save_session_log_only_shrinks_for_explicit_compaction(self, agent, tmp_path):
+        agent._session_json_enabled = True
+        agent.logs_dir = tmp_path
+        fuller = [
+            {"role": "user", "content": "older question"},
+            {"role": "assistant", "content": "older answer"},
+            {"role": "user", "content": "current question"},
+            {"role": "assistant", "content": "current answer"},
+        ]
+        compacted = fuller[-2:]
+        expected = tmp_path / f"session_{agent.session_id}.json"
+
+        agent._save_session_log(fuller)
+        agent._save_session_log(compacted)
+        guarded = json.loads(expected.read_text(encoding="utf-8"))
+        assert guarded["message_count"] == 4
+
+        agent._save_session_log(compacted, allow_shrink=True)
+        rewritten = json.loads(expected.read_text(encoding="utf-8"))
+        assert rewritten["message_count"] == 2
+        assert [message["content"] for message in rewritten["messages"]] == [
+            "current question",
+            "current answer",
+        ]
+
     def test_logs_dir_retained_for_request_dumps(self, agent):
         # logs_dir is kept unconditionally because
         # agent_runtime_helpers.dump_api_request_debug still writes

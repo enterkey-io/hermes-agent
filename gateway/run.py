@@ -29002,6 +29002,30 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         return False
             return False
 
+        async def _recover_partial_final_edit(
+            consumer,
+            result,
+            final_text: str,
+        ) -> Optional[bool]:
+            """Return None for complete edits, else partial recovery outcome."""
+            raw_response = getattr(result, "raw_response", None)
+            if not (
+                isinstance(raw_response, dict)
+                and raw_response.get("partial_overflow")
+            ):
+                return None
+            recover = getattr(consumer, "recover_external_partial_overflow", None)
+            if not callable(recover):
+                return False
+            try:
+                return await recover(result, final_text) is True
+            except Exception:
+                logger.warning(
+                    "Post-stream partial-overflow recovery failed",
+                    exc_info=True,
+                )
+                return False
+
         try:
             # Run in thread pool to not block.  Use an *inactivity*-based
             # timeout instead of a wall-clock limit: the agent can run for
@@ -29861,7 +29885,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             content=_final,
                             finalize=True,
                         )
-                        if getattr(_reconcile_res, "success", True):
+                        _partial_recovered = await _recover_partial_final_edit(
+                            _sc,
+                            _reconcile_res,
+                            _final,
+                        )
+                        if _partial_recovered is True:
+                            response["already_sent"] = True
+                            logger.info(
+                                "Recovered partial stale-finalize edit for "
+                                "session %s.",
+                                session_key or "?",
+                            )
+                        elif (
+                            _partial_recovered is None
+                            and getattr(_reconcile_res, "success", True)
+                        ):
                             response["already_sent"] = True
                             _sc.record_external_final_delivery(
                                 _final,
@@ -29899,7 +29938,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             content=response["final_response"],
                             finalize=True,
                         )
-                        if getattr(_edit_res, "success", True):
+                        _partial_recovered = await _recover_partial_final_edit(
+                            _sc,
+                            _edit_res,
+                            response["final_response"],
+                        )
+                        if _partial_recovered is True:
+                            response["already_sent"] = True
+                            logger.info(
+                                "Recovered partial transformed final edit for "
+                                "session %s.",
+                                session_key or "?",
+                            )
+                        elif (
+                            _partial_recovered is None
+                            and getattr(_edit_res, "success", True)
+                        ):
                             response["already_sent"] = True
                             _sc.record_external_final_delivery(
                                 response["final_response"],

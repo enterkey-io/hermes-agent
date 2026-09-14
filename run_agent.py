@@ -1927,7 +1927,13 @@ class AIAgent:
                 if timestamp is not None:
                     msg["timestamp"] = timestamp
 
-    def _persist_session(self, messages: List[Dict], conversation_history: List[Dict] = None):
+    def _persist_session(
+        self,
+        messages: List[Dict],
+        conversation_history: List[Dict] = None,
+        *,
+        allow_json_snapshot_shrink: bool = False,
+    ):
         """Save session state to both JSON log and SQLite on any exit path.
 
         Ensures conversations are never lost, even on errors or early returns.
@@ -1951,7 +1957,10 @@ class AIAgent:
         def _persist_and_drain() -> None:
             self._drop_trailing_empty_response_scaffolding(messages)
             self._session_messages = messages
-            self._save_session_log(messages)
+            self._save_session_log(
+                messages,
+                allow_shrink=allow_json_snapshot_shrink,
+            )
             self._flush_messages_to_session_db(messages, conversation_history)
             # Drain async token-accounting deltas at every persist point (turn
             # finalize + error exits) so a crash after this line loses at most
@@ -3094,7 +3103,12 @@ class AIAgent:
             return redacted
         return content
 
-    def _save_session_log(self, messages: List[Dict[str, Any]] = None):
+    def _save_session_log(
+        self,
+        messages: List[Dict[str, Any]] = None,
+        *,
+        allow_shrink: bool = False,
+    ):
         """Optional per-session JSON snapshot writer.
 
         Gated by ``sessions.write_json_snapshots`` (default False).  state.db
@@ -3107,7 +3121,8 @@ class AIAgent:
         ``_clean_session_content`` to convert REASONING_SCRATCHPAD to think
         tags).  The truncation guard ("don't overwrite a larger log with
         fewer messages") is preserved so resume + branch don't clobber a
-        fuller existing snapshot.
+        fuller existing snapshot. ``allow_shrink`` is reserved for a caller
+        that just completed an in-place compaction of this same live session.
         """
         if not getattr(self, "_session_json_enabled", False):
             return
@@ -3154,7 +3169,7 @@ class AIAgent:
                 try:
                     existing = json.loads(log_file.read_text(encoding="utf-8"))
                     existing_count = existing.get("message_count", len(existing.get("messages", [])))
-                    if existing_count > len(cleaned):
+                    if existing_count > len(cleaned) and not allow_shrink:
                         logging.debug(
                             "Skipping session log overwrite: existing has %d messages, current has %d",
                             existing_count, len(cleaned),

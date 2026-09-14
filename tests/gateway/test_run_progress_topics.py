@@ -161,6 +161,35 @@ class RejectedFinalEditProgressCaptureAdapter(MetadataEditProgressCaptureAdapter
         return SendResult(success=False, error="platform rejected final edit")
 
 
+class PartialOverflowFinalEditProgressCaptureAdapter(
+    MetadataEditProgressCaptureAdapter
+):
+    async def edit_message(
+        self, chat_id, message_id, content, *, finalize: bool = False, metadata=None
+    ) -> SendResult:
+        await super().edit_message(
+            chat_id,
+            message_id,
+            content,
+            finalize=finalize,
+            metadata=metadata,
+        )
+        if finalize and "[plugin appended this]" in content:
+            return SendResult(
+                success=True,
+                message_id="continuation-1",
+                continuation_message_ids=("continuation-1",),
+                raw_response={
+                    "partial_overflow": True,
+                    "delivered_chunks": 2,
+                    "total_chunks": 3,
+                    "last_message_id": "continuation-1",
+                    "delivered_prefix": "original answer\n\n",
+                },
+            )
+        return SendResult(success=True, message_id=message_id)
+
+
 class DraftProgressCaptureAdapter(ProgressCaptureAdapter):
     def __init__(self, platform=Platform.TELEGRAM):
         super().__init__(platform=platform)
@@ -1453,6 +1482,30 @@ async def test_rejected_transformed_final_edit_falls_through_to_normal_send(
     assert result.get("already_sent") is not True
     assert "gateway_delivery" not in result.get("display_metadata", {})
     assert any("[plugin appended this]" in edit["content"] for edit in adapter.edits)
+
+
+@pytest.mark.asyncio
+async def test_partial_transformed_final_edit_recovers_missing_tail(
+    monkeypatch, tmp_path
+):
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        TransformedStreamAgent,
+        session_id="sess-partial-transformed-stream",
+        config_data={
+            "display": {"tool_progress": "off", "interim_assistant_messages": False},
+            "streaming": {"enabled": True, "edit_interval": 0.01, "buffer_threshold": 1},
+        },
+        platform=Platform.DISCORD,
+        chat_id="discord-1",
+        chat_type="dm",
+        thread_id=None,
+        adapter_cls=PartialOverflowFinalEditProgressCaptureAdapter,
+    )
+
+    assert result.get("already_sent") is True
+    assert [send["content"] for send in adapter.sent][-1] == "[plugin appended this]"
 
 
 @pytest.mark.asyncio
