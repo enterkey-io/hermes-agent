@@ -102,6 +102,30 @@ from utils import base_url_host_matches, env_var_enabled
 logger = logging.getLogger(__name__)
 
 
+def _evaluate_kanban_stop_guard(
+    messages: List[Dict[str, Any]], attempts: int
+) -> tuple[Optional[str], bool, Optional[str]]:
+    """Return fresh stop-guard state, failing open as one atomic evaluation."""
+    try:
+        from agent.kanban_stop import (
+            build_kanban_stop_nudge,
+            kanban_stop_requires_failure_recovery,
+            latest_operational_failure,
+        )
+
+        return (
+            build_kanban_stop_nudge(messages=messages, attempts=attempts),
+            kanban_stop_requires_failure_recovery(
+                messages=messages,
+                attempts=attempts,
+            ),
+            latest_operational_failure(messages),
+        )
+    except Exception:
+        logger.debug("kanban stop-loop check failed", exc_info=True)
+        return None, False, None
+
+
 def _final_return_budget_failure(error):
     from agent.coordination_budget import current_coordination_execution
 
@@ -8142,28 +8166,12 @@ def run_conversation(
                 # report") and stop with finish_reason=stop — a clean exit
                 # that the dispatcher records as protocol_violation. Nudge
                 # once or twice before allowing that exit.
-                try:
-                    from agent.kanban_stop import (
-                        build_kanban_stop_nudge,
-                        kanban_stop_requires_failure_recovery,
-                        latest_operational_failure,
-                    )
-
-                    _kanban_attempts = getattr(agent, "_kanban_stop_nudges", 0)
-                    _kanban_nudge = build_kanban_stop_nudge(
-                        messages=messages,
-                        attempts=_kanban_attempts,
-                    )
-                    _kanban_recovery_required = (
-                        kanban_stop_requires_failure_recovery(
-                            messages=messages,
-                            attempts=_kanban_attempts,
-                        )
-                    )
-                    _kanban_failure_reason = latest_operational_failure(messages)
-                except Exception:
-                    logger.debug("kanban stop-loop check failed", exc_info=True)
-                    _kanban_nudge = None
+                _kanban_attempts = getattr(agent, "_kanban_stop_nudges", 0)
+                (
+                    _kanban_nudge,
+                    _kanban_recovery_required,
+                    _kanban_failure_reason,
+                ) = _evaluate_kanban_stop_guard(messages, _kanban_attempts)
 
                 if _kanban_recovery_required:
                     from agent.turn_finalizer import (

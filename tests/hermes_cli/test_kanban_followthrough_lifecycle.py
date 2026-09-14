@@ -215,6 +215,10 @@ def test_failed_review_requeues_implementer_reports_once_then_fresh_pass_closes(
             expected_run_id=acceptance.current_run_id,
         )
 
+        resolved_graph = kb.task_graph_status(conn, root_id)
+        assert resolved_graph["overall_state"] == "completed"
+        assert resolved_graph["failed_reviews"] == []
+
         assert kb.begin_coordination_final_return_if_ready(conn, request.id, now=200)
         pending = _events(conn, root_id, "coordination_return_pending")
         assert len(pending) == 1

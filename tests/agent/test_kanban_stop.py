@@ -187,6 +187,38 @@ def test_nudge_opt_out_does_not_allow_advisory_operational_failure_exit(
     ) is True
 
 
+def test_conversation_stop_guard_exception_clears_prior_recovery_state(monkeypatch):
+    from agent import conversation_loop
+    from agent import kanban_stop
+
+    monkeypatch.setattr(kanban_stop, "build_kanban_stop_nudge", lambda **_k: None)
+    monkeypatch.setattr(
+        kanban_stop,
+        "kanban_stop_requires_failure_recovery",
+        lambda **_k: True,
+    )
+    monkeypatch.setattr(
+        kanban_stop,
+        "latest_operational_failure",
+        lambda _messages: "prior failure",
+    )
+    assert conversation_loop._evaluate_kanban_stop_guard([], 0) == (
+        None,
+        True,
+        "prior failure",
+    )
+
+    def fail_check(**_kwargs):
+        raise RuntimeError("guard unavailable")
+
+    monkeypatch.setattr(kanban_stop, "build_kanban_stop_nudge", fail_check)
+    assert conversation_loop._evaluate_kanban_stop_guard([], 1) == (
+        None,
+        False,
+        None,
+    )
+
+
 def test_nudge_when_no_terminal_tool(clear_kanban_env):
     clear_kanban_env.setenv("HERMES_KANBAN_TASK", "t_46be8aa5")
     messages = [

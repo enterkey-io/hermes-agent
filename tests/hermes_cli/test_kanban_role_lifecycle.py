@@ -236,6 +236,80 @@ def test_complete_same_card_software_lifecycle(lifecycle_env, monkeypatch) -> No
         ]
 
 
+def test_changes_requested_invalidates_prior_review_evidence(
+    lifecycle_env, monkeypatch
+) -> None:
+    monkeypatch.setattr(kb, "lifecycle_enforcement_enabled", lambda *_a, **_k: True)
+    with kb.connect() as conn:
+        task_id = _managed_task(
+            conn,
+            title="superseded review evidence",
+            intent_validator=None,
+            activation_owner=None,
+            idempotency_key="superseded-review-evidence-v1",
+        )
+        implementation = kb.claim_task(conn, task_id)
+        assert implementation is not None
+        assert kb.request_review(
+            conn,
+            task_id,
+            summary="First candidate ready.",
+            metadata={"candidate_revision": "old"},
+            expected_run_id=implementation.current_run_id,
+        )
+        review = kb.claim_review_task(conn, task_id)
+        assert review is not None
+        assert kb.pass_review(
+            conn,
+            task_id,
+            summary="First candidate passed technical review.",
+            metadata={"verdict": "pass", "candidate_revision": "old"},
+            expected_run_id=review.current_run_id,
+        ) == (True, "aurora")
+
+        intent = kb.claim_task(conn, task_id)
+        assert intent is not None
+        assert kb.request_changes(
+            conn,
+            task_id,
+            reason="Intent review requires a materially revised candidate.",
+            expected_run_id=intent.current_run_id,
+        ) == (True, "sloane")
+        conn.execute(
+            "UPDATE tasks SET intent_validator = NULL, activation_owner = NULL "
+            "WHERE id = ?",
+            (task_id,),
+        )
+        conn.commit()
+
+        revised = kb.claim_task(conn, task_id)
+        assert revised is not None
+        assert kb.handoff_task(
+            conn,
+            task_id,
+            next_assignee="aurora",
+            next_phase="live_acceptance",
+            summary="Attempted direct release of the revised candidate.",
+            evidence={"candidate_revision": "new"},
+            expected_outcome="Accept only after fresh review.",
+            recheck_condition="Fresh technical review exists.",
+            expected_run_id=revised.current_run_id,
+        ) == (True, "aurora")
+        live = kb.claim_task(conn, task_id)
+        assert live is not None
+        with pytest.raises(
+            kb.LifecycleEnforcementError,
+            match="technical review PASS",
+        ):
+            kb.complete_task(
+                conn,
+                task_id,
+                summary="Must not accept superseded review evidence.",
+                metadata={"live_evidence": ["new candidate canary"]},
+                expected_run_id=live.current_run_id,
+            )
+
+
 def test_review_and_intent_failures_return_to_recorded_implementer(
     lifecycle_env, monkeypatch
 ) -> None:

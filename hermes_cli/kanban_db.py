@@ -7222,12 +7222,19 @@ def task_graph_status(conn: sqlite3.Connection, task_id: str) -> dict[str, Any]:
     failed_reviews: list[dict[str, Any]] = []
     for row in task_rows:
         event = conn.execute(
-            "SELECT payload, run_id, created_at FROM task_events "
+            "SELECT id, payload, run_id, created_at FROM task_events "
             "WHERE task_id = ? AND kind = 'changes_requested' "
             "ORDER BY id DESC LIMIT 1",
             (row["id"],),
         ).fetchone()
         if event is None:
+            continue
+        resolved = conn.execute(
+            "SELECT 1 FROM task_events WHERE task_id = ? AND id > ? "
+            "AND kind IN ('review_passed', 'completed', 'archived') LIMIT 1",
+            (row["id"], int(event["id"])),
+        ).fetchone()
+        if resolved is not None:
             continue
         try:
             payload = json.loads(event["payload"] or "{}")
@@ -8929,10 +8936,12 @@ def _lifecycle_event_exists(
     kind: str,
     *,
     source_phase: Optional[str] = None,
+    after_event_id: int = 0,
 ) -> bool:
     rows = conn.execute(
-        "SELECT payload FROM task_events WHERE task_id = ? AND kind = ? ORDER BY id",
-        (task_id, kind),
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind = ? "
+        "AND id > ? ORDER BY id",
+        (task_id, kind, int(after_event_id)),
     ).fetchall()
     for row in rows:
         try:
@@ -8968,27 +8977,47 @@ def _validate_lifecycle_completion(
         raise LifecycleEnforcementError(
             "completion requires live_acceptance or closure phase"
         )
+    invalidated_after = conn.execute(
+        "SELECT COALESCE(MAX(id), 0) FROM task_events "
+        "WHERE task_id = ? AND kind = 'changes_requested'",
+        (task.id,),
+    ).fetchone()[0]
     if task.technical_reviewer and not _lifecycle_event_exists(
-        conn, task.id, "review_passed"
+        conn,
+        task.id,
+        "review_passed",
+        after_event_id=int(invalidated_after),
     ):
         raise LifecycleEnforcementError(
             "completion requires technical review PASS evidence"
         )
     if task.intent_validator and not _lifecycle_event_exists(
-        conn, task.id, "handoff_created", source_phase="intent_review"
+        conn,
+        task.id,
+        "handoff_created",
+        source_phase="intent_review",
+        after_event_id=int(invalidated_after),
     ):
         raise LifecycleEnforcementError(
             "completion requires intent review evidence"
         )
     if task.activation_owner and not _lifecycle_event_exists(
-        conn, task.id, "handoff_created", source_phase="activation"
+        conn,
+        task.id,
+        "handoff_created",
+        source_phase="activation",
+        after_event_id=int(invalidated_after),
     ):
         raise LifecycleEnforcementError(
             "completion requires activation and canary evidence"
         )
     live_evidence = metadata.get("live_evidence") if isinstance(metadata, dict) else None
     if not live_evidence and not _lifecycle_event_exists(
-        conn, task.id, "handoff_created", source_phase="live_acceptance"
+        conn,
+        task.id,
+        "handoff_created",
+        source_phase="live_acceptance",
+        after_event_id=int(invalidated_after),
     ):
         raise LifecycleEnforcementError(
             "completion requires metadata.live_evidence or a live-acceptance handoff"
