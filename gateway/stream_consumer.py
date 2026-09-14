@@ -264,6 +264,9 @@ class GatewayStreamConsumer:
         # Telegram overflow delivery.  In that case the already-visible prefix
         # is intentional content, not a stale preview to delete.
         self._fallback_preserve_partial_messages = False
+        # A structured partial overflow without an exact adapter-input prefix
+        # must replace all partial chunks with the complete response.
+        self._fallback_replace_partial_messages = False
         # Keep fallback recovery responsive. Telegram's adapter already bounds
         # edit retries at five seconds; a final-delivery fallback must not hold
         # the stream task through a longer flood cooldown before retrying.
@@ -651,6 +654,7 @@ class GatewayStreamConsumer:
         self._fallback_final_send = False
         self._fallback_prefix = ""
         self._fallback_preserve_partial_messages = False
+        self._fallback_replace_partial_messages = False
         self._segment_preview_message_ids = set()
         self._platform_message_ids = []
         # #29346: a tool/segment boundary means what we delivered was an interim
@@ -1425,6 +1429,8 @@ class GatewayStreamConsumer:
 
     def _continuation_text(self, final_text: str) -> str:
         """Return only the part of final_text the user has not already seen."""
+        if self._fallback_replace_partial_messages:
+            return final_text
         prefix = self._fallback_prefix or self._visible_prefix()
         if prefix and final_text.startswith(prefix):
             return final_text[len(prefix):].lstrip(' \t')
@@ -1600,6 +1606,7 @@ class GatewayStreamConsumer:
         chunks = self._split_text_chunks(continuation, safe_limit, len_fn=_len_fn)
 
         stale_message_id = self._message_id  # partial message to clean up
+        stale_message_ids = tuple(self._platform_message_ids)
         replaces_preview = (
             continuation == final_text
             and not self._fallback_preserve_partial_messages
@@ -1674,20 +1681,25 @@ class GatewayStreamConsumer:
         # active, bot lacks permission, message too old to delete), the
         # partial remains but at least the full answer was delivered.
         if (
-            stale_message_id
-            and stale_message_id != last_message_id
+            (stale_message_ids or stale_message_id)
             and not self._fallback_preserve_partial_messages
             and continuation == final_text
         ):
             delete_fn = getattr(self.adapter, "delete_message", None)
             if delete_fn is not None:
-                try:
-                    await delete_fn(self.chat_id, stale_message_id)
-                except Exception as e:
-                    logger.debug(
-                        "Fallback partial cleanup failed (%s): %s",
-                        stale_message_id, e,
-                    )
+                cleanup_ids = list(stale_message_ids)
+                if stale_message_id and stale_message_id not in cleanup_ids:
+                    cleanup_ids.append(stale_message_id)
+                for partial_message_id in cleanup_ids:
+                    if not partial_message_id or partial_message_id == last_message_id:
+                        continue
+                    try:
+                        await delete_fn(self.chat_id, partial_message_id)
+                    except Exception as e:
+                        logger.debug(
+                            "Fallback partial cleanup failed (%s): %s",
+                            partial_message_id, e,
+                        )
 
         self._message_id = last_message_id
         self._already_sent = True
@@ -1703,6 +1715,7 @@ class GatewayStreamConsumer:
         self._last_sent_text = chunks[-1]
         self._fallback_prefix = ""
         self._fallback_preserve_partial_messages = False
+        self._fallback_replace_partial_messages = False
 
     async def _send_empty_fallback_final(self, final_text: str) -> str:
         """Commit a completed answer after Telegram finalization fails.
@@ -1785,6 +1798,7 @@ class GatewayStreamConsumer:
         self._last_sent_text = final_text
         self._fallback_prefix = ""
         self._fallback_preserve_partial_messages = False
+        self._fallback_replace_partial_messages = False
         self._notify_new_message()
         return "delivered"
 
@@ -2391,6 +2405,7 @@ class GatewayStreamConsumer:
                             or self._message_id
                         )
                         delivered_prefix = raw_response.get("delivered_prefix")
+                        self._fallback_replace_partial_messages = False
                         if isinstance(delivered_prefix, str) and delivered_prefix:
                             self._last_sent_text = delivered_prefix
                             self._fallback_prefix = delivered_prefix
@@ -2398,8 +2413,13 @@ class GatewayStreamConsumer:
                                 delivered_prefix
                             )
                         else:
-                            self._fallback_prefix = self._visible_prefix()
+                            # Without an adapter-certified source prefix, the
+                            # last streaming preview is not a safe boundary
+                            # (platform formatting may have changed it). Send
+                            # the full final response, then remove all partials.
+                            self._fallback_prefix = ""
                             self._fallback_preserve_partial_messages = False
+                            self._fallback_replace_partial_messages = True
                         self._fallback_final_send = True
                         self._edit_supported = False
                         self._already_sent = True

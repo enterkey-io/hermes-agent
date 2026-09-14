@@ -2506,7 +2506,9 @@ class SendResult:
     # consumer treats that structured marker as incomplete regardless of this
     # result's coarse success bit. Both expose delivered_chunks, total_chunks,
     # last_message_id, and continuation_message_ids; adapters also expose
-    # delivered_prefix when they can identify the exact visible source prefix.
+    # delivered_prefix only when they can identify an exact prefix of the
+    # adapter input. If formatting prevents that proof, the consumer replaces
+    # and cleans up every landed partial message after a successful full resend.
     retryable: bool = False  # True for transient connection errors — base will retry automatically
     # Server-requested retry delay in seconds (e.g. Telegram FloodWait retry_after).
     # When present, _send_with_retry() honors this instead of its default backoff.

@@ -16,13 +16,16 @@ The fix mirrors the proven Telegram contract (and its #48648 lesson):
   in ``message_id`` plus every continuation in ``continuation_message_ids``.
 """
 
+import re
 import sys
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 
 from gateway.config import PlatformConfig
+from gateway.platforms.base import SendResult
+from gateway.stream_consumer import GatewayStreamConsumer
 
 
 def _ensure_discord_mock():
@@ -244,14 +247,18 @@ class TestFinalOverflowSplits:
     @pytest.mark.asyncio
     async def test_later_continuation_failure_reports_partial_overflow(self):
         adapter = _make_adapter()
+        landed_chunks = []
         msg = SimpleNamespace(
             id=42,
             to_reference=MagicMock(return_value=SimpleNamespace(kind="ref")),
-            edit=AsyncMock(),
+            edit=AsyncMock(
+                side_effect=lambda *, content: landed_chunks.append(content)
+            ),
         )
 
         def send_effect(index, content, reference):
             if index == 1:
+                landed_chunks.append(content)
                 return SimpleNamespace(id=9001)
             raise RuntimeError("discord continuation failed")
 
@@ -266,13 +273,97 @@ class TestFinalOverflowSplits:
         assert result.success is True
         assert result.message_id == "9001"
         assert result.continuation_message_ids == ("9001",)
+        expected_prefix = "".join(
+            re.sub(r" \(\d+/\d+\)$", "", chunk) for chunk in landed_chunks
+        )
         assert result.raw_response == {
             "partial_overflow": True,
             "delivered_chunks": 2,
             "total_chunks": 5,
             "last_message_id": "9001",
+            "delivered_prefix": expected_prefix,
             "continuation_message_ids": ("9001",),
         }
+        delivered_prefix = result.raw_response["delivered_prefix"]
+        assert delivered_prefix
+        assert ("q" * 8000).startswith(delivered_prefix)
+        assert len(delivered_prefix) < 8000
+
+        consumer_adapter = MagicMock()
+        consumer_adapter.MAX_MESSAGE_LENGTH = 4096
+        consumer_adapter.edit_message = AsyncMock(return_value=result)
+        consumer_adapter.send = AsyncMock(
+            return_value=SendResult(success=True, message_id="tail-1")
+        )
+        consumer_adapter.delete_message = AsyncMock(return_value=True)
+        consumer = GatewayStreamConsumer(consumer_adapter, "555")
+        consumer._message_id = "42"
+        consumer._last_sent_text = "q" * 100
+        consumer._platform_message_ids = ["42"]
+
+        ok = await consumer._send_or_edit("q" * 8000, finalize=True)
+
+        assert ok is False
+        await consumer._send_fallback_final("q" * 8000)
+        sent_tail = "".join(
+            call.kwargs["content"] for call in consumer_adapter.send.await_args_list
+        )
+        assert sent_tail == "q" * (8000 - len(delivered_prefix))
+        consumer_adapter.delete_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_transformed_partial_overflow_replaces_every_landed_chunk(self):
+        adapter = _make_adapter()
+        msg = SimpleNamespace(
+            id=42,
+            to_reference=MagicMock(return_value=SimpleNamespace(kind="ref")),
+            edit=AsyncMock(),
+        )
+
+        def send_effect(index, content, reference):
+            if index == 1:
+                return SimpleNamespace(id=9001)
+            raise RuntimeError("discord continuation failed")
+
+        _wire_channel(adapter, original_msg=msg, send_side_effect=send_effect)
+        rows = "\n".join(f"| row-{index} | {'x' * 80} |" for index in range(120))
+        content = "| Name | Value |\n| --- | --- |\n" + rows
+
+        result = await adapter.edit_message("555", "42", content, finalize=True)
+
+        assert result.raw_response["partial_overflow"] is True
+        assert "delivered_prefix" not in result.raw_response
+        assert result.continuation_message_ids == ("9001",)
+
+        send_index = 0
+
+        async def send_tail(**kwargs):
+            nonlocal send_index
+            send_index += 1
+            return SendResult(success=True, message_id=f"tail-{send_index}")
+
+        consumer_adapter = MagicMock()
+        consumer_adapter.MAX_MESSAGE_LENGTH = 4096
+        consumer_adapter.edit_message = AsyncMock(return_value=result)
+        consumer_adapter.send = AsyncMock(side_effect=send_tail)
+        consumer_adapter.delete_message = AsyncMock(return_value=True)
+        consumer = GatewayStreamConsumer(consumer_adapter, "555")
+        consumer._message_id = "42"
+        consumer._last_sent_text = content[:500]
+        consumer._platform_message_ids = ["42"]
+
+        assert await consumer._send_or_edit(content, finalize=True) is False
+        await consumer._send_fallback_final(content)
+
+        sent_chunks = [
+            item.kwargs["content"] for item in consumer_adapter.send.await_args_list
+        ]
+        assert sent_chunks[0].startswith("| Name | Value |\n| --- | --- |")
+        assert "| row-0 |" in sent_chunks[0]
+        assert "| row-119 |" in sent_chunks[-1]
+        consumer_adapter.delete_message.assert_has_awaits(
+            [call("555", "42"), call("555", "9001")]
+        )
 
 
 # --------------------------------------------------------------------------- #

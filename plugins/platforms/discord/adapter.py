@@ -3886,6 +3886,7 @@ class DiscordAdapter(BasePlatformAdapter):
 
         # Step 2 — send each remaining chunk threaded as a reply to the prior.
         continuation_ids: list[str] = []
+        delivered_chunks = [chunks[0]]
         delivered = 1
         prev_msg = msg
         for chunk in chunks[1:]:
@@ -3919,20 +3920,33 @@ class DiscordAdapter(BasePlatformAdapter):
                         self.name, delivered, len(chunks), retry_err,
                     )
                     last_id = continuation_ids[-1] if continuation_ids else message_id
+                    delivered_prefix = "".join(
+                        re.sub(r" \(\d+/\d+\)$", "", delivered)
+                        for delivered in delivered_chunks
+                    )
+                    raw_response = {
+                        "partial_overflow": True,
+                        "delivered_chunks": delivered,
+                        "total_chunks": len(chunks),
+                        "last_message_id": last_id,
+                        "continuation_message_ids": tuple(continuation_ids),
+                    }
+                    # Formatting tables and balancing code fences can make the
+                    # visible prefix differ from the adapter input.  Expose a
+                    # prefix only when it is an exact source prefix; otherwise
+                    # the consumer replaces every partial message after a
+                    # successful full resend.
+                    if delivered_prefix and content.startswith(delivered_prefix):
+                        raw_response["delivered_prefix"] = delivered_prefix
                     return SendResult(
                         success=True,
                         message_id=last_id,
                         continuation_message_ids=tuple(continuation_ids),
-                        raw_response={
-                            "partial_overflow": True,
-                            "delivered_chunks": delivered,
-                            "total_chunks": len(chunks),
-                            "last_message_id": last_id,
-                            "continuation_message_ids": tuple(continuation_ids),
-                        },
+                        raw_response=raw_response,
                     )
             new_id = str(sent.id)
             continuation_ids.append(new_id)
+            delivered_chunks.append(chunk)
             delivered += 1
             prev_msg = sent
 
