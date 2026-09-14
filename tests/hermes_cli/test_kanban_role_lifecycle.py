@@ -1522,11 +1522,11 @@ def test_handoff_receiver_is_dispatched_once_with_mandatory_lifecycle_skill(
         ]
 
 
-def test_lifecycle_safety_controls_default_off() -> None:
+def test_lifecycle_safety_controls_default_on_for_opted_in_cards() -> None:
     from hermes_cli.config_defaults import DEFAULT_CONFIG
 
-    assert DEFAULT_CONFIG["kanban"]["lifecycle_enforcement"] is False
-    assert DEFAULT_CONFIG["kanban"]["lifecycle_observer"] is False
+    assert DEFAULT_CONFIG["kanban"]["lifecycle_enforcement"] is True
+    assert DEFAULT_CONFIG["kanban"]["lifecycle_observer"] is True
 
 
 def test_complete_tool_rejects_runtime_profile_that_is_not_closure_owner(

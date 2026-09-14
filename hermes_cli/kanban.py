@@ -342,6 +342,15 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_create.add_argument("--assignee", default=None, help="Profile name to assign")
     p_create.add_argument("--parent", action="append", default=[],
                           help="Parent task id (repeatable)")
+    p_create.add_argument(
+        "--parent-outcome",
+        choices=sorted(kb.VALID_LINK_OUTCOMES),
+        default="success",
+        help=(
+            "Outcome required from every --parent (default: success). Use "
+            "completion only for diagnostic/reporting consumers of failures."
+        ),
+    )
     p_create.add_argument("--workspace", default="scratch",
                           help="scratch | worktree | worktree:<path> | dir:<path> "
                                "(default: scratch)")
@@ -586,6 +595,12 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_link = sub.add_parser("link", help="Add a parent->child dependency")
     p_link.add_argument("parent_id")
     p_link.add_argument("child_id")
+    p_link.add_argument(
+        "--required-outcome",
+        choices=sorted(kb.VALID_LINK_OUTCOMES),
+        default="success",
+        help="Parent outcome required before the child can run (default: success)",
+    )
     p_unlink = sub.add_parser("unlink", help="Remove a parent->child dependency")
     p_unlink.add_argument("parent_id")
     p_unlink.add_argument("child_id")
@@ -1612,6 +1627,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             tenant=args.tenant,
             priority=args.priority,
             parents=tuple(args.parent or ()),
+            parent_outcome=args.parent_outcome,
             triage=bool(getattr(args, "triage", False)),
             idempotency_key=getattr(args, "idempotency_key", None),
             max_runtime_seconds=max_runtime,
@@ -1747,6 +1763,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
         events = kb.list_events(conn, args.task_id)
         parents = kb.parent_ids(conn, args.task_id)
         children = kb.child_ids(conn, args.task_id)
+        graph_status = kb.task_graph_status(conn, args.task_id)
         runs = kb.list_runs(conn, args.task_id, **rsk)
         # Workers hand off via ``task_runs.summary``; ``tasks.result`` is left NULL unless the caller explicitly passed
         # ``result=``. Surfacing the latest summary here keeps ``show`` from
@@ -1761,6 +1778,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
             "latest_summary": latest_summary,
             "parents": parents,
             "children": children,
+            "graph_status": graph_status,
             "comments": [
                 {"author": c.author, "body": c.body, "created_at": c.created_at}
                 for c in comments
@@ -1859,6 +1877,11 @@ def _cmd_show(args: argparse.Namespace) -> int:
         print(f"  parents:   {', '.join(parents)}")
     if children:
         print(f"  children:  {', '.join(children)}")
+    print(
+        f"  graph:     {graph_status['overall_state']}"
+        f"; next={graph_status['next_owner'] or '-'}"
+    )
+    print(f"  next:      {graph_status['next_action']}")
     if task.body:
         print()
         print("Body:")
@@ -2114,8 +2137,16 @@ def _cmd_diagnostics(args: argparse.Namespace) -> int:
 
 def _cmd_link(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:
-        kb.link_tasks(conn, args.parent_id, args.child_id)
-    print(f"Linked {args.parent_id} -> {args.child_id}")
+        kb.link_tasks(
+            conn,
+            args.parent_id,
+            args.child_id,
+            required_outcome=args.required_outcome,
+        )
+    print(
+        f"Linked {args.parent_id} -> {args.child_id} "
+        f"(requires {args.required_outcome})"
+    )
     return 0
 
 

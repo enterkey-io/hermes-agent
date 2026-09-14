@@ -564,3 +564,90 @@ def test_legacy_notifier_never_claims_or_passively_sends_origin_root(board, monk
     adapter.send.assert_not_awaited()
     with kb.connect_closing(board) as conn:
         assert kb.list_notify_subs(conn, root)[0]["last_event_id"] == cursor
+
+
+def test_active_origin_root_checkpoint_wakes_once_without_claiming_final_return(
+    board, monkeypatch,
+):
+    with kb.connect_closing(board) as conn:
+        root = kb.create_task(
+            conn,
+            title="Final result",
+            assignee="aurora",
+            session_id="origin-session",
+        )
+        kb.add_notify_sub(
+            conn,
+            task_id=root,
+            platform="telegram",
+            chat_id="origin-chat",
+            notifier_profile="aurora",
+            delivery_mode="wake",
+            chat_type="dm",
+        )
+        request = kb.create_coordination_request(
+            conn,
+            root_task_id=root,
+            origin_session_id="origin-session",
+            origin_message_id="origin-message",
+        )
+        kb._append_event(
+            conn,
+            root,
+            "coordination_checkpoint",
+            {
+                "request_root_id": request.id,
+                "task_id": root,
+                "source_task_id": "t_repair",
+                "checkpoint_kind": "qa_failed_rework",
+                "status": "remediation_underway",
+                "next_owner": "builder",
+                "next_action": "Apply the required fix and request fresh QA.",
+                "detail": "QA found a reproducible P1 delivery failure.",
+            },
+        )
+
+    adapter = SimpleNamespace(send=AsyncMock())
+    runner = Runner(adapter)
+    runner._kanban_coordination_tick = AsyncMock()
+    delivered = AsyncMock()
+    monkeypatch.setattr("gateway.wake.deliver_wake", delivered)
+    real_sleep = asyncio.sleep
+
+    async def sleep(delay):
+        if delay != 5:
+            runner._running = False
+            await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    asyncio.run(runner._kanban_notifier_watcher(interval=1))
+
+    adapter.send.assert_not_awaited()
+    delivered.assert_awaited_once()
+    assert delivered.call_args.kwargs["session_id"] == "origin-session"
+    checkpoint_text = delivered.call_args.kwargs["text"]
+    assert "remediation" in checkpoint_text.lower()
+    assert "P1 delivery failure" in checkpoint_text
+    assert "coordination_context" not in delivered.call_args.kwargs
+    with kb.connect_closing(board) as conn:
+        assert kb.get_coordination_request(conn, request.id).status == "active"
+        _, unseen = kb.unseen_events_for_sub(
+            conn,
+            task_id=root,
+            platform="telegram",
+            chat_id="origin-chat",
+            kinds=["coordination_checkpoint"],
+        )
+        assert unseen == []
+
+    restarted = Runner(adapter)
+    restarted._kanban_coordination_tick = AsyncMock()
+
+    async def restarted_sleep(delay):
+        if delay != 5:
+            restarted._running = False
+            await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", restarted_sleep)
+    asyncio.run(restarted._kanban_notifier_watcher(interval=1))
+    delivered.assert_awaited_once()

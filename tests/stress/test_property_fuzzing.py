@@ -15,10 +15,8 @@ task graphs. After each step, checks the full invariant set:
   I7. Events are strictly monotonic in (created_at, id).
   I8. task_events.run_id references a task_runs.id that exists
       (or is NULL).
-  I9. Parent completion invariant: if all parents are 'done', the
-      child cannot be in 'todo' status (recompute_ready should have
-      promoted it). This is called out in the comment on
-      recompute_ready; verify it holds after every random seq.
+  I9. Parent outcome invariant: if every parent edge is satisfied, the child
+      cannot be in 'todo' status (recompute_ready should have promoted it).
 
 Not using hypothesis the lib; just Python random for simplicity.
 """
@@ -120,23 +118,16 @@ def assert_invariants(conn, kb, ops_log):
     for row in bad_ev_fk:
         failures.append(f"I8: event {row['id']} references missing run {row['run_id']}")
 
-    # I9: if all parents done → child not in todo
-    # (Only applies to children with at least one parent)
-    orphaned_todo = conn.execute("""
-        SELECT c.id AS child_id,
-               COUNT(*) AS n_parents,
-               SUM(CASE WHEN p.status = 'done' THEN 1 ELSE 0 END) AS done_parents
-        FROM tasks c
-        JOIN task_links l ON l.child_id = c.id
-        JOIN tasks p ON p.id = l.parent_id
-        WHERE c.status = 'todo'
-        GROUP BY c.id
-        HAVING n_parents > 0 AND n_parents = done_parents
-    """).fetchall()
-    for row in orphaned_todo:
-        failures.append(
-            f"I9: task {row['child_id']} is todo but all {row['n_parents']} parents are done"
-        )
+    # I9: every satisfied parent edge means a child cannot remain todo.
+    todo_children = conn.execute(
+        "SELECT DISTINCT c.id FROM tasks c "
+        "JOIN task_links l ON l.child_id = c.id WHERE c.status = 'todo'"
+    ).fetchall()
+    for row in todo_children:
+        if kb._parents_satisfied(conn, row["id"]):
+            failures.append(
+                f"I9: task {row['id']} is todo but all parent outcomes are satisfied"
+            )
 
     if failures:
         print(f"\n!!! INVARIANT VIOLATION after {len(ops_log)} ops:")

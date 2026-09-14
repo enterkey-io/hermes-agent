@@ -116,6 +116,61 @@ def test_create_task_appears_on_board(client):
     assert "researcher" in data["assignees"]
 
 
+def test_dashboard_enforces_and_reports_dependency_outcomes(client):
+    implementation = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "implementation", "assignee": "builder"},
+    ).json()["task"]
+    with kb.connect() as conn:
+        assert kb.complete_task(conn, implementation["id"])
+
+    qa = client.post(
+        "/api/plugins/kanban/tasks",
+        json={
+            "title": "independent QA",
+            "assignee": "reviewer",
+            "parents": [implementation["id"]],
+        },
+    ).json()["task"]
+    release = client.post(
+        "/api/plugins/kanban/tasks",
+        json={
+            "title": "release",
+            "assignee": "operator",
+            "parents": [qa["id"]],
+        },
+    ).json()["task"]
+    with kb.connect() as conn:
+        assert kb.complete_task(conn, qa["id"], metadata={"verdict": "fail"})
+
+    refused = client.patch(
+        f"/api/plugins/kanban/tasks/{release['id']}",
+        json={"status": "ready"},
+    )
+    assert refused.status_code == 409
+    refusal = refused.json()["detail"]
+    assert qa["id"] in refusal
+    assert "requires=success" in refusal
+    assert "observed=failure" in refusal
+    assert "verdict=fail" in refusal
+
+    detail = client.get(f"/api/plugins/kanban/tasks/{release['id']}")
+    assert detail.status_code == 200
+    assert detail.json()["graph_status"]["overall_state"] == "failed"
+
+    report = client.post(
+        "/api/plugins/kanban/tasks",
+        json={
+            "title": "report failed QA",
+            "assignee": "manager",
+            "parents": [qa["id"]],
+            "parent_outcome": "completion",
+        },
+    )
+    assert report.status_code == 200
+    assert report.json()["task"]["status"] == "ready"
+
+
 def test_patch_board_sets_project_directory(client, tmp_path):
     """Board-level default_workdir must be editable after creation."""
     kb.create_board("late-config")
@@ -1266,5 +1321,3 @@ def test_specify_happy_path(client, monkeypatch):
 # ---------------------------------------------------------------------------
 # Final result visibility for Done cards
 # ---------------------------------------------------------------------------
-
-

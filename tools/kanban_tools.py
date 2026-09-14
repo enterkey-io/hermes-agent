@@ -666,6 +666,7 @@ def _handle_show(args: dict, **kw) -> str:
                 "task": _task_dict(task),
                 "parents": parents,
                 "children": children,
+                "graph_status": kb.task_graph_status(conn, tid),
                 "comments": [
                     {"author": c.author, "body": c.body,
                      "created_at": c.created_at}
@@ -1842,6 +1843,7 @@ def _handle_create(args: dict, **kw) -> str:
         )
     body = args.get("body")
     parents = args.get("parents") or []
+    parent_outcome = args.get("parent_outcome") or "success"
     tenant = args.get("tenant") or os.environ.get("HERMES_TENANT")
     # Stamp the originating session id so terminal task events can wake the
     # creator's agent session, not merely post a notification into its chat.
@@ -2114,6 +2116,7 @@ def _handle_create(args: dict, **kw) -> str:
                         body=body,
                         assignee=str(assignee),
                         parents=tuple(parents),
+                        parent_outcome=parent_outcome,
                         tenant=tenant,
                         priority=int(priority) if priority is not None else 0,
                         workspace_kind=str(workspace_kind),
@@ -2425,8 +2428,18 @@ def _handle_link(args: dict, **kw) -> str:
     try:
         kb, conn = _connect(board=board)
         try:
-            kb.link_tasks(conn, parent_id=parent_id, child_id=child_id)
-            return _ok(parent_id=parent_id, child_id=child_id)
+            required_outcome = args.get("required_outcome") or "success"
+            kb.link_tasks(
+                conn,
+                parent_id=parent_id,
+                child_id=child_id,
+                required_outcome=required_outcome,
+            )
+            return _ok(
+                parent_id=parent_id,
+                child_id=child_id,
+                required_outcome=required_outcome,
+            )
         finally:
             conn.close()
     except ValueError as e:
@@ -3097,6 +3110,15 @@ KANBAN_CREATE_SCHEMA = {
                     "synthesizer task."
                 ),
             },
+            "parent_outcome": {
+                "type": "string",
+                "enum": ["success", "completion"],
+                "description": (
+                    "Outcome required from every listed parent. Defaults to "
+                    "'success'. Use 'completion' only for a diagnostic or "
+                    "reporting task that must consume a truthful failed result."
+                ),
+            },
             "tenant": {
                 "type": "string",
                 "description": (
@@ -3346,6 +3368,15 @@ KANBAN_LINK_SCHEMA = {
         "properties": {
             "parent_id": {"type": "string", "description": "Parent task id."},
             "child_id":  {"type": "string", "description": "Child task id."},
+            "required_outcome": {
+                "type": "string",
+                "enum": ["success", "completion"],
+                "description": (
+                    "Required parent outcome. Defaults to 'success'; use "
+                    "'completion' only when the child intentionally consumes "
+                    "a failed diagnostic result."
+                ),
+            },
             "board": _board_schema_prop(),
         },
         "required": ["parent_id", "child_id"],

@@ -150,6 +150,10 @@ class LifecyclePreflightError(ValueError):
 class LifecycleEnforcementError(ValueError):
     """A same-card transition violates recorded lifecycle ownership/evidence."""
 
+
+class ReviewOutcomeError(ValueError):
+    """A failed review was incorrectly submitted as successful completion."""
+
 # Small-repair pilot defaults. They are persisted per request so larger work
 # can opt into different explicit limits without changing a fleet-wide knob.
 DEFAULT_COORDINATION_MAX_LEAF_LAUNCHES = 4
@@ -270,6 +274,7 @@ def _workforce_handoff_launch_refusal(
 # unblocking them only to have the worker re-block for the same reason.
 # ``None`` = legacy/un-typed block (treated as a generic human blocker).
 VALID_BLOCK_KINDS = {"dependency", "needs_input", "capability", "transient"}
+VALID_LINK_OUTCOMES = {"success", "completion"}
 
 # After a task has been blocked, unblocked, and re-blocked this many times for
 # the same (truly-blocked) reason, the unblock-loop breaker stops trusting the
@@ -302,6 +307,17 @@ def normalize_reasoning_effort(effort: Optional[str]) -> Optional[str]:
     raise ValueError(
         f"reasoning_effort must be one of {allowed}, got {effort!r}"
     )
+
+
+def normalize_link_outcome(value: Optional[str]) -> str:
+    """Normalize the outcome contract attached to a dependency edge."""
+    outcome = str(value or "success").strip().casefold()
+    if outcome not in VALID_LINK_OUTCOMES:
+        raise ValueError(
+            "required_outcome must be one of "
+            f"{sorted(VALID_LINK_OUTCOMES)}, got {value!r}"
+        )
+    return outcome
 
 
 KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
@@ -1753,8 +1769,9 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
-    parent_id  TEXT NOT NULL,
-    child_id   TEXT NOT NULL,
+    parent_id        TEXT NOT NULL,
+    child_id         TEXT NOT NULL,
+    required_outcome TEXT NOT NULL DEFAULT 'success',
     PRIMARY KEY (parent_id, child_id)
 );
 
@@ -3103,6 +3120,31 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
                 f"{lifecycle_column} TEXT",
             )
 
+    # Dependency edges created before outcome contracts existed meant
+    # "wait until the parent finishes", even when that parent truthfully
+    # finished with a failing QA verdict. Preserve that meaning exactly on
+    # upgrade, while the fresh schema and every current writer default new
+    # edges to the safer success-gated contract.
+    task_links_exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_links'"
+    ).fetchone() is not None
+    link_cols = (
+        {row["name"] for row in conn.execute("PRAGMA table_info(task_links)")}
+        if task_links_exists
+        else set()
+    )
+    if task_links_exists and "required_outcome" not in link_cols:
+        added = _add_column_if_missing(
+            conn,
+            "task_links",
+            "required_outcome",
+            "required_outcome TEXT NOT NULL DEFAULT 'success'",
+        )
+        if added:
+            conn.execute(
+                "UPDATE task_links SET required_outcome = 'completion'"
+            )
+
     # Indexes over additive ``tasks`` columns must be created after the
     # columns exist. Keeping them in SCHEMA_SQL breaks legacy boards: SQLite
     # parses each statement in ``executescript`` against the live schema, so a
@@ -3638,7 +3680,7 @@ def _require_operational_assignee(assignee: Optional[str]) -> None:
 
 
 def lifecycle_enforcement_enabled(config: Optional[Mapping[str, Any]] = None) -> bool:
-    """Return the staging-safe lifecycle gate (default off)."""
+    """Return the lifecycle gate, enabled by default for opted-in cards."""
     if config is None:
         try:
             from hermes_cli.config import load_config_readonly
@@ -3649,7 +3691,7 @@ def lifecycle_enforcement_enabled(config: Optional[Mapping[str, Any]] = None) ->
     kanban = config.get("kanban", {}) if isinstance(config, Mapping) else {}
     return bool(
         isinstance(kanban, Mapping)
-        and kanban.get("lifecycle_enforcement", False)
+        and kanban.get("lifecycle_enforcement", True)
     )
 
 
@@ -3665,7 +3707,7 @@ def lifecycle_observer_enabled(config: Optional[Mapping[str, Any]] = None) -> bo
     kanban = config.get("kanban", {}) if isinstance(config, Mapping) else {}
     return bool(
         isinstance(kanban, Mapping)
-        and kanban.get("lifecycle_observer", False)
+        and kanban.get("lifecycle_observer", True)
     )
 
 
@@ -4127,6 +4169,7 @@ def create_task(
     tenant: Optional[str] = None,
     priority: int = 0,
     parents: Iterable[str] = (),
+    parent_outcome: str = "success",
     triage: bool = False,
     idempotency_key: Optional[str] = None,
     max_runtime_seconds: Optional[int] = None,
@@ -4157,7 +4200,10 @@ def create_task(
     """Create a new task and optionally link it under parent tasks.
 
     Returns the new task id.  Status is ``ready`` when there are no
-    parents (or all parents already ``done``), otherwise ``todo``.
+    parents (or all parents have the requested ``parent_outcome``), otherwise
+    ``todo``. New edges require successful parent outcomes by default;
+    ``parent_outcome="completion"`` is the explicit diagnostic/reporting
+    escape hatch that consumes a truthful failed result.
     If ``triage=True``, status is forced to ``triage`` regardless of
     parents — a specifier/triager is expected to promote the task to
     ``todo`` once the spec is fleshed out.
@@ -4200,6 +4246,7 @@ def create_task(
     model_override = (model_override or "").strip() or None
     provider_override = (provider_override or "").strip() or None
     reasoning_effort = normalize_reasoning_effort(reasoning_effort)
+    parent_outcome = normalize_link_outcome(parent_outcome)
     if provider_override and not model_override:
         raise ValueError("provider_override requires a model_override")
     assignee = _canonical_assignee(assignee)
@@ -4472,13 +4519,12 @@ def create_task(
                         missing = _find_missing_parents(conn, parents)
                         if missing:
                             raise ValueError(f"unknown parent task(s): {', '.join(missing)}")
-                        # If any parent is not yet done, we're todo.
-                        rows = conn.execute(
-                            "SELECT status FROM tasks WHERE id IN "
-                            "(" + ",".join("?" * len(parents)) + ")",
-                            parents,
-                        ).fetchall()
-                        if any(r["status"] != "done" for r in rows):
+                        if any(
+                            not _task_satisfies_link_outcome(
+                                conn, parent_id, parent_outcome
+                            )
+                            for parent_id in parents
+                        ):
                             task_status = "todo"
                 # Even in triage mode we still need to validate parent ids
                 # so the eventual link rows don't dangle.
@@ -4568,8 +4614,9 @@ def create_task(
                 )
                 for pid in parents:
                     conn.execute(
-                        "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
-                        (pid, task_id),
+                        "INSERT OR IGNORE INTO task_links "
+                        "(parent_id, child_id, required_outcome) VALUES (?, ?, ?)",
+                        (pid, task_id, parent_outcome),
                     )
                 # Notify-sub inheritance (ACK-edge: the originating channel
                 # still hears about a child that BLOCKs, not just the final
@@ -4583,6 +4630,7 @@ def create_task(
                         "assignee": assignee,
                         "status": task_status,
                         "parents": list(parents),
+                        "parent_outcome": parent_outcome if parents else None,
                         "tenant": tenant,
                         "workspace_kind": workspace_kind,
                         "workspace_path": workspace_path,
@@ -6378,6 +6426,120 @@ def _mark_coordination_guardrail_in_txn(
     return True
 
 
+def _guardrail_failed_success_edges_in_txn(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    timestamp: int,
+) -> bool:
+    """Stop an origin request when a terminal failure closes a success gate."""
+    task = get_task(conn, task_id)
+    if task is None or not task.request_root_id:
+        return False
+    request = get_coordination_request(conn, task.request_root_id)
+    if (
+        request is None
+        or request.kind != "origin_request"
+        or request.status != "active"
+        or request.root_task_id == task_id
+    ):
+        return False
+    observed = task_terminal_outcome(conn, task_id)
+    if observed["outcome"] != "failure":
+        return False
+    gated_children = conn.execute(
+        "SELECT child_id FROM task_links WHERE parent_id = ? "
+        "AND required_outcome = 'success' ORDER BY child_id",
+        (task_id,),
+    ).fetchall()
+    if not gated_children:
+        return False
+    child_ids = [row["child_id"] for row in gated_children]
+    _append_event(
+        conn,
+        task_id,
+        "outcome_gate_failed",
+        {
+            "request_root_id": request.id,
+            "required_outcome": "success",
+            "observed_outcome": "failure",
+            "verdict": observed["verdict"],
+            "blocked_children": child_ids,
+        },
+    )
+    return _mark_coordination_guardrail_in_txn(
+        conn,
+        request.id,
+        task_id=task_id,
+        reason=(
+            f"success-gated task {task_id} completed with verdict "
+            f"{observed['verdict']!r}; remediation is required"
+        ),
+        timestamp=timestamp,
+    )
+
+
+def _append_coordination_checkpoint_in_txn(
+    conn: sqlite3.Connection,
+    *,
+    source_task_id: str,
+    source_run_id: Optional[int],
+    checkpoint_kind: str,
+    status: str,
+    next_owner: Optional[str],
+    next_action: str,
+    detail: str,
+) -> bool:
+    """Append one intermediate origin checkpoint for one lifecycle run."""
+    source = get_task(conn, source_task_id)
+    if source is None or not source.request_root_id:
+        return False
+    request = get_coordination_request(conn, source.request_root_id)
+    if (
+        request is None
+        or request.kind != "origin_request"
+        or request.status != "active"
+    ):
+        return False
+    prior_rows = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? "
+        "AND kind = 'coordination_checkpoint' ORDER BY id DESC LIMIT 50",
+        (request.root_task_id,),
+    ).fetchall()
+    for row in prior_rows:
+        try:
+            prior = json.loads(row["payload"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if (
+            isinstance(prior, dict)
+            and prior.get("source_task_id") == source_task_id
+            and prior.get("checkpoint_kind") == checkpoint_kind
+            and prior.get("source_run_id") == source_run_id
+        ):
+            return False
+    _append_event(
+        conn,
+        request.root_task_id,
+        "coordination_checkpoint",
+        {
+            "request_root_id": request.id,
+            "task_id": request.root_task_id,
+            "source_task_id": source_task_id,
+            "source_run_id": source_run_id,
+            "checkpoint_kind": checkpoint_kind,
+            "status": status,
+            "next_owner": next_owner,
+            "next_action": str(next_action)[:500],
+            "detail": str(detail)[:1000],
+            "responsible_agent": request.responsible_agent,
+            "origin_session_id": request.origin_session_id,
+            "origin_message_id": request.origin_message_id,
+        },
+    )
+    return True
+
+
 def _coordination_failure_retry_in_txn(
     conn: sqlite3.Connection,
     *,
@@ -6723,7 +6885,109 @@ def set_reasoning_effort(
 # Links
 # ---------------------------------------------------------------------------
 
-def link_tasks(conn: sqlite3.Connection, parent_id: str, child_id: str) -> None:
+_SUCCESS_VERDICTS = frozenset({"pass", "passed", "success", "successful", "approved"})
+
+
+def _completion_metadata_verdict(metadata: Any) -> Optional[str]:
+    """Return a normalized explicit completion verdict, when one exists."""
+    if not isinstance(metadata, Mapping):
+        return None
+    value = metadata.get("verdict")
+    if value is None:
+        return None
+    verdict = str(value).strip().casefold()
+    return verdict or None
+
+
+def task_terminal_outcome(
+    conn: sqlite3.Connection, task_id: str
+) -> dict[str, Any]:
+    """Return the outcome that dependency edges observe for one task.
+
+    Ordinary historical completions carry no verdict and remain successful.
+    An explicit non-passing verdict is a truthful terminal failure: completion
+    edges may consume it, while success edges remain closed.
+    """
+    task = conn.execute(
+        "SELECT status FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    if task is None:
+        return {"outcome": "missing", "verdict": None, "terminal": False}
+    status = str(task["status"])
+    if status == "archived":
+        return {"outcome": "success", "verdict": None, "terminal": True}
+    if status != "done":
+        return {"outcome": "incomplete", "verdict": None, "terminal": False}
+
+    run = conn.execute(
+        "SELECT metadata FROM task_runs WHERE task_id = ? "
+        "AND outcome = 'completed' "
+        "ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    metadata: Any = None
+    if run is not None and run["metadata"]:
+        try:
+            metadata = json.loads(run["metadata"])
+        except (TypeError, json.JSONDecodeError):
+            metadata = None
+    verdict = _completion_metadata_verdict(metadata)
+    if verdict is None or verdict in _SUCCESS_VERDICTS:
+        outcome = "success"
+    else:
+        # Unknown/custom explicit verdicts fail closed. This prevents a typo or
+        # an inconclusive diagnostic from silently releasing a success edge.
+        outcome = "failure"
+    return {"outcome": outcome, "verdict": verdict, "terminal": True}
+
+
+def _task_satisfies_link_outcome(
+    conn: sqlite3.Connection, task_id: str, required_outcome: str
+) -> bool:
+    required = normalize_link_outcome(required_outcome)
+    observed = task_terminal_outcome(conn, task_id)
+    if required == "completion":
+        return bool(observed["terminal"])
+    return observed["outcome"] == "success"
+
+
+def _unsatisfied_parent_links(
+    conn: sqlite3.Connection, task_id: str
+) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT l.parent_id, l.required_outcome, p.title, p.status "
+        "FROM task_links l JOIN tasks p ON p.id = l.parent_id "
+        "WHERE l.child_id = ? ORDER BY l.parent_id",
+        (task_id,),
+    ).fetchall()
+    unsatisfied: list[dict[str, Any]] = []
+    for row in rows:
+        required = normalize_link_outcome(row["required_outcome"])
+        observed = task_terminal_outcome(conn, row["parent_id"])
+        if required == "completion":
+            satisfied = bool(observed["terminal"])
+        else:
+            satisfied = observed["outcome"] == "success"
+        if not satisfied:
+            unsatisfied.append({
+                "parent_id": row["parent_id"],
+                "parent_title": row["title"],
+                "parent_status": row["status"],
+                "required_outcome": required,
+                "observed_outcome": observed["outcome"],
+                "verdict": observed["verdict"],
+            })
+    return unsatisfied
+
+
+def link_tasks(
+    conn: sqlite3.Connection,
+    parent_id: str,
+    child_id: str,
+    *,
+    required_outcome: str = "success",
+) -> None:
+    required_outcome = normalize_link_outcome(required_outcome)
     if parent_id == child_id:
         raise ValueError("a task cannot depend on itself")
     with write_txn(conn):
@@ -6735,21 +6999,27 @@ def link_tasks(conn: sqlite3.Connection, parent_id: str, child_id: str) -> None:
                 f"linking {parent_id} -> {child_id} would create a cycle"
             )
         conn.execute(
-            "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
-            (parent_id, child_id),
+            "INSERT INTO task_links (parent_id, child_id, required_outcome) "
+            "VALUES (?, ?, ?) ON CONFLICT(parent_id, child_id) DO UPDATE SET "
+            "required_outcome = excluded.required_outcome",
+            (parent_id, child_id, required_outcome),
         )
-        # If child was ready but parent is not yet done, demote child to todo.
-        parent_status = conn.execute(
-            "SELECT status FROM tasks WHERE id = ?", (parent_id,)
-        ).fetchone()["status"]
-        if parent_status != "done":
+        # A ready child must be demoted whenever the edge's actual outcome
+        # contract is not yet met, including a terminal failed QA result.
+        if not _task_satisfies_link_outcome(
+            conn, parent_id, required_outcome
+        ):
             conn.execute(
                 "UPDATE tasks SET status = 'todo' WHERE id = ? AND status = 'ready'",
                 (child_id,),
             )
         _append_event(
             conn, child_id, "linked",
-            {"parent": parent_id, "child": child_id},
+            {
+                "parent": parent_id,
+                "child": child_id,
+                "required_outcome": required_outcome,
+            },
         )
         _inherit_notify_subs(conn, child_id, (parent_id,))
 
@@ -6855,6 +7125,228 @@ def task_graph_contexts(
 def task_graph_context(conn: sqlite3.Connection, task_id: str) -> dict:
     """Return compact direct parent/child state for one task."""
     return task_graph_contexts(conn, [task_id])[task_id]
+
+
+def _connected_task_ids(conn: sqlite3.Connection, task_id: str) -> set[str]:
+    """Return the undirected dependency component containing ``task_id``."""
+    seen: set[str] = set()
+    pending = [task_id]
+    while pending:
+        current = pending.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        rows = conn.execute(
+            "SELECT parent_id AS neighbor FROM task_links WHERE child_id = ? "
+            "UNION SELECT child_id AS neighbor FROM task_links WHERE parent_id = ?",
+            (current, current),
+        ).fetchall()
+        pending.extend(
+            row["neighbor"] for row in rows if row["neighbor"] not in seen
+        )
+    return seen
+
+
+def task_graph_status(conn: sqlite3.Connection, task_id: str) -> dict[str, Any]:
+    """Return deterministic whole-graph progress and next-action state."""
+    anchor = get_task(conn, task_id)
+    if anchor is None:
+        raise ValueError(f"unknown task {task_id}")
+
+    request = (
+        get_coordination_request(conn, anchor.request_root_id)
+        if anchor.request_root_id
+        else None
+    )
+    component = _connected_task_ids(conn, task_id)
+    if request is not None:
+        cohort = conn.execute(
+            "SELECT id FROM tasks WHERE request_root_id = ?",
+            (request.id,),
+        ).fetchall()
+        for row in cohort:
+            component.update(_connected_task_ids(conn, row["id"]))
+
+    placeholders = ",".join("?" for _ in component)
+    task_rows = conn.execute(
+        "SELECT id, title, status, assignee, created_at, implementer, "
+        "current_phase FROM tasks WHERE id IN (" + placeholders + ") "
+        "ORDER BY created_at, id",
+        tuple(sorted(component)),
+    ).fetchall()
+    items = [
+        {
+            "id": row["id"],
+            "title": row["title"],
+            "status": row["status"],
+            "assignee": row["assignee"],
+            "current_phase": row["current_phase"],
+        }
+        for row in task_rows
+    ]
+    by_id = {row["id"]: row for row in task_rows}
+    root_id = request.root_task_id if request is not None else None
+
+    link_rows = conn.execute(
+        "SELECT l.parent_id, l.child_id, l.required_outcome, "
+        "p.title AS parent_title, c.title AS child_title "
+        "FROM task_links l "
+        "JOIN tasks p ON p.id = l.parent_id "
+        "JOIN tasks c ON c.id = l.child_id "
+        "WHERE l.parent_id IN (" + placeholders + ") "
+        "AND l.child_id IN (" + placeholders + ") "
+        "ORDER BY l.parent_id, l.child_id",
+        (*tuple(sorted(component)), *tuple(sorted(component))),
+    ).fetchall()
+    failed_gates: list[dict[str, Any]] = []
+    for link in link_rows:
+        required = normalize_link_outcome(link["required_outcome"])
+        observed = task_terminal_outcome(conn, link["parent_id"])
+        if required == "success" and observed["outcome"] == "failure":
+            failed_gates.append({
+                "parent_id": link["parent_id"],
+                "parent_title": link["parent_title"],
+                "child_id": link["child_id"],
+                "child_title": link["child_title"],
+                "required_outcome": required,
+                "observed_outcome": observed["outcome"],
+                "verdict": observed["verdict"],
+            })
+
+    failed_reviews: list[dict[str, Any]] = []
+    for row in task_rows:
+        event = conn.execute(
+            "SELECT payload, run_id, created_at FROM task_events "
+            "WHERE task_id = ? AND kind = 'changes_requested' "
+            "ORDER BY id DESC LIMIT 1",
+            (row["id"],),
+        ).fetchone()
+        if event is None:
+            continue
+        try:
+            payload = json.loads(event["payload"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        failed_reviews.append({
+            "task_id": row["id"],
+            "task_title": row["title"],
+            "reason": payload.get("reason"),
+            "reviewer": payload.get("reviewer"),
+            "next_owner": payload.get("implementer") or row["assignee"],
+            "run_id": event["run_id"],
+            "created_at": event["created_at"],
+        })
+
+    terminal = {"done", "archived"}
+    active_rows = [
+        row for row in task_rows
+        if row["status"] not in terminal and row["id"] != root_id
+    ]
+    rank = {
+        "running": 0, "review": 1, "ready": 2, "todo": 3,
+        "scheduled": 4, "blocked": 5, "triage": 6,
+    }
+    active_rows.sort(key=lambda row: (rank.get(row["status"], 99), row["created_at"], row["id"]))
+    active = [
+        {
+            "id": row["id"],
+            "title": row["title"],
+            "status": row["status"],
+            "assignee": row["assignee"],
+            "current_phase": row["current_phase"],
+        }
+        for row in active_rows
+    ]
+    blocked_rows = [
+        row for row in task_rows if row["status"] in {"blocked", "triage"}
+    ]
+    blocked_rows.sort(key=lambda row: (row["id"] == root_id, row["created_at"], row["id"]))
+    blocked = [
+        {
+            "id": row["id"],
+            "title": row["title"],
+            "status": row["status"],
+            "assignee": row["assignee"],
+        }
+        for row in blocked_rows
+    ]
+    workload_blocked = [item for item in blocked if item["id"] != root_id]
+    completed = [
+        {
+            "id": row["id"],
+            "title": row["title"],
+            "status": row["status"],
+            "assignee": row["assignee"],
+        }
+        for row in task_rows if row["status"] in terminal
+    ]
+
+    if workload_blocked:
+        overall_state = "stalled"
+    elif failed_gates:
+        overall_state = "failed"
+    elif blocked:
+        overall_state = "stalled"
+    elif not active_rows:
+        overall_state = "completed"
+    else:
+        overall_state = "active"
+
+    next_owner: Optional[str] = None
+    next_action = "No further graph action is pending."
+    if workload_blocked:
+        next_owner = workload_blocked[0]["assignee"]
+        next_action = "Resolve the blocker or return the stalled outcome to the origin."
+    elif failed_gates:
+        failed_parent_id = failed_gates[0]["parent_id"]
+        failed_parent = by_id.get(failed_parent_id)
+        next_owner = failed_parent["implementer"] if failed_parent else None
+        if not next_owner:
+            upstream = conn.execute(
+                "SELECT p.assignee FROM task_links l JOIN tasks p ON p.id = l.parent_id "
+                "WHERE l.child_id = ? ORDER BY p.created_at, p.id LIMIT 1",
+                (failed_parent_id,),
+            ).fetchone()
+            next_owner = upstream["assignee"] if upstream else (
+                failed_parent["assignee"] if failed_parent else None
+            )
+        next_action = (
+            "Remediate the failed success gate, produce a fresh candidate, and "
+            "repeat independent verification."
+        )
+    elif active:
+        next_owner = active[0]["assignee"]
+        next_action = (
+            "Continue the active phase and record its mechanical lifecycle outcome."
+        )
+    elif request is not None:
+        next_owner = request.responsible_agent
+        next_action = "Return the final verified outcome through the configured origin route."
+
+    origin_request = request if request is not None and request.kind == "origin_request" else None
+    automatic_final_report = {
+        "configured": origin_request is not None,
+        "request_root_id": origin_request.id if origin_request else None,
+        "status": origin_request.status if origin_request else "not_configured",
+        "responsible_agent": (
+            origin_request.responsible_agent if origin_request else None
+        ),
+    }
+    return {
+        "anchor_task_id": task_id,
+        "overall_state": overall_state,
+        "tasks": items,
+        "active": active,
+        "completed": completed,
+        "blocked": blocked,
+        "failed_gates": failed_gates,
+        "failed_reviews": failed_reviews,
+        "next_owner": next_owner,
+        "next_action": next_action,
+        "automatic_final_report": automatic_final_report,
+    }
 
 
 def parent_results(conn: sqlite3.Connection, task_id: str) -> list[tuple[str, Optional[str]]]:
@@ -7537,13 +8029,7 @@ def recompute_ready(
                 # legitimate exit (it emits ``"unblocked"`` which flips
                 # this predicate back).
                 continue
-            parents = conn.execute(
-                "SELECT t.status FROM tasks t "
-                "JOIN task_links l ON l.parent_id = t.id "
-                "WHERE l.child_id = ?",
-                (task_id,),
-            ).fetchall()
-            if all(p["status"] in ("done", "archived") for p in parents):
+            if _parents_satisfied(conn, task_id):
                 if cur_status == "blocked":
                     # Don't auto-recover tasks that have hit the
                     # circuit-breaker failure limit.  Without this
@@ -7584,14 +8070,8 @@ def recompute_ready(
 # ---------------------------------------------------------------------------
 
 def _parents_satisfied(conn: sqlite3.Connection, task_id: str) -> bool:
-    """Return whether every direct parent is terminal for dependency gating."""
-    return conn.execute(
-        "SELECT 1 FROM task_links l "
-        "JOIN tasks p ON p.id = l.parent_id "
-        "WHERE l.child_id = ? "
-        "AND p.status NOT IN ('done', 'archived') LIMIT 1",
-        (task_id,),
-    ).fetchone() is None
+    """Return whether every direct parent meets its edge outcome contract."""
+    return not _unsatisfied_parent_links(conn, task_id)
 
 
 def claim_task(
@@ -7662,13 +8142,7 @@ def claim_task(
         # 'todo' here — recompute_ready will re-promote when the parents
         # actually finish. See RCA at
         # kanban/boards/cookai/workspaces/t_a6acd07d/root-cause.md.
-        undone = conn.execute(
-            "SELECT 1 FROM task_links l "
-            "JOIN tasks p ON p.id = l.parent_id "
-            "WHERE l.child_id = ? AND p.status NOT IN ('done', 'archived') LIMIT 1",
-            (task_id,),
-        ).fetchone()
-        if undone:
+        if not _parents_satisfied(conn, task_id):
             conn.execute(
                 "UPDATE tasks SET status = 'todo' "
                 "WHERE id = ? AND status = 'ready'",
@@ -8513,6 +8987,50 @@ def _validate_lifecycle_completion(
         raise LifecycleEnforcementError(
             "completion requires metadata.live_evidence or a live-acceptance handoff"
         )
+
+
+def _validate_review_completion_outcome(
+    conn: sqlite3.Connection,
+    task: Task,
+    metadata: Optional[dict],
+) -> None:
+    """Require the mechanical changes-requested path for a failed review."""
+    verdict = _completion_metadata_verdict(metadata)
+    if verdict is None or verdict in _SUCCESS_VERDICTS:
+        return
+    review_run = task.status == "review"
+    if task.status == "running" and task.current_run_id is not None:
+        claimed = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id = ? AND run_id = ? "
+            "AND kind = 'claimed' ORDER BY id DESC LIMIT 1",
+            (task.id, int(task.current_run_id)),
+        ).fetchone()
+        try:
+            payload = json.loads(claimed["payload"] or "{}") if claimed else {}
+        except (TypeError, json.JSONDecodeError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        review_run = (
+            payload.get("source_status") == "review"
+            or payload.get("source_phase") in {"technical_review", "intent_review"}
+            or task.current_phase in {"technical_review", "intent_review"}
+        )
+    if not review_run:
+        return
+    outgoing = conn.execute(
+        "SELECT required_outcome FROM task_links WHERE parent_id = ?",
+        (task.id,),
+    ).fetchall()
+    if outgoing and all(
+        normalize_link_outcome(row["required_outcome"]) == "completion"
+        for row in outgoing
+    ):
+        return
+    raise ReviewOutcomeError(
+        "a failed review cannot be completed as success; use request_changes "
+        "to return actionable rework to the implementer"
+    )
 
 
 def _source_acceptance_handoff(body: Optional[str]) -> Optional[dict]:
@@ -9545,9 +10063,9 @@ def complete_task(
         ).fetchone()
         if lifecycle_row is None:
             return False
-        _validate_lifecycle_completion(
-            conn, Task.from_row(lifecycle_row), metadata
-        )
+        lifecycle_task = Task.from_row(lifecycle_row)
+        _validate_review_completion_outcome(conn, lifecycle_task, metadata)
+        _validate_lifecycle_completion(conn, lifecycle_task, metadata)
         # Parent completion is a hard invariant even for direct human review
         # approval. A parent may have been reopened after this task entered
         # ``review`` or ``running``.
@@ -9685,6 +10203,9 @@ def complete_task(
             conn, task_id, "completed",
             completed_payload,
             run_id=run_id,
+        )
+        _guardrail_failed_success_edges_in_txn(
+            conn, task_id, timestamp=now
         )
         _record_coordination_root_completion(conn, task_id, now=now)
     # Prose-scan the summary + result for t_<hex> references that do
@@ -10460,7 +10981,8 @@ def block_task(
     recurrences = 0
     with write_txn(conn):
         cur_row = conn.execute(
-            "SELECT status, block_kind, block_recurrences FROM tasks WHERE id = ?",
+            "SELECT status, block_kind, block_recurrences, request_root_id "
+            "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
         if cur_row is None:
@@ -10640,6 +11162,25 @@ def block_task(
             _append_lifecycle_manager_notification(
                 conn, task_id, kind="stuck", detail=reason
             )
+        request_root_id = cur_row["request_root_id"]
+        if request_root_id:
+            request = get_coordination_request(conn, request_root_id)
+            if (
+                request is not None
+                and request.kind == "origin_request"
+                and request.status == "active"
+            ):
+                _mark_coordination_guardrail_in_txn(
+                    conn,
+                    request.id,
+                    task_id=task_id,
+                    reason=(
+                        reason
+                        or f"task {task_id} entered "
+                        f"{'triage' if recurrences >= BLOCK_RECURRENCE_LIMIT else 'blocked'}"
+                    ),
+                    timestamp=int(time.time()),
+                )
         _blocked_task = get_task(conn, task_id)
     _fire_kanban_lifecycle_hook(
         "kanban_task_blocked",
@@ -11338,6 +11879,20 @@ def pass_review(
             },
             run_id=run_id,
         )
+        if task.lifecycle_type:
+            _append_coordination_checkpoint_in_txn(
+                conn,
+                source_task_id=task_id,
+                source_run_id=run_id,
+                checkpoint_kind="qa_passed",
+                status="verification_passed",
+                next_owner=receiver,
+                next_action=(
+                    "Validate the accepted intent, then hand off the reviewed "
+                    "revision for activation."
+                ),
+                detail=summary,
+            )
     notify_task_updated(
         conn, task_id, ("status", "assignee", "current_phase", "return_to")
     )
@@ -11498,6 +12053,19 @@ def request_changes(
                 },
                 run_id=run_id,
             )
+            _append_coordination_checkpoint_in_txn(
+                conn,
+                source_task_id=task_id,
+                source_run_id=run_id,
+                checkpoint_kind="qa_failed_rework",
+                status="remediation_underway",
+                next_owner=implementer,
+                next_action=(
+                    "Apply the required fix and submit a fresh candidate for "
+                    "independent review."
+                ),
+                detail=reason,
+            )
     notify_task_updated(
         conn, task_id, ("status", "assignee", "current_phase", "return_to")
     )
@@ -11517,8 +12085,8 @@ def promote_task(
 
     Mirrors the automatic promotion done by ``recompute_ready`` but
     drives it from a deliberate operator action with an audit-trail
-    entry. Refuses to promote if any parent dep is not in a terminal
-    state (`done`/`archived`) unless ``force=True``. Does NOT change
+    entry. Refuses to promote if any parent edge has not reached its required
+    outcome unless ``force=True``. Does NOT change
     assignee or claim state. Returns ``(True, None)`` on success and
     ``(False, reason)`` if refused. ``dry_run=True`` validates the
     promotion would succeed without mutating state.
@@ -11549,15 +12117,8 @@ def promote_task(
         return False, admission_refusal
 
     if not force:
-        parents = conn.execute(
-            "SELECT t.id, t.status FROM tasks t "
-            "JOIN task_links l ON l.parent_id = t.id "
-            "WHERE l.child_id = ?",
-            (task_id,),
-        ).fetchall()
         unsatisfied = [
-            p["id"] for p in parents
-            if p["status"] not in ("done", "archived")
+            item["parent_id"] for item in _unsatisfied_parent_links(conn, task_id)
         ]
         if unsatisfied:
             return False, (
@@ -11585,6 +12146,16 @@ def promote_task(
         )
         if admission_refusal:
             return False, admission_refusal
+        if not force:
+            unsatisfied = [
+                item["parent_id"]
+                for item in _unsatisfied_parent_links(conn, task_id)
+            ]
+            if unsatisfied:
+                return False, (
+                    "unsatisfied parent dependencies: "
+                    f"{', '.join(unsatisfied)} (use --force to override)"
+                )
         upd = conn.execute(
             "UPDATE tasks SET status = 'ready' "
             "WHERE id = ? AND status IN ('todo', 'blocked')",
@@ -11631,7 +12202,7 @@ def _reclaim_dangling_run(
 
 
 def _landing_status_after_parents(conn: sqlite3.Connection, task_id: str) -> str:
-    """Return ``'todo'`` if any parent isn't ``done`` yet, else ``'ready'``.
+    """Return ``'todo'`` if any parent edge is unsatisfied, else ``'ready'``.
 
     The parent-completion re-gate shared by :func:`unblock_task` and
     :func:`reopen_review_task`: flipping straight to ``ready`` would bypass the
@@ -11641,14 +12212,7 @@ def _landing_status_after_parents(conn: sqlite3.Connection, task_id: str) -> str
     kanban/boards/cookai/workspaces/t_a6acd07d/root-cause.md. Kept in one place
     so the two transitions can't drift.
     """
-    undone_parents = conn.execute(
-        "SELECT 1 FROM task_links l "
-        "JOIN tasks p ON p.id = l.parent_id "
-        "WHERE l.child_id = ? "
-        "AND p.status NOT IN ('done', 'archived') LIMIT 1",
-        (task_id,),
-    ).fetchone()
-    return "todo" if undone_parents else "ready"
+    return "ready" if _parents_satisfied(conn, task_id) else "todo"
 
 
 def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
@@ -12236,8 +12800,9 @@ def decompose_triage_task(
                 parent_id = child_ids[p_idx]
                 child_id = child_ids[idx]
                 conn.execute(
-                    "INSERT OR IGNORE INTO task_links (parent_id, child_id) "
-                    "VALUES (?, ?)",
+                    "INSERT OR IGNORE INTO task_links "
+                    "(parent_id, child_id, required_outcome) "
+                    "VALUES (?, ?, 'success')",
                     (parent_id, child_id),
                 )
                 _append_event(
@@ -12251,8 +12816,9 @@ def decompose_triage_task(
         # only ever a child here, never a parent of children.
         for cid in child_ids:
             conn.execute(
-                "INSERT OR IGNORE INTO task_links (parent_id, child_id) "
-                "VALUES (?, ?)",
+                "INSERT OR IGNORE INTO task_links "
+                "(parent_id, child_id, required_outcome) "
+                "VALUES (?, ?, 'success')",
                 (cid, task_id),
             )
 

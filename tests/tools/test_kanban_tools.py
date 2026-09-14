@@ -644,6 +644,37 @@ def test_create_happy_path(worker_env):
         conn.close()
 
 
+def test_create_tool_exposes_explicit_completion_dependency(worker_env):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    with kb.connect_closing() as conn:
+        diagnostic = kb.create_task(conn, title="diagnostic", assignee="peer")
+        assert kb.complete_task(conn, diagnostic, metadata={"verdict": "fail"})
+
+    success_child = json.loads(kt._handle_create({
+        "title": "unsafe release",
+        "assignee": "peer",
+        "parents": [diagnostic],
+    }))
+    assert success_child["status"] == "todo"
+
+    report_child = json.loads(kt._handle_create({
+        "title": "report failure",
+        "assignee": "peer",
+        "parents": [diagnostic],
+        "parent_outcome": "completion",
+    }))
+    assert report_child["status"] == "ready"
+    with kb.connect_closing() as conn:
+        row = conn.execute(
+            "SELECT required_outcome FROM task_links WHERE parent_id = ? "
+            "AND child_id = ?",
+            (diagnostic, report_child["task_id"]),
+        ).fetchone()
+        assert row["required_outcome"] == "completion"
+
+
 def test_create_explicit_hold_survives_parent_completion(worker_env):
     from hermes_cli import kanban_db as kb
     from tools import kanban_tools as kt
@@ -718,6 +749,28 @@ def test_link_happy_path(worker_env):
     out = kt._handle_link({"parent_id": a, "child_id": b})
     d = json.loads(out)
     assert d["ok"] is True
+
+
+def test_link_accepts_completion_outcome(worker_env):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    with kb.connect_closing() as conn:
+        parent = kb.create_task(conn, title="diagnostic", assignee="x")
+        child = kb.create_task(conn, title="report", assignee="x")
+    result = json.loads(kt._handle_link({
+        "parent_id": parent,
+        "child_id": child,
+        "required_outcome": "completion",
+    }))
+    assert result["required_outcome"] == "completion"
+    with kb.connect_closing() as conn:
+        row = conn.execute(
+            "SELECT required_outcome FROM task_links WHERE parent_id = ? "
+            "AND child_id = ?",
+            (parent, child),
+        ).fetchone()
+        assert row["required_outcome"] == "completion"
 
 
 def test_unblock_happy_path(monkeypatch, worker_env):

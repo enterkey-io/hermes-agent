@@ -667,6 +667,7 @@ class GatewayKanbanWatchersMixin:
                             for sub in subs:
                                 try:
                                     task = _kb.get_task(conn, sub["task_id"])
+                                    event_kinds = TERMINAL_KINDS
                                     if task and task.request_root_id:
                                         request = _kb.get_coordination_request(
                                             conn, task.request_root_id,
@@ -676,9 +677,18 @@ class GatewayKanbanWatchersMixin:
                                             and request.kind == "origin_request"
                                             and request.root_task_id == task.id
                                         ):
-                                            # This route belongs exclusively to
-                                            # the receipt-backed final return.
-                                            continue
+                                            if request.status == "active":
+                                                # Intermediate lifecycle
+                                                # checkpoints may wake the root
+                                                # while work remains active. The
+                                                # two final-return event kinds
+                                                # remain exclusively owned by
+                                                # the receipt-backed coordinator.
+                                                event_kinds = (
+                                                    "coordination_checkpoint",
+                                                )
+                                            else:
+                                                continue
                                     owner_profile = sub.get("notifier_profile") or None
                                     if owner_profile and owner_profile != notifier_profile:
                                         _owner_adapters = getattr(self, "_profile_adapters", {}).get(owner_profile)
@@ -701,7 +711,7 @@ class GatewayKanbanWatchersMixin:
                                         platform=sub["platform"],
                                         chat_id=sub["chat_id"],
                                         thread_id=sub.get("thread_id") or "",
-                                        kinds=TERMINAL_KINDS,
+                                        kinds=event_kinds,
                                     )
                                     if not events:
                                         continue
@@ -787,6 +797,7 @@ class GatewayKanbanWatchersMixin:
                     # "Task X completed" and re-decomposes work that already
                     # exists on the board.
                     wake_handoff = ""
+                    checkpoint_wake_text = ""
                     for ev in d["events"]:
                         kind = ev.kind
                         # Identity prefix: attribute terminal pings to the
@@ -878,6 +889,27 @@ class GatewayKanbanWatchersMixin:
                                 f"🛑 {board_tag}{tag}Kanban {sub['task_id']} routed to TRIAGE"
                                 f" — needs a human decision{rc}{reason}"
                             )
+                        elif kind == "coordination_checkpoint":
+                            payload = ev.payload if isinstance(ev.payload, dict) else {}
+                            checkpoint_kind = str(
+                                payload.get("checkpoint_kind") or "progress"
+                            ).replace("_", " ")
+                            status = str(payload.get("status") or "active")
+                            detail = str(payload.get("detail") or "").strip()
+                            next_owner = str(payload.get("next_owner") or "").strip()
+                            next_action = str(payload.get("next_action") or "").strip()
+                            lines = [
+                                f"Kanban coordination checkpoint: {checkpoint_kind}",
+                                f"Status: {status}",
+                            ]
+                            if detail:
+                                lines.append(f"Detail: {detail}")
+                            if next_owner:
+                                lines.append(f"Next owner: {next_owner}")
+                            if next_action:
+                                lines.append(f"Next action: {next_action}")
+                            checkpoint_wake_text = "\n".join(lines)
+                            msg = f"{board_tag}{checkpoint_wake_text}"
                         else:
                             # archived / unblocked are claimed by TERMINAL_KINDS
                             # (so the cursor advances past them and they can't
@@ -1022,7 +1054,10 @@ class GatewayKanbanWatchersMixin:
                         #   claim exactly like a failed send() above, so the
                         #   next tick retries.
                         task_terminal = task and task.status == "archived"
-                        _WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked")
+                        _WAKE_KINDS = (
+                            "completed", "gave_up", "crashed", "timed_out",
+                            "blocked", "coordination_checkpoint",
+                        )
                         _wake_kinds = (
                             {ev.kind for ev in d["events"] if ev.kind in _WAKE_KINDS}
                             if wake_agent
@@ -1068,6 +1103,8 @@ class GatewayKanbanWatchersMixin:
                                 assignee=_assignee,
                                 board=board_slug,
                             )
+                            if checkpoint_wake_text:
+                                _synth = checkpoint_wake_text
                             # Graph-safe wake turn (#70752): carry the worker's
                             # completion handoff into the synthetic turn and
                             # label it as an automatic notification so the woken

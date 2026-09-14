@@ -2489,15 +2489,13 @@ DEFAULT_CONFIG = {
     # each claimable ready task. One dispatcher per profile is sufficient;
     # running more than one on the same kanban.db will race for claims.
     "kanban": {
-        # Additive same-card workforce lifecycle checks. Staging default is
-        # OFF: cards with lifecycle metadata remain advisory until an operator
-        # explicitly enables enforcement after review/canaries. Legacy cards
-        # (lifecycle_type is NULL) always retain their historical behavior.
-        "lifecycle_enforcement": False,
+        # Additive same-card workforce lifecycle checks. Only cards carrying a
+        # lifecycle_type opt in; legacy cards (lifecycle_type is NULL) always
+        # retain their historical behavior.
+        "lifecycle_enforcement": True,
         # Deterministic stale-assignment/missing-successor observer. It only
         # reads board/org state and emits deduplicated events; no model calls.
-        # Kept off during staging and enabled separately after canaries.
-        "lifecycle_observer": False,
+        "lifecycle_observer": True,
         # Opt in to subscribing the originating gateway/TUI session when the
         # model-facing ``kanban_create`` tool creates a task. This is off by
         # default: an agent's internal coordination work must not silently

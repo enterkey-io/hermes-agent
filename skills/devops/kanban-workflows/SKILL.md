@@ -24,7 +24,7 @@ is the durable authority; your response text is not a handoff.
 ## Start Every Run
 
 1. Call `kanban_show` and read the task, all comments, parent results, prior
-   attempts, complete event history, and latest handoff.
+   attempts, complete event history, latest handoff, and `graph_status`.
 2. Identify `current_phase`, `original_author`, manager, `implementer`,
    `technical_reviewer`, `intent_validator`, `activation_owner`,
    `closure_owner`, and `return_to`.
@@ -111,6 +111,20 @@ rules above.
   complete. The transition itself must preserve the next owner and wake path.
 - Never put secrets, credentials, raw PII, or private relationship context in
   task summaries, evidence, comments, or handoff events.
+
+## Dependency Outcomes
+
+New parent-to-child links require a successful parent outcome by default. A
+completed parent with an explicit non-passing `metadata.verdict` does not
+release that edge. Use `required_outcome="completion"` only for a diagnostic or
+reporting child that intentionally consumes either a successful or failed
+terminal result; it is not a release bypass.
+
+`kanban_show.graph_status` is the authoritative connected-graph view. Check its
+overall state, active and blocked work, failed success gates, next owner/action,
+and automatic final-report state before deciding that a workflow has finished
+or stalled. A failed review stays on the same card and uses
+`kanban_request_changes`; never encode it as `kanban_complete(verdict="fail")`.
 
 ## Final Check
 
