@@ -1973,7 +1973,7 @@ def _normalize_runtime_tool_budget(value: Any) -> Optional[Dict[str, Any]]:
         raise ValueError("runtime_tool_budget must be a mapping")
     expected = {
         "max_calls", "max_writes", "max_detail_reads", "max_list_items",
-        "allowed_tools",
+        "allowed_tools", "write_tools", "tool_call_limits",
     }
     unexpected = set(value) - expected
     if unexpected:
@@ -1995,6 +1995,59 @@ def _normalize_runtime_tool_budget(value: Any) -> Optional[Dict[str, Any]]:
             "runtime_tool_budget.allowed_tools must contain unique non-empty names"
         )
     normalized["allowed_tools"] = normalized_allowed
+    write_tools = value.get("write_tools", [])
+    if not isinstance(write_tools, list):
+        raise ValueError("runtime_tool_budget.write_tools must be a list")
+    if not all(isinstance(item, str) for item in write_tools):
+        raise ValueError(
+            "runtime_tool_budget.write_tools must contain only string names"
+        )
+    normalized_write_tools = [
+        item.strip() for item in write_tools if item.strip()
+    ]
+    if (
+        len(normalized_write_tools) != len(write_tools)
+        or len(set(normalized_write_tools)) != len(write_tools)
+    ):
+        raise ValueError(
+            "runtime_tool_budget.write_tools must contain unique non-empty names"
+        )
+    if not set(normalized_write_tools) <= set(normalized_allowed):
+        raise ValueError(
+            "runtime_tool_budget.write_tools must be a subset of allowed_tools"
+        )
+    if normalized_write_tools:
+        normalized["write_tools"] = normalized_write_tools
+    tool_call_limits = value.get("tool_call_limits", {})
+    if not isinstance(tool_call_limits, dict):
+        raise ValueError("runtime_tool_budget.tool_call_limits must be a mapping")
+    normalized_limits: Dict[str, int] = {}
+    for raw_name, raw_limit in tool_call_limits.items():
+        if not isinstance(raw_name, str):
+            raise ValueError(
+                "runtime_tool_budget.tool_call_limits keys must be string names"
+            )
+        name = raw_name.strip()
+        if not name or name not in normalized_allowed:
+            raise ValueError(
+                "runtime_tool_budget.tool_call_limits keys must be allowed tools"
+            )
+        if name in normalized_limits:
+            raise ValueError(
+                "runtime_tool_budget.tool_call_limits must contain unique "
+                "non-empty names"
+            )
+        limit = _normalize_job_positive_int(
+            raw_limit, f"runtime_tool_budget.tool_call_limits.{name}"
+        )
+        if limit is None or limit > normalized["max_calls"]:
+            raise ValueError(
+                "runtime_tool_budget.tool_call_limits values must be positive "
+                "integers no greater than max_calls"
+            )
+        normalized_limits[name] = limit
+    if normalized_limits:
+        normalized["tool_call_limits"] = normalized_limits
     return normalized
 
 

@@ -89,6 +89,11 @@ class TestRegisterAndDispatch:
             "max_writes": 1,
             "max_detail_reads": 1,
             "max_list_items": 20,
+            "per_tool_calls": {
+                "kanban_list": 1,
+                "kanban_show": 2,
+                "workforce_signal": 1,
+            },
         }
         assert json.loads(reg.dispatch("kanban_create", {}))["ok"] is True
 
@@ -215,6 +220,200 @@ class TestRegisterAndDispatch:
             reset_runtime_tool_budget(token)
         assert state.writes == 1
 
+    def test_runtime_budget_enforces_explicit_mcp_write_and_per_tool_limit(self):
+        reg = ToolRegistry()
+        handled = []
+
+        def handler(args, **kwargs):
+            handled.append((kwargs.get("tool_name"), args))
+            return json.dumps({"ok": True})
+
+        for name in (
+            "mcp__evernote__get_note",
+            "mcp__evernote__edit_note",
+            "kanban_create",
+        ):
+            reg.register(
+                name=name,
+                toolset="bounded",
+                schema=_make_schema(name),
+                handler=handler,
+            )
+        token, state = activate_runtime_tool_budget({
+            "max_calls": 5,
+            "max_writes": 1,
+            "max_detail_reads": 1,
+            "max_list_items": 1,
+            "allowed_tools": [
+                "mcp__evernote__get_note",
+                "mcp__evernote__edit_note",
+                "kanban_create",
+            ],
+            "write_tools": ["mcp__evernote__edit_note"],
+            "tool_call_limits": {"mcp__evernote__edit_note": 1},
+        })
+        try:
+            first_read = json.loads(
+                reg.dispatch("mcp__evernote__get_note", {"noteId": "n1"})
+            )
+            second_read = json.loads(
+                reg.dispatch("mcp__evernote__get_note", {"noteId": "n1"})
+            )
+            edit = json.loads(
+                reg.dispatch("mcp__evernote__edit_note", {"noteId": "n1"})
+            )
+            repeated_edit = json.loads(
+                reg.dispatch("mcp__evernote__edit_note", {"noteId": "n1"})
+            )
+            alternative_write = json.loads(reg.dispatch("kanban_create", {}))
+        finally:
+            reset_runtime_tool_budget(token)
+
+        assert first_read["ok"] is True and second_read["ok"] is True
+        assert edit["ok"] is True
+        assert repeated_edit["error_type"] == "runtime_tool_budget_exceeded"
+        assert alternative_write["error_type"] == "runtime_tool_budget_exceeded"
+        assert state.snapshot()["writes"] == 1
+        assert state.snapshot()["per_tool_calls"] == {
+            "kanban_create": 1,
+            "mcp__evernote__edit_note": 1,
+            "mcp__evernote__get_note": 2,
+        }
+
+    def test_explicit_per_tool_limit_is_atomic_across_parallel_dispatch(self):
+        from tools.runtime_tool_budget import _ACTIVE_BUDGET
+
+        reg = ToolRegistry()
+        handled = []
+        barrier = threading.Barrier(3)
+        results = []
+        reg.register(
+            name="mcp__evernote__edit_note",
+            toolset="bounded",
+            schema=_make_schema("mcp__evernote__edit_note"),
+            handler=lambda args, **_kwargs: (
+                handled.append(args), json.dumps({"ok": True})
+            )[-1],
+        )
+        token, state = activate_runtime_tool_budget({
+            "max_calls": 2,
+            "max_writes": 1,
+            "max_detail_reads": 1,
+            "max_list_items": 1,
+            "allowed_tools": ["mcp__evernote__edit_note"],
+            "write_tools": ["mcp__evernote__edit_note"],
+            "tool_call_limits": {"mcp__evernote__edit_note": 1},
+        })
+
+        def dispatch() -> None:
+            thread_token = _ACTIVE_BUDGET.set(state)
+            barrier.wait(timeout=5)
+            try:
+                results.append(
+                    json.loads(
+                        reg.dispatch(
+                            "mcp__evernote__edit_note", {"noteId": "n1"}
+                        )
+                    )
+                )
+            finally:
+                _ACTIVE_BUDGET.reset(thread_token)
+
+        threads = [threading.Thread(target=dispatch) for _ in range(2)]
+        try:
+            for thread in threads:
+                thread.start()
+            barrier.wait(timeout=5)
+            for thread in threads:
+                thread.join(timeout=5)
+        finally:
+            reset_runtime_tool_budget(token)
+
+        assert all(not thread.is_alive() for thread in threads)
+        assert len(handled) == 1
+        assert sum(result.get("ok") is True for result in results) == 1
+        assert sum(
+            result.get("error_type") == "runtime_tool_budget_exceeded"
+            for result in results
+        ) == 1
+        assert state.snapshot()["writes"] == 1
+        assert state.snapshot()["per_tool_calls"] == {
+            "mcp__evernote__edit_note": 1,
+        }
+
+    def test_explicit_per_tool_limit_charges_rejected_input_attempt(self):
+        reg = ToolRegistry()
+        handled = []
+
+        def require_allowed_note(args):
+            if args.get("noteId") != "allowed-note":
+                raise ValueError("wrong note")
+
+        reg.register(
+            name="mcp__evernote__edit_note",
+            toolset="bounded",
+            schema=_make_schema("mcp__evernote__edit_note"),
+            handler=lambda args, **_kwargs: (
+                handled.append(args), json.dumps({"ok": True})
+            )[-1],
+            preflight=require_allowed_note,
+        )
+        token, state = activate_runtime_tool_budget({
+            "max_calls": 2,
+            "max_writes": 1,
+            "max_detail_reads": 1,
+            "max_list_items": 1,
+            "allowed_tools": ["mcp__evernote__edit_note"],
+            "write_tools": ["mcp__evernote__edit_note"],
+            "tool_call_limits": {"mcp__evernote__edit_note": 1},
+        })
+        try:
+            rejected = json.loads(
+                reg.dispatch("mcp__evernote__edit_note", {"noteId": "wrong-note"})
+            )
+            retry = json.loads(
+                reg.dispatch("mcp__evernote__edit_note", {"noteId": "allowed-note"})
+            )
+        finally:
+            reset_runtime_tool_budget(token)
+
+        assert rejected["error_type"] == "tool_input_validation_failed"
+        assert retry["error_type"] == "runtime_tool_budget_exceeded"
+        assert handled == []
+        assert state.snapshot()["calls"] == 1
+        assert state.snapshot()["writes"] == 0
+        assert state.snapshot()["per_tool_calls"] == {
+            "mcp__evernote__edit_note": 1,
+        }
+
+    def test_runtime_budget_rejects_normalized_per_tool_limit_collisions(self):
+        import pytest
+
+        with pytest.raises(ValueError, match="unique non-empty names"):
+            activate_runtime_tool_budget({
+                "max_calls": 2,
+                "max_writes": 1,
+                "max_detail_reads": 1,
+                "max_list_items": 1,
+                "allowed_tools": ["mcp__evernote__edit_note"],
+                "write_tools": ["mcp__evernote__edit_note"],
+                "tool_call_limits": {
+                    "mcp__evernote__edit_note": 1,
+                    " mcp__evernote__edit_note ": 1,
+                },
+            })
+
+        base = {
+            "max_calls": 2,
+            "max_writes": 1,
+            "max_detail_reads": 1,
+            "max_list_items": 1,
+            "allowed_tools": ["1"],
+        }
+        with pytest.raises(ValueError, match="only string names"):
+            activate_runtime_tool_budget({**base, "write_tools": [1]})
+        with pytest.raises(ValueError, match="keys must be string names"):
+            activate_runtime_tool_budget({**base, "tool_call_limits": {1: 1}})
 
     def test_cross_mcp_toolsets_do_not_overwrite_atomically(self, caplog):
         """Parallel MCP registrations with one name leave exactly one owner."""

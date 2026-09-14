@@ -24,13 +24,16 @@ class RuntimeToolBudget:
     max_detail_reads: int
     max_list_items: int
     allowed_tools: frozenset[str]
+    write_tools: frozenset[str]
+    tool_call_limits: dict[str, int]
     calls: int = 0
     writes: int = 0
     detail_reads: int = 0
     denied: int = 0
+    per_tool_calls: dict[str, int] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
-    def snapshot(self) -> dict[str, int]:
+    def snapshot(self) -> dict[str, Any]:
         with self._lock:
             return {
                 "calls": self.calls,
@@ -41,6 +44,7 @@ class RuntimeToolBudget:
                 "max_writes": self.max_writes,
                 "max_detail_reads": self.max_detail_reads,
                 "max_list_items": self.max_list_items,
+                "per_tool_calls": dict(sorted(self.per_tool_calls.items())),
             }
 
 
@@ -95,12 +99,64 @@ def activate_runtime_tool_budget(
     allowed = frozenset(str(item).strip() for item in raw_allowed if str(item).strip())
     if len(allowed) != len(raw_allowed):
         raise ValueError("runtime_tool_budget.allowed_tools must contain unique names")
+    max_calls = positive_int("max_calls")
+    max_writes = positive_int("max_writes")
+    max_detail_reads = positive_int("max_detail_reads")
+    max_list_items = positive_int("max_list_items")
+    raw_write_tools = config.get("write_tools", [])
+    if not isinstance(raw_write_tools, list):
+        raise ValueError("runtime_tool_budget.write_tools must be a list")
+    if not all(isinstance(item, str) for item in raw_write_tools):
+        raise ValueError(
+            "runtime_tool_budget.write_tools must contain only string names"
+        )
+    write_tools = frozenset(
+        item.strip() for item in raw_write_tools if item.strip()
+    )
+    if len(write_tools) != len(raw_write_tools):
+        raise ValueError(
+            "runtime_tool_budget.write_tools must contain unique non-empty names"
+        )
+    if not write_tools <= allowed:
+        raise ValueError(
+            "runtime_tool_budget.write_tools must be a subset of allowed_tools"
+        )
+    raw_tool_limits = config.get("tool_call_limits", {})
+    if not isinstance(raw_tool_limits, dict):
+        raise ValueError("runtime_tool_budget.tool_call_limits must be a mapping")
+    tool_call_limits: dict[str, int] = {}
+    for raw_name, raw_limit in raw_tool_limits.items():
+        if not isinstance(raw_name, str):
+            raise ValueError(
+                "runtime_tool_budget.tool_call_limits keys must be string names"
+            )
+        name = raw_name.strip()
+        if not name or name not in allowed:
+            raise ValueError(
+                "runtime_tool_budget.tool_call_limits keys must be allowed tools"
+            )
+        if name in tool_call_limits:
+            raise ValueError(
+                "runtime_tool_budget.tool_call_limits must contain unique "
+                "non-empty names"
+            )
+        if isinstance(raw_limit, bool) or not isinstance(raw_limit, int) or raw_limit < 1:
+            raise ValueError(
+                "runtime_tool_budget.tool_call_limits values must be positive integers"
+            )
+        if raw_limit > max_calls:
+            raise ValueError(
+                "runtime_tool_budget.tool_call_limits values cannot exceed max_calls"
+            )
+        tool_call_limits[name] = raw_limit
     state = RuntimeToolBudget(
-        max_calls=positive_int("max_calls"),
-        max_writes=positive_int("max_writes"),
-        max_detail_reads=positive_int("max_detail_reads"),
-        max_list_items=positive_int("max_list_items"),
+        max_calls=max_calls,
+        max_writes=max_writes,
+        max_detail_reads=max_detail_reads,
+        max_list_items=max_list_items,
         allowed_tools=allowed,
+        write_tools=write_tools,
+        tool_call_limits=tool_call_limits,
     )
     return _ACTIVE_BUDGET.set(state), state
 
@@ -123,7 +179,15 @@ def charge_runtime_tool_attempt(name: str) -> bool:
             raise RuntimeToolBudgetError(
                 f"tool-call budget exhausted ({budget.max_calls} calls)"
             )
+        tool_calls = budget.per_tool_calls.get(name, 0)
+        tool_limit = budget.tool_call_limits.get(name)
+        if tool_limit is not None and tool_calls >= tool_limit:
+            budget.denied += 1
+            raise RuntimeToolBudgetError(
+                f"tool {name!r} call budget exhausted ({tool_limit} calls)"
+            )
         budget.calls += 1
+        budget.per_tool_calls[name] = tool_calls + 1
     return True
 
 
@@ -141,7 +205,11 @@ def enforce_runtime_tool_budget(
         charge_runtime_tool_attempt(name)
     with budget._lock:
         action_name = f"{name}:{str(args.get('action') or '').strip()}"
-        is_write = name in _WRITE_TOOLS or action_name in _WRITE_TOOLS
+        is_write = (
+            name in _WRITE_TOOLS
+            or action_name in _WRITE_TOOLS
+            or name in budget.write_tools
+        )
         is_detail = name in _DETAIL_READ_TOOLS
         if is_write and budget.writes >= budget.max_writes:
             budget.denied += 1

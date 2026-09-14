@@ -171,6 +171,8 @@ def test_sync_runbook_cron_jobs_persists_runtime_budgets() -> None:
         "max_detail_reads": 3,
         "max_list_items": 20,
         "allowed_tools": ["kanban_list", "workforce_signal"],
+        "write_tools": ["workforce_signal"],
+        "tool_call_limits": {"workforce_signal": 1},
     }
     runbook_store.save_runbook(
         metadata,
