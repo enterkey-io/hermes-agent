@@ -2098,6 +2098,9 @@ def test_plan_rejects_more_than_eight_execution_nodes(board, organization):
 def test_failed_verification_reopens_outcome_and_creates_one_remediation(board, organization):
     outcome_id = kanban_db.create_task(board, title="Outcome under verification", assignee="aurora")
     verification_id = kanban_db.create_task(board, title="Verify outcome", assignee="reese")
+    assert kanban_db.complete_task(
+        board, outcome_id, metadata={"verdict": "pass"}
+    )
     now = int(time.time())
     board.execute(
         "INSERT INTO wc_items(task_id,item_kind,stable_key,goal_ref,desired_outcome,acceptance_test,verification_state,current_state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
@@ -2119,9 +2122,151 @@ def test_failed_verification_reopens_outcome_and_creates_one_remediation(board, 
     set_runtime_mode(board, mode="apply", kill_switch=False, reason="isolated test")
     applied = apply_reconciliation(board, actor="aurora", action_ids=[actions[0]["action_id"]], organization=organization)
     assert applied[0]["state"] == "applied"
-    assert kanban_db.get_task(board, outcome_id).status == "triage"
+    reopened = kanban_db.get_task(board, outcome_id)
+    assert reopened is not None
+    assert (reopened.status, reopened.terminal_outcome, reopened.terminal_verdict) == (
+        "triage",
+        None,
+        None,
+    )
     remediation = board.execute("SELECT source_task_id FROM wc_relations WHERE relation='remediates' AND target_task_id=?", (outcome_id,)).fetchall()
     assert len(remediation) == 1
+
+
+@pytest.mark.parametrize("classification", ["duplicate", "superseded"])
+def test_reconciliation_archive_freezes_failure_and_recomputes_outcome_edges(
+    board, organization, classification
+):
+    source_id = kanban_db.create_task(
+        board, title=f"Unfinished {classification} candidate", assignee="sloane"
+    )
+    target_id = kanban_db.create_task(
+        board, title="Retained canonical candidate", assignee="sloane"
+    )
+    success_child = kanban_db.create_task(
+        board, title="Unsafe success consumer", parents=[source_id]
+    )
+    completion_child = kanban_db.create_task(
+        board,
+        title="Reconciliation report",
+        parents=[source_id],
+        parent_outcome="completion",
+    )
+    assert kanban_db.claim_task(board, source_id) is not None
+    now = int(time.time())
+    actions = propose_reconciliation(
+        board,
+        actor="reese",
+        mode="proposed",
+        organization=organization,
+        observations=[
+            {
+                "task_id": source_id,
+                "target_task_id": target_id,
+                "classification": classification,
+                "confidence": "high",
+                "rationale": "The retained task is the canonical execution record",
+                "evidence_references": [f"test://{classification}/1"],
+                "evidence_at": now,
+            }
+        ],
+    )
+    set_runtime_mode(board, mode="apply", kill_switch=False, reason="isolated test")
+
+    applied = apply_reconciliation(
+        board,
+        actor="aurora",
+        action_ids=[actions[0]["action_id"]],
+        organization=organization,
+    )
+
+    assert applied[0]["state"] == "applied"
+    assert kanban_db.task_terminal_outcome(board, source_id) == {
+        "outcome": "failure",
+        "verdict": None,
+        "terminal": True,
+    }
+    assert kanban_db.get_task(board, success_child).status == "todo"
+    assert kanban_db.get_task(board, completion_child).status == "ready"
+    archived = kanban_db.get_task(board, source_id)
+    assert archived is not None and archived.current_run_id is None
+    run = board.execute(
+        "SELECT status, outcome FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT 1",
+        (source_id,),
+    ).fetchone()
+    assert run is not None and (run["status"], run["outcome"]) == (
+        "reclaimed",
+        "reclaimed",
+    )
+
+
+def test_verified_reconciliation_completion_recomputes_success_edges(
+    board, organization
+):
+    outcome_id = kanban_db.create_task(
+        board, title="Verified existing outcome", assignee="aurora"
+    )
+    child_id = kanban_db.create_task(
+        board, title="Continue after verified outcome", parents=[outcome_id]
+    )
+    assert kanban_db.claim_task(board, outcome_id) is not None
+    now = int(time.time())
+    board.execute(
+        "INSERT INTO wc_items(task_id,item_kind,stable_key,goal_ref,desired_outcome,"
+        "verification_state,current_state,created_at,updated_at) "
+        "VALUES(?,?,?,?,?,'passed','open',?,?)",
+        (
+            outcome_id,
+            "outcome",
+            "verified-existing-outcome",
+            "goal",
+            "Existing result is accepted",
+            now,
+            now,
+        ),
+    )
+    actions = propose_reconciliation(
+        board,
+        actor="reese",
+        mode="proposed",
+        organization=organization,
+        observations=[
+            {
+                "task_id": outcome_id,
+                "classification": "already_complete",
+                "confidence": "high",
+                "rationale": "The acceptance evidence is current and passing",
+                "evidence_references": ["test://accepted/1"],
+                "evidence_at": now,
+            }
+        ],
+    )
+    set_runtime_mode(board, mode="apply", kill_switch=False, reason="isolated test")
+
+    applied = apply_reconciliation(
+        board,
+        actor="aurora",
+        action_ids=[actions[0]["action_id"]],
+        organization=organization,
+    )
+
+    assert applied[0]["state"] == "applied"
+    assert kanban_db.task_terminal_outcome(board, outcome_id) == {
+        "outcome": "success",
+        "verdict": None,
+        "terminal": True,
+    }
+    assert kanban_db.get_task(board, child_id).status == "ready"
+    completed = kanban_db.get_task(board, outcome_id)
+    assert completed is not None and completed.current_run_id is None
+    run = board.execute(
+        "SELECT status, outcome FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT 1",
+        (outcome_id,),
+    ).fetchone()
+    assert run is not None and (run["status"], run["outcome"]) == (
+        "done",
+        "completed",
+    )
 
 
 def test_unverified_outcome_is_quarantined_and_external_blockers_stay_blocked(board, organization):

@@ -7,18 +7,18 @@ This page is the contract. It exists for two audiences:
 - **Operators** picking which lanes to wire into a board (which profiles to create, which assignees to use).
 - **Plugin / integration authors** wanting to add a new lane shape (a CLI worker that wraps Codex / Claude Code / OpenCode, a containerised review worker, a non-Hermes service that pulls tasks via the API).
 
-If you're writing the worker code itself — the agent that runs *inside* a lane — the kanban lifecycle and reference details are injected into the worker's system prompt automatically (the `KANBAN_GUIDANCE` block in [`agent/prompt_builder.py`](https://github.com/NousResearch/hermes-agent/blob/main/agent/prompt_builder.py)).
+If you're writing the worker code itself — the agent that runs *inside* a lane — the dispatcher force-loads the bundled `kanban-workflows` skill. The system prompt contains only a compact bootstrap pointing to that skill, so ordinary conversations do not pay for the worker procedure.
 
 ## The hierarchy
 
 ```text
 Hermes Kanban  =  canonical task lifecycle + audit trail
 Worker lane    =  implementation executor for one assigned card
-Reviewer       =  human or human-proxy that gates "done"
+Reviewer       =  independent technical gate before intent validation
 GitHub PR      =  upstreamable artifact (optional, for code lanes)
 ```
 
-Hermes Kanban owns lifecycle truth — `ready` → `running` → `review` / `blocked` / `done` / `archived`. Worker lanes execute work but never own that truth; everything they do flows back through the kanban kernel via the `kanban_*` tools (or, for non-Hermes external workers, via the API). Reviewers gate the transition from "code change written" to "task done."
+Hermes Kanban owns lifecycle truth — `ready` → `running` → `review` / `blocked` / `done` / `archived`, plus optional same-card role phases. Worker lanes execute work but never own that truth; everything they do flows back through the kanban kernel via the `kanban_*` tools (or, for non-Hermes external workers, via the API). On lifecycle-enabled cards, technical review routes to intent validation rather than directly to `done`.
 
 ## What a lane provides
 
@@ -51,7 +51,9 @@ For non-Hermes lanes (registered via a plugin), the plugin supplies its own `spa
 Every claim must end in exactly one of:
 
 - `kanban_complete(summary=..., metadata=...)` — task succeeds, status flips to `done`.
-- `kanban_request_review(summary=..., metadata=..., reviewer=...)` — same-card implementation is complete and enters first-class review; status flips to `review`. The dispatcher loads the bundled `sdlc-review` skill unless `kanban.review_dispatch` is disabled. A reviewer approves with `kanban_complete`, returns actionable rework with `kanban_request_changes`, or escalates a genuine external blocker with `kanban_block`.
+- `kanban_handoff(...)` — the current lifecycle phase succeeds and the same card is reassigned to its next owner without becoming `done`.
+- `kanban_request_review(summary=..., metadata=..., reviewer=...)` — same-card implementation is complete and enters first-class review; status flips to `review`. The dispatcher additionally loads `sdlc-review` unless `kanban.review_dispatch` is disabled.
+- `kanban_pass_review(summary=..., evidence=...)` — independent technical QA passes and the same card moves to its recorded intent validator/original author. Correctable QA or intent failures use `kanban_request_changes` to return to the recorded implementer.
 - `kanban_block(reason=...)` — task waits for human input, status flips to `blocked`. The dispatcher respawns when `kanban_unblock` runs.
 - The worker process exits without a tool call. The kernel reaps it and emits `crashed` (PID died) or `gave_up` (consecutive-failure breaker tripped) or `timed_out` (max_runtime exceeded). This is the failure path; healthy workers don't end here.
 
@@ -61,20 +63,20 @@ The kanban kernel enforces that exactly one of these terminates each run. A work
 
 For code-changing tasks, pick the review model encoded by the task graph:
 
-- **Same-card review:** call `kanban_request_review(summary=..., metadata=..., reviewer=...)`. The task enters `review` without touching block recurrence accounting. The dispatcher claims it with the bundled `sdlc-review` skill by default. The reviewer approves with `kanban_complete`, calls `kanban_request_changes(reason=...)` to close the review run and route the task back to its original implementer, or blocks only for a genuine external escalation.
+- **Same-card review:** call `kanban_request_review(summary=..., metadata=..., reviewer=...)`. The task enters `review` without touching block recurrence accounting. The dispatcher claims it with both `kanban-workflows` and `sdlc-review` by default. The reviewer calls `kanban_pass_review` to route a verified candidate to intent validation, calls `kanban_request_changes(reason=...)` to return actionable defects to the recorded implementer, or blocks only for a genuine external dependency.
 - **Pre-created downstream review/QA/release card:** `kanban_show` lists child IDs; inspect those cards with `kanban_show(task_id=...)` before choosing the terminal action. When a child is the downstream review/QA/release phase, call `kanban_complete` on the implementation phase. It cannot promote until this parent is `done`/`archived`. Do not additionally request same-card review and never sticky-block the parent with `review-required:` — either choice strands or duplicates the downstream lane.
 - **Human-only boards:** set `kanban.review_dispatch: false`. A task can then remain in `review` until a human approves it or uses `reopen-review`/the dashboard to return it to `ready`/`todo`.
 
 Both review models carry their structured handoff on the lifecycle transition itself. Do not place secrets, tokens, or raw PII in `summary` or `metadata`; run rows are durable.
 
-The injected `KANBAN_GUIDANCE` covers both graph shapes, `kanban_complete`, the same-card review loop, and `kanban_block` for genuine blockers.
+The force-loaded `kanban-workflows` skill covers same-card handoff, review, intent, activation, acceptance, and closure. `KANBAN_GUIDANCE` remains a short safety bootstrap.
 
 ## Logs and audit trail
 
 The dispatcher writes per-task worker stdout/stderr to `<board-root>/logs/<task_id>.log`. Logs are auditable from kanban metadata:
 
 - `task_runs` rows carry the `log_path`, exit code (where available), summary, and metadata.
-- `task_events` rows carry every state transition (`promoted`, `claimed`, `heartbeat`, `completed`, `blocked`, `review_requested`, `changes_requested`, `review_reopened`, `gave_up`, `crashed`, `timed_out`, `reclaimed`, `claim_extended`).
+- `task_events` rows carry every state transition (`promoted`, `claimed`, `heartbeat`, `completed`, `blocked`, `review_requested`, `review_passed`, `handoff_created`, `assigned`, `changes_requested`, `review_reopened`, `gave_up`, `crashed`, `timed_out`, `reclaimed`, `claim_extended`).
 - `kanban_show` returns both, so a reviewer (or a follow-up worker) reading the task gets the full history without needing dashboard access.
 
 The dashboard renders run history with summaries, metadata blocks, and exit-status badges. CLI users can run `hermes kanban tail <task_id>` to follow live, or `hermes kanban runs <task_id>` for the historical attempt list.
@@ -83,7 +85,7 @@ The dashboard renders run history with summaries, metadata blocks, and exit-stat
 
 ### Hermes profile lane (default)
 
-The shape every kanban worker takes today: the assignee is a profile name, the dispatcher spawns `hermes -p <profile>`, the worker gets the `KANBAN_GUIDANCE` system-prompt block injected automatically, and uses the `kanban_*` tools to terminate the run. No setup beyond defining the profile.
+The shape every kanban worker takes today: the assignee is a profile name, the dispatcher spawns `hermes -p <profile>`, force-loads `kanban-workflows` (plus `sdlc-review` for review runs), injects a compact `KANBAN_GUIDANCE` bootstrap, and exposes the `kanban_*` lifecycle tools. No setup beyond defining the profile.
 
 When you create profiles for your fleet, choose names that match the *role* you want the orchestrator to route to. The orchestrator (when there is one) discovers your profile names via `hermes profile list` — there's no fixed roster the system assumes (the orchestrator side of the contract is part of the injected `KANBAN_GUIDANCE`).
 
@@ -114,4 +116,5 @@ So lane authors don't have to reimplement these:
 
 - [Kanban overview](./kanban) — the user-facing intro.
 - [Kanban tutorial](./kanban-tutorial) — walkthrough with the dashboard open.
-- [`KANBAN_GUIDANCE`](https://github.com/NousResearch/hermes-agent/blob/main/agent/prompt_builder.py) — the worker + orchestrator lifecycle injected into every kanban worker's system prompt.
+- [`kanban-workflows`](/docs/user-guide/skills/bundled/devops/devops-kanban-workflows) — the task-worker-only same-card lifecycle procedure.
+- [`KANBAN_GUIDANCE`](https://github.com/NousResearch/hermes-agent/blob/main/agent/prompt_builder.py) — the compact system-prompt bootstrap for Kanban workers.

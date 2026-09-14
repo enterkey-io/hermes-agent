@@ -72,25 +72,59 @@ def _record_kanban_budget_exhausted(
     """
     try:
         from hermes_cli import kanban_db as _kb
+        expected_run_id = None
+        raw_run_id = (os.environ.get("HERMES_KANBAN_RUN_ID") or "").strip()
+        expected_claim_lock = (
+            os.environ.get("HERMES_KANBAN_CLAIM_LOCK") or ""
+        ).strip()
+        if raw_run_id and expected_claim_lock:
+            try:
+                expected_run_id = int(raw_run_id)
+            except ValueError:
+                expected_claim_lock = ""
         _conn = _kb.connect()
         try:
-            _kb._record_task_failure(
-                _conn,
-                kanban_task,
-                error=(
-                    f"Iteration budget exhausted "
-                    f"({api_call_count}/{max_iterations}) — "
-                    "task could not complete within the allowed "
-                    "iterations"
-                ),
-                outcome="timed_out",
-                release_claim=True,
-                end_run=True,
-                event_payload_extra={
-                    "budget_used": api_call_count,
-                    "budget_max": max_iterations,
-                },
+            error = (
+                f"Iteration budget exhausted "
+                f"({api_call_count}/{max_iterations}) — "
+                "task could not complete within the allowed "
+                "iterations"
             )
+            event_payload_extra = {
+                "budget_used": api_call_count,
+                "budget_max": max_iterations,
+            }
+            recovery_checkpoint = {
+                "reason": "iteration_budget_exhausted",
+                "budget": {
+                    "used": api_call_count,
+                    "max": max_iterations,
+                },
+            }
+            if expected_run_id is not None and expected_claim_lock:
+                _kb._record_task_failure(
+                    _conn,
+                    kanban_task,
+                    error=error,
+                    outcome="timed_out",
+                    release_claim=True,
+                    end_run=True,
+                    event_payload_extra=event_payload_extra,
+                    lifecycle_recovery_checkpoint=recovery_checkpoint,
+                    expected_run_id=expected_run_id,
+                    expected_claim_lock=expected_claim_lock,
+                )
+            else:
+                _kb._record_task_failure(
+                    _conn,
+                    kanban_task,
+                    error=error,
+                    outcome="timed_out",
+                    release_claim=True,
+                    end_run=True,
+                    event_payload_extra=event_payload_extra,
+                    lifecycle_recovery_checkpoint=recovery_checkpoint,
+                )
         finally:
             try:
                 _conn.close()
@@ -102,6 +136,85 @@ def _record_kanban_budget_exhausted(
             kanban_task,
             exc_info=True,
         )
+
+
+def _record_kanban_operational_failure(
+    kanban_task: str,
+    failure_reason: str,
+    attempts: int,
+    logger: logging.Logger,
+) -> str | None:
+    """Durably return an unresolved worker operation failure to its card.
+
+    This is the bounded fallback for the Kanban stop guard. It deliberately
+    reuses the board's normal failure counter and source-lane recovery instead
+    of inventing a lifecycle transition or bypassing role authority. The
+    returned status proves the run is no longer ephemeral/running; ``None``
+    means the durable write could not be confirmed and terminal prose must not
+    be treated as a clean worker outcome.
+    """
+    owned_task = (os.environ.get("HERMES_KANBAN_TASK") or "").strip()
+    if not owned_task or owned_task != kanban_task:
+        return None
+    raw_run_id = (os.environ.get("HERMES_KANBAN_RUN_ID") or "").strip()
+    if not raw_run_id:
+        return None
+    try:
+        expected_run_id = int(raw_run_id)
+    except ValueError:
+        return None
+    expected_claim_lock = (os.environ.get("HERMES_KANBAN_CLAIM_LOCK") or "").strip()
+    if not expected_claim_lock:
+        return None
+    try:
+        from agent.redact import redact_sensitive_text
+        from hermes_cli import kanban_db as _kb
+
+        safe_reason = redact_sensitive_text(
+            str(failure_reason or "unclassified tool failure"), force=True
+        )
+        error = (
+            "Kanban worker exhausted corrective stop-guard attempts after an "
+            f"operational failure: {safe_reason}"
+        )
+        conn = _kb.connect()
+        try:
+            _kb._record_task_failure(
+                conn,
+                kanban_task,
+                error=error,
+                # Reuse the established worker-failure outcome so board
+                # diagnostics, retry thresholds, and third-party consumers do
+                # not need to learn a new run-state enum for this guard path.
+                outcome="crashed",
+                release_claim=True,
+                end_run=True,
+                event_payload_extra={
+                    "stop_guard_attempts": int(attempts),
+                    "operational_failure": True,
+                },
+                expected_run_id=expected_run_id,
+                expected_claim_lock=expected_claim_lock,
+            )
+            landed = _kb.get_task(conn, kanban_task)
+            if (
+                landed is not None
+                and landed.status != "running"
+                and landed.current_run_id is None
+            ):
+                return str(landed.status)
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception:
+        logger.warning(
+            "Failed to record unresolved operational failure for task %s",
+            kanban_task,
+            exc_info=True,
+        )
+    return None
 
 
 def _drop_verification_continuation_scaffolding(messages) -> None:

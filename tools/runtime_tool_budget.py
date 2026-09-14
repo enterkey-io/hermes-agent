@@ -59,6 +59,8 @@ _WRITE_TOOLS = frozenset(
         "kanban_block",
         "kanban_request_review",
         "kanban_request_changes",
+        "kanban_handoff",
+        "kanban_pass_review",
         "kanban_heartbeat",
         "kanban_comment",
         "kanban_archive_stale",

@@ -6,6 +6,8 @@ import threading
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from tools.registry import (
     ToolRegistry,
     _MAX_LOGGED_ERROR_CHARS,

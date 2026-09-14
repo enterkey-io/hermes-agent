@@ -102,6 +102,30 @@ from utils import base_url_host_matches, env_var_enabled
 logger = logging.getLogger(__name__)
 
 
+def _evaluate_kanban_stop_guard(
+    messages: List[Dict[str, Any]], attempts: int
+) -> tuple[Optional[str], bool, Optional[str]]:
+    """Return fresh stop-guard state, failing open as one atomic evaluation."""
+    try:
+        from agent.kanban_stop import (
+            build_kanban_stop_nudge,
+            kanban_stop_requires_failure_recovery,
+            latest_operational_failure,
+        )
+
+        return (
+            build_kanban_stop_nudge(messages=messages, attempts=attempts),
+            kanban_stop_requires_failure_recovery(
+                messages=messages,
+                attempts=attempts,
+            ),
+            latest_operational_failure(messages),
+        )
+    except Exception:
+        logger.debug("kanban stop-loop check failed", exc_info=True)
+        return None, False, None
+
+
 def _final_return_budget_failure(error):
     from agent.coordination_budget import current_coordination_execution
 
@@ -8142,16 +8166,59 @@ def run_conversation(
                 # report") and stop with finish_reason=stop — a clean exit
                 # that the dispatcher records as protocol_violation. Nudge
                 # once or twice before allowing that exit.
-                try:
-                    from agent.kanban_stop import build_kanban_stop_nudge
+                _kanban_attempts = getattr(agent, "_kanban_stop_nudges", 0)
+                (
+                    _kanban_nudge,
+                    _kanban_recovery_required,
+                    _kanban_failure_reason,
+                ) = _evaluate_kanban_stop_guard(messages, _kanban_attempts)
 
-                    _kanban_nudge = build_kanban_stop_nudge(
-                        messages=messages,
-                        attempts=getattr(agent, "_kanban_stop_nudges", 0),
+                if _kanban_recovery_required:
+                    from agent.turn_finalizer import (
+                        _record_kanban_operational_failure,
                     )
-                except Exception:
-                    logger.debug("kanban stop-loop check failed", exc_info=True)
-                    _kanban_nudge = None
+
+                    _kanban_task = (
+                        os.environ.get("HERMES_KANBAN_TASK") or ""
+                    ).strip()
+                    _landed_status = _record_kanban_operational_failure(
+                        _kanban_task,
+                        _kanban_failure_reason or "unclassified tool failure",
+                        getattr(agent, "_kanban_stop_nudges", 0),
+                        logger,
+                    )
+                    if _landed_status is not None:
+                        final_response = (
+                            "The worker could not resolve an operational failure "
+                            "within its corrective attempts. Its active run was "
+                            "closed durably and the same card is now "
+                            f"`{_landed_status}` for owned recovery."
+                        )
+                        final_msg["content"] = final_response
+                        final_msg["finish_reason"] = (
+                            "kanban_operational_failure_recovered"
+                        )
+                        append_message(messages, final_msg)
+                        _turn_exit_reason = (
+                            "kanban_operational_failure_recovered"
+                        )
+                        failed = True
+                        agent._emit_status(
+                            "⚠️ Kanban operational failure returned "
+                            f"durably to card status {_landed_status}"
+                        )
+                        break
+
+                    # Board persistence is itself unavailable. Do not accept
+                    # the model's advisory text as a clean exit; keep the loop
+                    # alive so either a model retry or the finalizer's
+                    # budget-exhaustion recovery can land later.
+                    _kanban_nudge = (
+                        "[System: The unresolved operational failure could not "
+                        "yet be written to the Kanban board. Terminal prose is "
+                        "still forbidden. Retry the authorized lifecycle action "
+                        "now; do not merely report or promise follow-up.]"
+                    )
 
                 if _kanban_nudge:
                     agent._kanban_stop_nudges = (

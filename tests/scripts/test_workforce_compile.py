@@ -110,6 +110,18 @@ def test_canonical_compile_includes_active_chloe_and_emma(tmp_path):
         assert "do not require a worker or receiving manager" in contract
         assert "Never invent a user origin, session, or" in contract
 
+    # Lifecycle blocks are derived from organization metadata, not copied into
+    # 22 independent private profiles.
+    sloane_text = (tmp_path / "sloane" / "AGENTS.md").read_text()
+    reese_text = (tmp_path / "reese" / "AGENTS.md").read_text()
+    sage_text = (tmp_path / "sage" / "AGENTS.md").read_text()
+    assert "## Kanban role lifecycle" in sloane_text
+    assert "Normal receiver: `reese`" in sloane_text
+    assert "Technical-review PASS: `intent_validator`" in reese_text
+    assert "Technical-review FAIL: `implementer`" in reese_text
+    assert "Normal receiver: `emily`" in sage_text
+    assert "Never close another role's phase" in sloane_text
+
 
 def test_planned_profile_can_use_owner_only_private_source(tmp_path):
     organization_fixture = materialize_test_organization(

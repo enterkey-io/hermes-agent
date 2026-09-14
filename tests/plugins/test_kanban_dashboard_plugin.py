@@ -116,6 +116,61 @@ def test_create_task_appears_on_board(client):
     assert "researcher" in data["assignees"]
 
 
+def test_dashboard_enforces_and_reports_dependency_outcomes(client):
+    implementation = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "implementation", "assignee": "builder"},
+    ).json()["task"]
+    with kb.connect() as conn:
+        assert kb.complete_task(conn, implementation["id"])
+
+    qa = client.post(
+        "/api/plugins/kanban/tasks",
+        json={
+            "title": "independent QA",
+            "assignee": "reviewer",
+            "parents": [implementation["id"]],
+        },
+    ).json()["task"]
+    release = client.post(
+        "/api/plugins/kanban/tasks",
+        json={
+            "title": "release",
+            "assignee": "operator",
+            "parents": [qa["id"]],
+        },
+    ).json()["task"]
+    with kb.connect() as conn:
+        assert kb.complete_task(conn, qa["id"], metadata={"verdict": "fail"})
+
+    refused = client.patch(
+        f"/api/plugins/kanban/tasks/{release['id']}",
+        json={"status": "ready"},
+    )
+    assert refused.status_code == 409
+    refusal = refused.json()["detail"]
+    assert qa["id"] in refusal
+    assert "requires=success" in refusal
+    assert "observed=failure" in refusal
+    assert "verdict=fail" in refusal
+
+    detail = client.get(f"/api/plugins/kanban/tasks/{release['id']}")
+    assert detail.status_code == 200
+    assert detail.json()["graph_status"]["overall_state"] == "failed"
+
+    report = client.post(
+        "/api/plugins/kanban/tasks",
+        json={
+            "title": "report failed QA",
+            "assignee": "manager",
+            "parents": [qa["id"]],
+            "parent_outcome": "completion",
+        },
+    )
+    assert report.status_code == 200
+    assert report.json()["task"]["status"] == "ready"
+
+
 def test_patch_board_sets_project_directory(client, tmp_path):
     """Board-level default_workdir must be editable after creation."""
     kb.create_board("late-config")
@@ -161,6 +216,44 @@ def test_scheduled_tasks_have_their_own_column_not_todo(client):
     columns = {c["name"]: c["tasks"] for c in r.json()["columns"]}
     assert any(t["id"] == task["id"] for t in columns["scheduled"])
     assert not any(t["id"] == task["id"] for t in columns["todo"])
+
+
+def test_dashboard_operator_can_recover_block_loop_triage_task(client):
+    """A real dashboard PATCH leaves a loop-triaged card runnable again."""
+    task = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "recover loop", "assignee": "worker"},
+    ).json()["task"]
+    task_id = task["id"]
+    conn = kb.connect()
+    try:
+        first = kb.claim_task(conn, task_id, claimer="worker")
+        assert first is not None
+        assert kb.block_task(conn, task_id, reason="same blocker", kind="capability")
+        assert kb.unblock_task(conn, task_id)
+        second = kb.claim_task(conn, task_id, claimer="worker")
+        assert second is not None
+        assert kb.block_task(conn, task_id, reason="same blocker", kind="capability")
+        triaged = kb.get_task(conn, task_id)
+        assert triaged is not None and triaged.status == "triage"
+    finally:
+        conn.close()
+
+    recovered = client.patch(
+        f"/api/plugins/kanban/tasks/{task_id}", json={"status": "ready"},
+    )
+    assert recovered.status_code == 200, recovered.text
+    assert recovered.json()["task"]["status"] == "ready"
+
+    conn = kb.connect()
+    try:
+        statuses = [
+            event.payload for event in kb.list_events(conn, task_id)
+            if event.kind == "status"
+        ]
+        assert statuses[-1] == {"status": "ready", "requested_status": "ready"}
+    finally:
+        conn.close()
 
 
 def test_tenant_filter(client):
@@ -308,6 +401,33 @@ def test_reopening_parent_demotes_ready_child(client):
         f"/api/plugins/kanban/tasks/{child['id']}"
     ).json()["task"]
     assert child_after_reopen["status"] == "todo"
+
+
+def test_reopening_done_task_clears_frozen_terminal_outcome(client):
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="failed result", assignee="reviewer")
+        assert kb.complete_task(
+            conn,
+            task_id,
+            summary="Review failed.",
+            metadata={"verdict": "fail"},
+        )
+        row = conn.execute(
+            "SELECT terminal_outcome, terminal_verdict FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        assert tuple(row) == ("failure", "fail")
+
+    reopened = client.patch(
+        f"/api/plugins/kanban/tasks/{task_id}", json={"status": "todo"}
+    )
+    assert reopened.status_code == 200, reopened.text
+    with kb.connect() as conn:
+        row = conn.execute(
+            "SELECT terminal_outcome, terminal_verdict FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        assert tuple(row) == (None, None)
 
 
 def test_reopening_parent_retracts_review_and_blocks_approval(client):
@@ -1228,5 +1348,3 @@ def test_specify_happy_path(client, monkeypatch):
 # ---------------------------------------------------------------------------
 # Final result visibility for Done cards
 # ---------------------------------------------------------------------------
-
-

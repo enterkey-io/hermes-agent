@@ -452,6 +452,9 @@ def _(home, kb):
 def _(home, kb):
     """Dispatching a task whose workspace can't be resolved should go
     through the spawn-failure circuit breaker, not crash."""
+    profile = Path(home) / "profiles" / "w"
+    profile.mkdir(parents=True)
+    (profile / "config.yaml").write_text("model:\n  default: test-model\n")
     kb.init_db()
     conn = kb.connect()
     try:
@@ -471,9 +474,9 @@ def _(home, kb):
         print(f"  after 1 tick with nonexistent workspace: status={task.status}")
         if task.status == "ready":
             # Expected path: workspace failure led to release
-            spawn_failures = task.spawn_failures
-            print(f"  spawn_failures counter: {spawn_failures}")
-            assert spawn_failures >= 1, "spawn_failures counter didn't increment"
+            failures = task.consecutive_failures
+            print(f"  consecutive_failures counter: {failures}")
+            assert failures >= 1, "consecutive_failures counter didn't increment"
         elif task.status == "running":
             # Workspace not checked before spawn — the worker would hit
             # the bad path itself. Defensible for `dir:` workspaces that
@@ -937,23 +940,26 @@ def _(home, kb):
 
 @scenario("parent_in_different_status_states")
 def _(home, kb):
-    """recompute_ready promotes a todo child only if ALL parents are
-    in 'done'. Verify against parents in every non-done state."""
+    """Dependency promotion accepts successful terminal parents only."""
     kb.init_db()
     conn = kb.connect()
     try:
-        # Create one parent in each possible non-done state
+        # Create one parent in each relevant state.
         p_ready = kb.create_task(conn, title="p-ready", assignee="w")
         p_running = kb.create_task(conn, title="p-running", assignee="w")
         kb.claim_task(conn, p_running)
         p_blocked = kb.create_task(conn, title="p-blocked", assignee="w")
         kb.block_task(conn, p_blocked, reason="stuck")
         p_triage = kb.create_task(conn, title="p-triage", assignee="w", triage=True)
-        p_archived = kb.create_task(conn, title="p-archived", assignee="w")
-        kb.archive_task(conn, p_archived)
+        p_cancelled = kb.create_task(conn, title="p-cancelled", assignee="w")
+        kb.archive_task(conn, p_cancelled)
         p_done = kb.create_task(conn, title="p-done", assignee="w")
         kb.claim_task(conn, p_done)
         kb.complete_task(conn, p_done)
+        p_done_archived = kb.create_task(conn, title="p-done-archived", assignee="w")
+        kb.claim_task(conn, p_done_archived)
+        kb.complete_task(conn, p_done_archived)
+        kb.archive_task(conn, p_done_archived)
 
         # Child with just one parent, cycle it through each state
         for parent, expected in [
@@ -961,8 +967,9 @@ def _(home, kb):
             (p_running, "todo"),
             (p_blocked, "todo"),
             (p_triage, "todo"),
-            (p_archived, "todo"),  # archived != done!
-            (p_done, "ready"),     # only done parent unblocks child
+            (p_cancelled, "todo"),  # terminal cancellation is not success
+            (p_done, "ready"),
+            (p_done_archived, "ready"),  # archived completed success stays success
         ]:
             child = kb.create_task(
                 conn, title=f"child-of-{parent}", assignee="w", parents=[parent],
@@ -973,7 +980,7 @@ def _(home, kb):
                 f"child of {parent} ({kb.get_task(conn, parent).status}): "
                 f"expected {expected}, got {actual}"
             )
-        print("  child promotion correctly gated on parent.status == 'done'")
+        print("  child promotion correctly gated on terminal parent success")
     finally:
         conn.close()
 

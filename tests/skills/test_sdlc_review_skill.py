@@ -27,7 +27,7 @@ REQUIRED_SECTIONS = [
 REVIEW_ACTIONS = {
     "kanban_show",
     "kanban_comment",
-    "kanban_complete",
+    "kanban_pass_review",
     "kanban_request_changes",
     "kanban_block",
 }
@@ -75,10 +75,17 @@ def test_verdicts_route_through_distinct_terminal_actions(skill_text: str) -> No
     quick_reference = skill_text.split("## Quick Reference", 1)[1].split(
         "## Review Lenses", 1
     )[0]
-    assert "Approve" in quick_reference and "`kanban_complete`" in quick_reference
+    assert "Approve" in quick_reference and "`kanban_pass_review`" in quick_reference
     assert "Request changes" in quick_reference
     assert "`kanban_request_changes`" in quick_reference
     assert "Escalate" in quick_reference and "`kanban_block`" in quick_reference
+
+
+def test_pass_routes_to_intent_validator_with_legacy_fallback(skill_text: str) -> None:
+    assert "intent validator" in skill_text.lower()
+    assert "original author" in skill_text.lower()
+    assert "legacy" in skill_text.lower()
+    assert "`kanban_complete`" in skill_text
 
 
 def test_review_lenses_vary_per_round(skill_text: str) -> None:

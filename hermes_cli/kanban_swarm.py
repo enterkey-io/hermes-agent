@@ -93,6 +93,8 @@ def _activate_root_inline(
     import time as _time
 
     now = int(_time.time())
+    terminal_verdict = kb._completion_metadata_verdict(metadata)
+    terminal_outcome = kb._terminal_outcome_for_verdict(terminal_verdict)
     cur = conn.execute(
         """
         UPDATE tasks
@@ -100,11 +102,13 @@ def _activate_root_inline(
                completed_at = ?,
                claim_lock   = NULL,
                claim_expires= NULL,
-               worker_pid   = NULL
+               worker_pid   = NULL,
+               terminal_outcome = ?,
+               terminal_verdict = ?
          WHERE id = ?
            AND status = 'blocked'
         """,
-        (now, root_id),
+        (now, terminal_outcome, terminal_verdict, root_id),
     )
     if cur.rowcount != 1:
         return False

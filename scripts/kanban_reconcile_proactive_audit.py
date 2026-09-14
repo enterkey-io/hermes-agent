@@ -135,6 +135,18 @@ def _comment(conn: sqlite3.Connection, task_id: str, body: str) -> None:
     _event(conn, task_id, "commented", {"author": "root", "len": len(body)})
 
 
+def _archive_audited_unfinished_task(
+    conn: sqlite3.Connection, task_id: str
+) -> None:
+    """Freeze the failed outcome of work the reviewed audit cancels."""
+    conn.execute(
+        "UPDATE tasks SET status='archived',claim_lock=NULL,"
+        "claim_expires=NULL,worker_pid=NULL,current_run_id=NULL,"
+        "terminal_outcome='failure',terminal_verdict=NULL WHERE id=?",
+        (task_id,),
+    )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database", required=True, type=Path)
@@ -233,12 +245,7 @@ def main() -> int:
                     f"{row['classification']}. {row['evidence']} "
                     f"Disposition: {row['next_action']}",
                 )
-                conn.execute(
-                    "UPDATE tasks SET status='archived',claim_lock=NULL,"
-                    "claim_expires=NULL,worker_pid=NULL,current_run_id=NULL "
-                    "WHERE id=?",
-                    (task_id,),
-                )
+                _archive_audited_unfinished_task(conn, task_id)
                 conn.execute(
                     "UPDATE wc_items SET current_state='archived',updated_at=? "
                     "WHERE task_id=? AND current_state='open'",
@@ -261,7 +268,8 @@ def main() -> int:
                 conn.execute(
                     "UPDATE tasks SET status='done',completed_at=?,claim_lock=NULL,"
                     "claim_expires=NULL,worker_pid=NULL,current_run_id=NULL,"
-                    "block_kind=NULL,consecutive_failures=0,last_failure_error=NULL "
+                    "block_kind=NULL,consecutive_failures=0,last_failure_error=NULL,"
+                    "terminal_outcome='success',terminal_verdict=NULL "
                     "WHERE id=?",
                     (now, task_id),
                 )

@@ -87,6 +87,46 @@ agent:
     pinned = captured["cmd"][captured["cmd"].index("--toolsets") + 1].split(",")
     for required in ("terminal", "web", "file", "skills", "code_execution", "delegation"):
         assert required in pinned
+    skill_args = [
+        captured["cmd"][idx + 1]
+        for idx, value in enumerate(captured["cmd"][:-1])
+        if value == "--skills"
+    ]
+    assert skill_args == []
+
+
+def test_default_spawn_cannot_suppress_opted_in_lifecycle_skill(monkeypatch, tmp_path):
+    root = tmp_path / ".hermes"
+    (root / "profiles" / "elias").mkdir(parents=True)
+    root.joinpath("config.yaml").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(root))
+
+    from hermes_cli import kanban_db as kb
+
+    monkeypatch.setattr(kb, "_resolve_hermes_argv", lambda: ["hermes"])
+    captured = {}
+
+    class FakeProc:
+        pid = 4243
+
+    def fake_popen(cmd, *args, **kwargs):
+        captured["cmd"] = list(cmd)
+        return FakeProc()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    task = _make_task(kb, assignee="elias")
+    task.lifecycle_type = "software"
+    task.skills = ["specialist", "kanban-workflows", "specialist"]
+    kb._default_spawn(task, str(workspace))
+
+    skill_args = [
+        captured["cmd"][idx + 1]
+        for idx, value in enumerate(captured["cmd"][:-1])
+        if value == "--skills"
+    ]
+    assert skill_args == ["kanban-workflows", "specialist"]
 
 
 def test_default_spawn_model_override_survives_real_cli_parse(monkeypatch, tmp_path):

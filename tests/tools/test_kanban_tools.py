@@ -644,6 +644,37 @@ def test_create_happy_path(worker_env):
         conn.close()
 
 
+def test_create_tool_exposes_explicit_completion_dependency(worker_env):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    with kb.connect_closing() as conn:
+        diagnostic = kb.create_task(conn, title="diagnostic", assignee="peer")
+        assert kb.complete_task(conn, diagnostic, metadata={"verdict": "fail"})
+
+    success_child = json.loads(kt._handle_create({
+        "title": "unsafe release",
+        "assignee": "peer",
+        "parents": [diagnostic],
+    }))
+    assert success_child["status"] == "todo"
+
+    report_child = json.loads(kt._handle_create({
+        "title": "report failure",
+        "assignee": "peer",
+        "parents": [diagnostic],
+        "parent_outcome": "completion",
+    }))
+    assert report_child["status"] == "ready"
+    with kb.connect_closing() as conn:
+        row = conn.execute(
+            "SELECT required_outcome FROM task_links WHERE parent_id = ? "
+            "AND child_id = ?",
+            (diagnostic, report_child["task_id"]),
+        ).fetchone()
+        assert row["required_outcome"] == "completion"
+
+
 def test_create_explicit_hold_survives_parent_completion(worker_env):
     from hermes_cli import kanban_db as kb
     from tools import kanban_tools as kt
@@ -718,6 +749,28 @@ def test_link_happy_path(worker_env):
     out = kt._handle_link({"parent_id": a, "child_id": b})
     d = json.loads(out)
     assert d["ok"] is True
+
+
+def test_link_accepts_completion_outcome(worker_env):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    with kb.connect_closing() as conn:
+        parent = kb.create_task(conn, title="diagnostic", assignee="x")
+        child = kb.create_task(conn, title="report", assignee="x")
+    result = json.loads(kt._handle_link({
+        "parent_id": parent,
+        "child_id": child,
+        "required_outcome": "completion",
+    }))
+    assert result["required_outcome"] == "completion"
+    with kb.connect_closing() as conn:
+        row = conn.execute(
+            "SELECT required_outcome FROM task_links WHERE parent_id = ? "
+            "AND child_id = ?",
+            (parent, child),
+        ).fetchone()
+        assert row["required_outcome"] == "completion"
 
 
 def test_unblock_happy_path(monkeypatch, worker_env):
@@ -842,31 +895,45 @@ def test_worker_lifecycle_through_tools(worker_env):
 
 
 def test_kanban_guidance_prompt_size_bounded():
-    """KANBAN_GUIDANCE is injected into every kanban-capable process's system
-    prompt and resolved once at agent init, so its size is a per-worker token
-    tax paid on every spawn. Bound it as an invariant, not a change-detector:
-    the ceiling (8000 chars, roughly 2000 tokens) leaves headroom above the
-    current ~6.2k chars for tight additions, while catching accidental bloat
-    (pasted docs, duplicated sections) before it ships to every worker.
-    """
+    """The system prompt carries only a bootstrap; procedure lives in skill."""
     from agent.prompt_builder import KANBAN_GUIDANCE
 
-    assert len(KANBAN_GUIDANCE) < 8000, (
+    assert len(KANBAN_GUIDANCE) < 1200, (
         f"KANBAN_GUIDANCE is {len(KANBAN_GUIDANCE)} chars; it is injected into "
         "every kanban worker's system prompt — trim it or consciously re-bound "
         "this invariant with justification."
     )
 
 
-def test_kanban_guidance_orchestrator_decision_ownership():
-    """The orchestrator section must carry the split-brain prevention
-    contract: decisions are made by the orchestrator before fan-out and
-    stamped into every dependent card body."""
+def test_kanban_guidance_points_to_loaded_lifecycle_skill():
     from agent.prompt_builder import KANBAN_GUIDANCE
 
-    assert KANBAN_GUIDANCE.count("Decision ownership.") == 1
-    assert "Never let two subtree cards decide the same question" in KANBAN_GUIDANCE
-    assert "workers cannot see sibling context" in KANBAN_GUIDANCE
+    assert "kanban-workflows" in KANBAN_GUIDANCE
+    assert "kanban_show" in KANBAN_GUIDANCE
+    assert "safety" in KANBAN_GUIDANCE.lower()
+
+
+def test_kanban_guidance_forbids_advisory_only_operational_failure_exit():
+    from agent.prompt_builder import KANBAN_GUIDANCE
+
+    guidance = KANBAN_GUIDANCE.lower()
+    assert "operational failure" in guidance
+    assert "durable" in guidance
+    assert "advisory" in guidance
+
+
+def test_kanban_guidance_preserves_task_graph_terminal_decision():
+    """A pre-created downstream lane must be released, not duplicated."""
+    from agent.prompt_builder import KANBAN_GUIDANCE
+
+    guidance = KANBAN_GUIDANCE.lower()
+    assert "child" in guidance
+    assert "inspect" in guidance
+    assert "review" in guidance
+    assert "qa" in guidance
+    assert "release" in guidance
+    assert "kanban_complete" in guidance
+    assert "same-card review" in guidance
 
 
 # ---------------------------------------------------------------------------
@@ -1673,6 +1740,31 @@ def test_create_subscribes_gateway_session_when_opted_in(
     assert s["user_id_alt"] == "alt-user-9"
     assert s["chat_type"] == "forum"
     assert s["delivery_mode"] == "notify+wake"
+
+
+def test_create_direct_commitment_requires_origin_binding(monkeypatch, worker_env):
+    from gateway.session_context import reset_session_vars
+    from tools import kanban_tools as kt
+
+    reset_session_vars()
+    for key in (
+        "HERMES_SESSION_PLATFORM",
+        "HERMES_SESSION_CHAT_ID",
+        "HERMES_SESSION_KEY",
+        "HERMES_SESSION_ID",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    result = json.loads(
+        kt._handle_create(
+            {
+                "title": "unbound direct commitment",
+                "assignee": "peer",
+                "report_to_origin": True,
+            }
+        )
+    )
+    assert "ok" not in result
+    assert "origin" in result["error"].lower()
 
 
 def test_create_subscribes_tui_session_via_session_key(monkeypatch, worker_env):

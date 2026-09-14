@@ -70,6 +70,26 @@ def test_kanban_create_accepts_explicit_session_id(kanban_home):
     assert task.session_id == "current-session"
 
 
+def test_kanban_create_cli_round_trips_lifecycle_fields(kanban_home, monkeypatch):
+    # This isolated parser/round-trip fixture intentionally has no workforce
+    # organization. Lifecycle enforcement itself is exercised with a real
+    # organization in test_kanban_role_lifecycle.py.
+    monkeypatch.setattr(kb, "lifecycle_enforcement_enabled", lambda *_a, **_k: False)
+    raw = kc.run_slash(
+        "create 'managed card' --assignee developer --created-by author --json "
+        "--lifecycle-type software --original-author author "
+        "--implementer developer --technical-reviewer reviewer "
+        "--intent-validator author --activation-owner operator "
+        "--closure-owner author --current-phase execution --return-to developer"
+    )
+    payload = json.loads(raw)
+
+    assert payload["lifecycle_type"] == "software"
+    assert payload["original_author"] == "author"
+    assert payload["technical_reviewer"] == "reviewer"
+    assert payload["current_phase"] == "execution"
+
+
 def test_kanban_show_text_renders_graph_with_open_connection(kanban_home):
     with kb.connect_closing() as conn:
         parent_id = kb.create_task(conn, title="parent task")

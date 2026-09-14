@@ -505,6 +505,11 @@ def test_archive_stale_task_requires_grounded_evidence_and_inactive_state(kanban
         )
         assert (ok, detail) == (True, "archived")
         assert kb.get_task(conn, tid).status == "archived"
+        assert kb.task_terminal_outcome(conn, tid) == {
+            "outcome": "failure",
+            "verdict": None,
+            "terminal": True,
+        }
         event = kb.list_events(conn, tid)[-1]
         assert event.kind == "archived"
         assert event.payload["kind"] == "stale_reconciliation"

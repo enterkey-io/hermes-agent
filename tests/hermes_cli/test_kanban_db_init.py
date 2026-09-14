@@ -92,6 +92,9 @@ def test_legacy_text_pk_tables_rebuilt_to_integer_autoincrement(tmp_path, monkey
         assert len(conn.execute("SELECT * FROM task_events").fetchall()) == 2
         assert conn.execute("SELECT body FROM task_comments").fetchone()["body"] == "hi"
         assert len(conn.execute("SELECT * FROM task_runs").fetchall()) == 1
+        task = kb.get_task(conn, "task-1")
+        assert task is not None
+        assert (task.terminal_outcome, task.terminal_verdict) == ("success", None)
         # Non-numeric legacy cursor ("e-1") casts to 0.
         assert conn.execute("SELECT last_event_id FROM kanban_notify_subs").fetchone()["last_event_id"] == 0
 

@@ -29,6 +29,8 @@ _TERMINAL_KANBAN_TOOLS = frozenset(
         "kanban_block",
         "kanban_request_review",
         "kanban_request_changes",
+        "kanban_handoff",
+        "kanban_pass_review",
     }
 )
 
@@ -60,6 +62,50 @@ def _tool_result_payload(content: Any) -> Optional[Mapping[str, Any]]:
     return payload if isinstance(payload, Mapping) else None
 
 
+def _tool_result_failure_reason(msg: Mapping[str, Any]) -> Optional[str]:
+    """Return a concise reason when a tool result reports an operation failure."""
+    content = msg.get("content")
+    payload = _tool_result_payload(content)
+    if payload is not None:
+        error = payload.get("error")
+        if error:
+            return str(error).strip()
+        if payload.get("ok") is False:
+            return "tool returned ok=false"
+        if payload.get("success") is False:
+            return "tool returned success=false"
+        status = str(payload.get("status") or "").strip().casefold()
+        if status in {"error", "failed", "failure"}:
+            return f"tool returned status={status}"
+        for field in ("exit_code", "returncode"):
+            code = payload.get(field)
+            if isinstance(code, int) and not isinstance(code, bool) and code != 0:
+                meaning = str(payload.get("exit_code_meaning") or "").strip()
+                return f"{field}={code}" + (f" ({meaning})" if meaning else "")
+        return None
+    if isinstance(content, str):
+        text = content.strip()
+        if text.casefold().startswith(("error:", "failed:", "failure:")):
+            return text
+    return None
+
+
+def latest_operational_failure(
+    messages: Iterable[dict] | None,
+) -> Optional[str]:
+    """Return the newest concrete tool failure observed in this worker run."""
+    if not messages:
+        return None
+    for msg in reversed(list(messages)):
+        if not isinstance(msg, Mapping) or msg.get("role") != "tool":
+            continue
+        reason = _tool_result_failure_reason(msg)
+        if reason:
+            name = str(msg.get("name") or "tool").strip() or "tool"
+            return f"{name}: {reason}"
+    return None
+
+
 def _successful_terminal_result(msg: Mapping[str, Any]) -> bool:
     name = str(msg.get("name") or msg.get("tool_name") or "")
     if name not in _TERMINAL_KANBAN_TOOLS:
@@ -75,6 +121,8 @@ def _successful_terminal_result(msg: Mapping[str, Any]) -> bool:
         return False
 
     if name == "kanban_complete":
+        return True
+    if name in {"kanban_handoff", "kanban_pass_review"}:
         return True
 
     status = str(payload.get("status") or "").strip().lower()
@@ -95,6 +143,21 @@ def session_called_kanban_terminal(messages: Iterable[dict] | None) -> bool:
         if msg.get("role") == "tool" and _successful_terminal_result(msg):
             return True
     return False
+
+
+def kanban_stop_requires_failure_recovery(
+    *,
+    messages: Iterable[dict] | None = None,
+    attempts: int = 0,
+    max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
+) -> bool:
+    """Return whether a surviving tool failure now needs durable recovery."""
+    return bool(
+        (os.environ.get("HERMES_KANBAN_TASK") or "").strip()
+        and (attempts >= max_attempts or not kanban_stop_nudge_enabled())
+        and not session_called_kanban_terminal(messages)
+        and latest_operational_failure(messages)
+    )
 
 
 def _worker_run_is_scheduled() -> bool:
@@ -137,20 +200,31 @@ def build_kanban_stop_nudge(
     """
     if not kanban_stop_nudge_enabled():
         return None
-    if attempts >= max_attempts:
-        return None
     if session_called_kanban_terminal(messages):
         return None
     if _worker_run_is_scheduled():
         return None
+    if attempts >= max_attempts:
+        return None
 
     tid = (task_id or os.environ.get("HERMES_KANBAN_TASK") or "").strip() or "this task"
+    failure = latest_operational_failure(messages)
+    failure_guidance = ""
+    if failure:
+        failure_guidance = (
+            f"\n\nAn operational failure is still unresolved: {failure}. "
+            "Reporting it or promising follow-up is advisory only, not a durable "
+            "action. Retry/recover when safe, request changes on this same card, "
+            "hand it to the authorized recovery owner, or call `kanban_block` "
+            "with the concrete external reason."
+        )
     return (
         "[System: You are a Hermes kanban worker. A plain-text reply is NOT a "
         "terminal state for the board.\n\n"
         f"No successful terminal transition was verified for task `{tid}`. Ending now without one "
         "causes a protocol violation (clean exit with no "
-        "`kanban_complete` / `kanban_block` / `kanban_request_review`).\n\n"
+        "`kanban_complete` / `kanban_block` / `kanban_request_review`)."
+        f"{failure_guidance}\n\n"
         "Do this immediately in your next response — do not narrate intent:\n"
         "1. Finish any remaining deliverable (write the required file(s) now).\n"
         "2. Call `kanban_complete(summary=..., artifacts=[...])` if the work "
@@ -160,12 +234,15 @@ def build_kanban_stop_nudge(
         "release, use `kanban_block(kind=\"scheduled\", reason=...)` and stop after "
         "it succeeds. Never unblock yourself to satisfy this guard.\n\n"
         "Never end a turn with only a promise of future action. Repeated "
-        "protocol violations will block this task and require manual intervention.]"
+        "operational failures route this run through durable recovery rather "
+        "than returning advisory prose.]"
     )
 
 
 __all__ = [
     "build_kanban_stop_nudge",
     "kanban_stop_nudge_enabled",
+    "kanban_stop_requires_failure_recovery",
+    "latest_operational_failure",
     "session_called_kanban_terminal",
 ]

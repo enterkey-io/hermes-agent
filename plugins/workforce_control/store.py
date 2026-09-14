@@ -1095,6 +1095,7 @@ def apply_reconciliation(
         raise ValueError("action batch exceeds the configured concurrency ceiling")
     results: list[dict[str, Any]] = []
     for action_id in action_ids:
+        recompute_dependents = False
         action = conn.execute("SELECT * FROM wc_reconcile_actions WHERE action_id=?", (action_id,)).fetchone()
         if action is None:
             raise ValueError(f"unknown reconciliation action {action_id}")
@@ -1119,20 +1120,69 @@ def apply_reconciliation(
                     conn.execute("UPDATE wc_reconcile_actions SET state='quarantined' WHERE action_id=?", (action_id,))
                     results.append({"action_id": action_id, "state": "quarantined", "reason": "outcome lacks passing verification"})
                     continue
-                conn.execute("UPDATE tasks SET status='done',completed_at=? WHERE id=?", (_now(), task_id))
+                completed_at = _now()
+                conn.execute(
+                    "UPDATE tasks SET status='done',completed_at=?,claim_lock=NULL,"
+                    "claim_expires=NULL,worker_pid=NULL,block_kind=NULL,"
+                    "terminal_outcome='success',terminal_verdict=NULL WHERE id=?",
+                    (completed_at, task_id),
+                )
+                run_id = kanban_db._end_run(
+                    conn,
+                    task_id,
+                    outcome="completed",
+                    status="done",
+                    summary="workforce reconciliation verified existing completion",
+                )
                 conn.execute("UPDATE wc_items SET current_state='complete',updated_at=? WHERE task_id=?", (_now(), task_id))
-                kanban_db._append_event(conn, task_id, "workforce_reconciled_complete", {"actor": actor, "evidence": evidence})
+                kanban_db._append_event(
+                    conn,
+                    task_id,
+                    "workforce_reconciled_complete",
+                    {"actor": actor, "evidence": evidence},
+                    run_id=run_id,
+                )
+                recompute_dependents = True
             elif classification in {"duplicate", "superseded"}:
                 relation = "duplicate" if classification == "duplicate" else "supersedes"
                 conn.execute(
                     "INSERT OR IGNORE INTO wc_relations(source_task_id,relation,target_task_id,evidence_json,confidence,created_by,created_at) VALUES(?,?,?,?,?,'aurora',?)",
                     (task_id, relation, target_id, _json(evidence), "high", _now()),
                 )
-                conn.execute("UPDATE tasks SET status='archived',claim_lock=NULL,claim_expires=NULL,worker_pid=NULL WHERE id=?", (task_id,))
+                conn.execute(
+                    "UPDATE tasks SET status='archived',claim_lock=NULL,"
+                    "claim_expires=NULL,worker_pid=NULL,"
+                    "terminal_outcome=CASE WHEN status='done' "
+                    "THEN COALESCE(terminal_outcome,'success') ELSE 'failure' END,"
+                    "terminal_verdict=CASE WHEN status='done' "
+                    "THEN terminal_verdict ELSE NULL END WHERE id=?",
+                    (task_id,),
+                )
+                run_id = kanban_db._end_run(
+                    conn,
+                    task_id,
+                    outcome="reclaimed",
+                    status="reclaimed",
+                    summary="task archived by workforce reconciliation",
+                )
                 conn.execute("UPDATE wc_items SET current_state=?,updated_at=? WHERE task_id=?", (classification, _now(), task_id))
-                kanban_db._append_event(conn, task_id, "workforce_reconciled_archived", {"classification": classification, "target_task_id": target_id})
+                kanban_db._append_event(
+                    conn,
+                    task_id,
+                    "workforce_reconciled_archived",
+                    {"classification": classification, "target_task_id": target_id},
+                    run_id=run_id,
+                )
+                kanban_db._guardrail_failed_terminal_outcome_in_txn(
+                    conn, task_id, timestamp=_now()
+                )
+                recompute_dependents = True
             elif classification == "failed_verification":
-                conn.execute("UPDATE tasks SET status='triage',completed_at=NULL WHERE id=?", (target_id,))
+                conn.execute(
+                    "UPDATE tasks SET status='triage',completed_at=NULL,"
+                    "terminal_outcome=NULL,terminal_verdict=NULL WHERE id=?",
+                    (target_id,),
+                )
                 conn.execute("UPDATE wc_items SET verification_state='failed',current_state='open',updated_at=? WHERE task_id=?", (_now(), target_id))
                 remediation_id = kanban_db.create_task(
                     conn, title=f"Remediate failed verification for {target_id}",
@@ -1159,6 +1209,8 @@ def apply_reconciliation(
                 results.append({"action_id": action_id, "state": "quarantined", "reason": "broken records require repair review"})
                 continue
             conn.execute("UPDATE wc_reconcile_actions SET state='applied',applied_at=? WHERE action_id=?", (_now(), action_id))
+        if recompute_dependents:
+            kanban_db.recompute_ready(conn)
         results.append({"action_id": action_id, "state": "applied", "created": True})
     return results
 

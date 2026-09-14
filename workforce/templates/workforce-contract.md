@@ -217,3 +217,5 @@ made, and return to requirements discovery. Do not merely revise a brief while
 workers continue against the old assumptions.
 
 {{role_constraints}}
+
+{{lifecycle_role}}
