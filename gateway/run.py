@@ -29058,7 +29058,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if callable(receipt_for)
                 else getattr(consumer, "final_delivery_metadata", None)
             )
-            has_platform_identity = isinstance(receipt, dict) and bool(
+            if not isinstance(receipt, dict):
+                return
+            has_platform_identity = bool(
                 receipt.get("platform_message_id")
                 or receipt.get("platform_message_ids")
             )
