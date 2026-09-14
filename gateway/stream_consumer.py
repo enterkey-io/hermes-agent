@@ -524,8 +524,20 @@ class GatewayStreamConsumer:
                 if normalized not in self._platform_message_ids:
                     self._platform_message_ids.append(normalized)
 
-    def record_external_final_delivery(self, text: str, message_id: Optional[str] = None) -> None:
+    def record_external_final_delivery(
+        self,
+        text: str,
+        message_id: Optional[str] = None,
+        *,
+        delivery_result: Any = None,
+    ) -> None:
         """Record a gateway reconciliation edit made after streaming ends."""
+        if delivery_result is not None:
+            # A successful oversized edit can expose the original message plus
+            # several continuations. Ingest the complete result before adopting
+            # its last ID so the durable receipt retains visible order.
+            self._track_preview_ids_from_result(delivery_result)
+            message_id = getattr(delivery_result, "message_id", None) or message_id
         if message_id:
             self._message_id = str(message_id)
         self._final_response_sent = True
@@ -1784,7 +1796,12 @@ class GatewayStreamConsumer:
                     )
 
         self._segment_preview_message_ids = set()
+        # This fresh message replaces the deleted preview, so rebuild the
+        # receipt from the successful send result. Adapter-provided ordered
+        # split IDs remain authoritative when the replacement itself overflowed.
+        self._platform_message_ids = []
         self._message_id = new_message_id or "__no_edit__"
+        self._track_preview_ids_from_result(result)
         self._already_sent = True
         self._final_response_sent = True
         self._final_content_delivered = True

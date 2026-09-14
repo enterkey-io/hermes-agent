@@ -110,6 +110,59 @@ async def test_replacement_fallback_receipt_excludes_deleted_preview_identity():
     }
 
 
+@pytest.mark.asyncio
+async def test_empty_fallback_receipt_excludes_deleted_preview_identity():
+    adapter = SimpleNamespace(
+        send=AsyncMock(
+            return_value=SimpleNamespace(
+                success=True,
+                message_id="final-message",
+                continuation_message_ids=(),
+                raw_response=None,
+            )
+        ),
+        delete_message=AsyncMock(return_value=True),
+    )
+    consumer = GatewayStreamConsumer(adapter=adapter, chat_id="chat-1")
+    consumer._message_id = "preview-message"
+    consumer._segment_preview_message_ids = {"preview-message"}
+    consumer._platform_message_ids = ["preview-message"]
+
+    assert await consumer._send_empty_fallback_final("complete response") == "delivered"
+
+    adapter.delete_message.assert_awaited_once_with("chat-1", "preview-message")
+    assert consumer.final_delivery_metadata == {
+        "response_identity": consumer.response_identity,
+        "platform_message_id": "final-message",
+    }
+
+
+def test_external_split_final_delivery_records_every_message_id_in_order():
+    consumer = GatewayStreamConsumer(adapter=object(), chat_id="chat-1")
+    consumer._message_id = "original"
+    consumer._platform_message_ids = ["original"]
+    result = SimpleNamespace(
+        success=True,
+        message_id="continuation-2",
+        continuation_message_ids=("continuation-1", "continuation-2"),
+        raw_response=None,
+    )
+
+    consumer.record_external_final_delivery(
+        "complete response",
+        delivery_result=result,
+    )
+
+    assert consumer.final_delivery_metadata == {
+        "response_identity": consumer.response_identity,
+        "platform_message_ids": [
+            "original",
+            "continuation-1",
+            "continuation-2",
+        ],
+    }
+
+
 def test_gateway_delivery_receipt_targets_exact_active_row_across_compaction(tmp_path):
     db_path = tmp_path / "state.db"
     db = SessionDB(db_path=db_path)

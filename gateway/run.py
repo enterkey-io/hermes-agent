@@ -29026,6 +29026,80 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
                 return False
 
+        async def _persist_stream_delivery_receipt(
+            completed_response,
+            consumer,
+        ) -> None:
+            """Bind a confirmed platform delivery to its exact assistant row."""
+            if not (
+                isinstance(completed_response, dict)
+                and not completed_response.get("failed")
+                and consumer is not None
+            ):
+                return
+            final_text = completed_response.get("final_response") or ""
+            matches = getattr(consumer, "delivered_final_matches", None)
+            if not final_text or not callable(matches):
+                return
+            try:
+                current_delivery = matches(final_text) is True
+            except Exception:
+                current_delivery = False
+            if not current_delivery:
+                return
+
+            receipt = getattr(consumer, "final_delivery_metadata", None)
+            has_platform_identity = isinstance(receipt, dict) and bool(
+                receipt.get("platform_message_id")
+                or receipt.get("platform_message_ids")
+            )
+            if not (
+                has_platform_identity
+                and receipt.get("response_identity")
+            ):
+                return
+
+            assistant_row_id = completed_response.get("assistant_message_row_id")
+            message = next(
+                (
+                    item
+                    for item in reversed(completed_response.get("messages") or [])
+                    if isinstance(item, dict)
+                    and item.get("role") == "assistant"
+                    and item.get("_row_id") == assistant_row_id
+                ),
+                None,
+            )
+            if message is None or assistant_row_id is None:
+                logger.debug(
+                    "No persisted assistant row identity available for gateway "
+                    "delivery receipt (session=%s)",
+                    completed_response.get("session_id") or session_id,
+                )
+                return
+
+            delivery_session_id = completed_response.get("session_id") or session_id
+            try:
+                recorded = await self.async_session_store.record_assistant_delivery(
+                    delivery_session_id,
+                    assistant_row_id,
+                    receipt,
+                )
+            except Exception:
+                recorded = False
+                logger.debug(
+                    "Gateway delivery receipt persistence failed",
+                    exc_info=True,
+                )
+            if recorded:
+                metadata = dict(message.get("display_metadata") or {})
+                metadata["gateway_delivery"] = receipt
+                message["display_metadata"] = metadata
+                if receipt.get("platform_message_id"):
+                    message["platform_message_id"] = receipt[
+                        "platform_message_id"
+                    ]
+
         try:
             # Run in thread pool to not block.  Use an *inactivity*-based
             # timeout instead of a wall-clock limit: the agent can run for
@@ -29588,6 +29662,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             )
                         except Exception as e:
                             logger.warning("Failed to send first response before queued message: %s", e)
+                    # This branch returns recursively before the normal
+                    # post-stream receipt block. Persist the completed turn now,
+                    # after its stream task and queued-first delivery have settled.
+                    await _persist_stream_delivery_receipt(
+                        _delivery_result,
+                        _sc,
+                    )
                     # Release deferred bg-review notifications now that the
                     # first response has been delivered.  Pop from the
                     # adapter's callback dict (prevents double-fire in
@@ -29905,6 +29986,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             _sc.record_external_final_delivery(
                                 _final,
                                 getattr(_reconcile_res, "message_id", None) or _sc_msg_id,
+                                delivery_result=_reconcile_res,
                             )
                             logger.info(
                                 "Reconciled stale streamed finalize for session %s: edited message %s with the complete response (#71643).",
@@ -29958,6 +30040,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             _sc.record_external_final_delivery(
                                 response["final_response"],
                                 getattr(_edit_res, "message_id", None) or _sc_msg_id,
+                                delivery_result=_edit_res,
                             )
                             logger.info(
                                 "Edited streamed message %s for session %s to include plugin-transformed content.",
@@ -29979,62 +30062,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # platform delivery result is known. Bind this consumer's receipt to
         # the exact row id returned by that insert (or by a later in-place
         # compaction rewrite); never recover identity by matching response text.
-        if isinstance(response, dict) and not response.get("failed") and _sc is not None:
-            _final = response.get("final_response") or ""
-            _matches = getattr(_sc, "delivered_final_matches", None)
-            if _final and callable(_matches):
-                try:
-                    _current_delivery = _matches(_final) is True
-                except Exception:
-                    _current_delivery = False
-                if _current_delivery:
-                    _receipt = getattr(_sc, "final_delivery_metadata", None)
-                    _has_platform_identity = isinstance(_receipt, dict) and bool(
-                        _receipt.get("platform_message_id")
-                        or _receipt.get("platform_message_ids")
-                    )
-                    if _has_platform_identity and _receipt.get("response_identity"):
-                        _assistant_row_id = response.get("assistant_message_row_id")
-                        _message = next(
-                            (
-                                item
-                                for item in reversed(response.get("messages") or [])
-                                if isinstance(item, dict)
-                                and item.get("role") == "assistant"
-                                and item.get("_row_id") == _assistant_row_id
-                            ),
-                            None,
-                        )
-                        if _message is not None and _assistant_row_id is not None:
-                            _delivery_session_id = (
-                                response.get("session_id") or session_id
-                            )
-                            try:
-                                _recorded = await self.async_session_store.record_assistant_delivery(
-                                    _delivery_session_id,
-                                    _assistant_row_id,
-                                    _receipt,
-                                )
-                            except Exception:
-                                _recorded = False
-                                logger.debug(
-                                    "Gateway delivery receipt persistence failed",
-                                    exc_info=True,
-                                )
-                            if _recorded:
-                                _metadata = dict(_message.get("display_metadata") or {})
-                                _metadata["gateway_delivery"] = _receipt
-                                _message["display_metadata"] = _metadata
-                                if _receipt.get("platform_message_id"):
-                                    _message["platform_message_id"] = _receipt[
-                                        "platform_message_id"
-                                    ]
-                        else:
-                            logger.debug(
-                                "No persisted assistant row identity available for "
-                                "gateway delivery receipt (session=%s)",
-                                response.get("session_id") or session_id,
-                            )
+        await _persist_stream_delivery_receipt(response, _sc)
 
         # Schedule deletion of tracked temporary progress bubbles after the
         # final response lands. Failed runs skip this so bubbles remain as

@@ -190,6 +190,28 @@ class PartialOverflowFinalEditProgressCaptureAdapter(
         return SendResult(success=True, message_id=message_id)
 
 
+class SuccessfulSplitFinalEditProgressCaptureAdapter(
+    MetadataEditProgressCaptureAdapter
+):
+    async def edit_message(
+        self, chat_id, message_id, content, *, finalize: bool = False, metadata=None
+    ) -> SendResult:
+        await super().edit_message(
+            chat_id,
+            message_id,
+            content,
+            finalize=finalize,
+            metadata=metadata,
+        )
+        if finalize and "[plugin appended this]" in content:
+            return SendResult(
+                success=True,
+                message_id="continuation-2",
+                continuation_message_ids=("continuation-1", "continuation-2"),
+            )
+        return SendResult(success=True, message_id=message_id)
+
+
 class DraftProgressCaptureAdapter(ProgressCaptureAdapter):
     def __init__(self, platform=Platform.TELEGRAM):
         super().__init__(platform=platform)
@@ -1072,6 +1094,7 @@ async def _run_with_agent(
     adapter_cls=ProgressCaptureAdapter,
     user_id=None,
     scope_id=None,
+    configure_runner=None,
 ):
     if config_data:
         import yaml
@@ -1088,6 +1111,8 @@ async def _run_with_agent(
 
     adapter = adapter_cls(platform=platform)
     runner = _make_runner(adapter)
+    if configure_runner is not None:
+        configure_runner(runner)
     gateway_run = importlib.import_module("gateway.run")
     if config_data and "streaming" in config_data:
         runner.config.streaming = StreamingConfig.from_dict(config_data["streaming"])
@@ -1348,6 +1373,24 @@ class TransformedStreamAgent:
         }
 
 
+class TransformedStreamReceiptAgent(TransformedStreamAgent):
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        result = super().run_conversation(
+            message,
+            conversation_history=conversation_history,
+            task_id=task_id,
+        )
+        result["assistant_message_row_id"] = 701
+        result["messages"] = [
+            {
+                "role": "assistant",
+                "content": result["final_response"],
+                "_row_id": 701,
+            }
+        ]
+        return result
+
+
 class SequentialStreamReceiptAgent:
     """Two logical turns with distinct streamed finals for delivery provenance."""
 
@@ -1509,6 +1552,46 @@ async def test_partial_transformed_final_edit_recovers_missing_tail(
 
 
 @pytest.mark.asyncio
+async def test_successful_split_transformed_edit_persists_every_message_id(
+    monkeypatch, tmp_path
+):
+    receipts = []
+
+    def configure_runner(runner):
+        runner.session_store.record_assistant_delivery = (
+            lambda session_id, row_id, receipt: receipts.append(
+                (session_id, row_id, receipt)
+            )
+            or True
+        )
+
+    _adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        TransformedStreamReceiptAgent,
+        session_id="sess-split-transformed-stream",
+        config_data={
+            "display": {"tool_progress": "off", "interim_assistant_messages": False},
+            "streaming": {"enabled": True, "edit_interval": 0.01, "buffer_threshold": 1},
+        },
+        platform=Platform.DISCORD,
+        chat_id="discord-1",
+        chat_type="dm",
+        thread_id=None,
+        adapter_cls=SuccessfulSplitFinalEditProgressCaptureAdapter,
+        configure_runner=configure_runner,
+    )
+
+    assert result.get("already_sent") is True
+    assert receipts[0][0:2] == ("sess-split-transformed-stream", 701)
+    assert receipts[0][2]["platform_message_ids"] == [
+        "progress-1",
+        "continuation-1",
+        "continuation-2",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_sequential_streamed_turns_do_not_reuse_persisted_delivery_receipts(
     monkeypatch, tmp_path
 ):
@@ -1554,6 +1637,72 @@ async def test_sequential_streamed_turns_do_not_reuse_persisted_delivery_receipt
     assert second_receipt["platform_message_id"] == "telegram-2"
     assert first["messages"][0]["display_metadata"]["gateway_delivery"] == first_receipt
     assert second["messages"][0]["display_metadata"]["gateway_delivery"] == second_receipt
+
+
+@pytest.mark.asyncio
+async def test_queued_streamed_turn_persists_each_receipt_before_recursing(
+    monkeypatch, tmp_path
+):
+    adapter = MetadataEditProgressCaptureAdapter(platform=Platform.TELEGRAM)
+    next_id = iter(("telegram-1", "telegram-2"))
+
+    async def send(chat_id, content, reply_to=None, metadata=None):
+        adapter.sent.append(
+            {"chat_id": chat_id, "content": content, "metadata": metadata}
+        )
+        return SendResult(success=True, message_id=next(next_id))
+
+    adapter.send = send
+    runner = _make_runner(adapter)
+    runner.config.streaming = StreamingConfig(
+        enabled=True,
+        edit_interval=0.01,
+        buffer_threshold=1,
+    )
+    receipts = []
+    runner.session_store.record_assistant_delivery = (
+        lambda session_id, row_id, receipt: receipts.append(
+            (session_id, row_id, receipt)
+        )
+        or True
+    )
+    gateway_run = importlib.import_module("gateway.run")
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(
+        gateway_run,
+        "_resolve_runtime_agent_kwargs",
+        lambda: {"api_key": "***"},
+    )
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = SequentialStreamReceiptAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="chat-1",
+        chat_type="group",
+    )
+    session_key = "agent:main:telegram:group:chat-1"
+    adapter._pending_messages[session_key] = MessageEvent(
+        text="second",
+        message_type=MessageType.TEXT,
+        source=source,
+        message_id="queued-1",
+    )
+
+    result = await runner._run_agent(
+        "first",
+        "",
+        [],
+        source,
+        "session-1",
+        session_key=session_key,
+    )
+
+    assert [receipt[1] for receipt in receipts] == [101, 102]
+    assert receipts[0][2]["platform_message_id"] == "telegram-1"
+    assert receipts[1][2]["platform_message_id"] == "telegram-2"
+    assert result["assistant_message_row_id"] == 102
+    assert result["messages"][0]["display_metadata"]["gateway_delivery"] == receipts[1][2]
 
 
 @pytest.mark.asyncio
