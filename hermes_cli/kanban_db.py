@@ -6552,7 +6552,6 @@ def _guardrail_failed_terminal_outcome_in_txn(
         request is None
         or request.kind != "origin_request"
         or request.status != "active"
-        or request.root_task_id == task_id
     ):
         return False
     observed = task_terminal_outcome(conn, task_id)

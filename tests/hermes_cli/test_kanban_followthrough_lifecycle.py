@@ -409,6 +409,28 @@ def test_archiving_unfinished_coordination_work_enters_guardrail(
         assert len(_events(conn, root_id, "coordination_guardrail_reached")) == 1
 
 
+def test_archiving_unfinished_coordination_root_enters_guardrail(
+    followthrough_env: Path,
+) -> None:
+    with kb.connect() as conn:
+        root_id, request = _accept_telegram_request(conn)
+
+        assert kb.archive_task(conn, root_id)
+
+        refreshed = kb.get_coordination_request(conn, request.id)
+        assert refreshed is not None and refreshed.status == "return_pending"
+        assert _events(conn, root_id, "terminal_outcome_failed") == [
+            {
+                "request_root_id": request.id,
+                "required_outcome": None,
+                "observed_outcome": "failure",
+                "verdict": None,
+                "blocked_children": [],
+            }
+        ]
+        assert len(_events(conn, root_id, "coordination_guardrail_reached")) == 1
+
+
 def test_terminal_outcome_is_immutable_after_completed_metadata_edit(
     followthrough_env: Path,
 ) -> None:
