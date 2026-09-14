@@ -1543,6 +1543,67 @@ def test_pass_review_tool_rejects_legacy_card(lifecycle_env, monkeypatch) -> Non
     assert "lifecycle" in response["error"]
 
 
+def test_pass_review_retry_holds_opt_in_lock_through_idempotency_check(
+    lifecycle_env, monkeypatch
+) -> None:
+    monkeypatch.setattr(kb, "lifecycle_enforcement_enabled", lambda *_a, **_k: True)
+    with kb.connect() as conn:
+        task_id = _managed_task(
+            conn, title="atomic review retry", idempotency_key="atomic-review-retry-v1"
+        )
+        implementation = kb.claim_task(conn, task_id)
+        assert implementation is not None
+        assert kb.request_review(
+            conn,
+            task_id,
+            summary="Implementation is ready for review.",
+            metadata={"tests": ["focused"]},
+            expected_run_id=implementation.current_run_id,
+        )
+        review = kb.claim_review_task(conn, task_id)
+        assert review is not None
+        assert kb.pass_review(
+            conn,
+            task_id,
+            summary="PASS after independent review.",
+            metadata={"verdict": "pass"},
+            expected_run_id=review.current_run_id,
+        ) == (True, "aurora")
+
+        real_idempotency_check = kb._idempotent_lifecycle_result
+        competing_writes: list[str] = []
+
+        def race_opt_in_removal(*args, **kwargs):
+            with kb.connect() as competing:
+                competing.execute("PRAGMA busy_timeout = 10")
+                try:
+                    with kb.write_txn(competing):
+                        competing.execute(
+                            "UPDATE tasks SET lifecycle_type = NULL WHERE id = ?",
+                            (task_id,),
+                        )
+                except sqlite3.OperationalError as exc:
+                    competing_writes.append(str(exc))
+                else:
+                    competing_writes.append("committed")
+            return real_idempotency_check(*args, **kwargs)
+
+        monkeypatch.setattr(kb, "_idempotent_lifecycle_result", race_opt_in_removal)
+        assert kb.pass_review(
+            conn,
+            task_id,
+            summary="PASS after independent review.",
+            metadata={"verdict": "pass"},
+            expected_run_id=review.current_run_id,
+            retry_actor="reese",
+            retry_only=True,
+        ) == (True, "aurora")
+        assert competing_writes and "locked" in competing_writes[0]
+        task = kb.get_task(conn, task_id)
+        assert task is not None
+        assert task.lifecycle_type == "software"
+
+
 def test_handoff_tool_rejects_a_caller_who_is_not_the_current_assignee(
     lifecycle_env, monkeypatch
 ) -> None:

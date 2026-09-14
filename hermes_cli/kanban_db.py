@@ -11960,38 +11960,9 @@ def pass_review(
     if not isinstance(metadata, dict) or not metadata:
         return False, "metadata must contain independent PASS evidence"
 
-    # Receiver is card-derived, so resolve it before checking idempotency.
-    existing = get_task(conn, task_id)
-    if existing is None:
-        return False, "task not found"
-    if not existing.lifecycle_type:
-        return False, "review pass requires lifecycle_type opt-in"
-    receiver = existing.intent_validator or existing.original_author
-    if not receiver:
-        return False, "review handoff has no intent validator or original author"
-    receiver = _canonical_assignee(receiver)
-    retry = _idempotent_lifecycle_result(
-        conn,
-        task_id,
-        expected_run_id,
-        outcome="review_passed",
-        event_kind="review_passed",
-        receiver=receiver,
-        next_phase="intent_review",
-    )
-    if retry is not None:
-        actor_check = retry_only or retry_actor is not None
-        if actor_check and not _lifecycle_run_owned_by_actor(
-            conn,
-            task_id,
-            expected_run_id,
-            retry_actor,
-        ):
-            return False, "retry run is not owned by the caller"
-        return retry
-    if retry_only:
-        return False, "no matching committed lifecycle transition"
-
+    # The receiver is card-derived. Resolve it and any response-lost retry
+    # under one write transaction so lifecycle opt-in or routing cannot change
+    # between validation and acceptance of the committed transition.
     with write_txn(conn):
         row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         if row is None:
@@ -11999,6 +11970,31 @@ def pass_review(
         task = Task.from_row(row)
         if not task.lifecycle_type:
             return False, "review pass requires lifecycle_type opt-in"
+        receiver = task.intent_validator or task.original_author
+        if not receiver:
+            return False, "review handoff has no intent validator or original author"
+        receiver = _canonical_assignee(receiver)
+        retry = _idempotent_lifecycle_result(
+            conn,
+            task_id,
+            expected_run_id,
+            outcome="review_passed",
+            event_kind="review_passed",
+            receiver=receiver,
+            next_phase="intent_review",
+        )
+        if retry is not None:
+            actor_check = retry_only or retry_actor is not None
+            if actor_check and not _lifecycle_run_owned_by_actor(
+                conn,
+                task_id,
+                expected_run_id,
+                retry_actor,
+            ):
+                return False, "retry run is not owned by the caller"
+            return retry
+        if retry_only:
+            return False, "no matching committed lifecycle transition"
         if task.status != "running" or task.current_run_id is None:
             return False, "task is not in an active review run"
         if expected_run_id is not None and task.current_run_id != int(expected_run_id):
