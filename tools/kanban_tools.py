@@ -1903,6 +1903,20 @@ def _handle_create(args: dict, **kw) -> str:
     report_to_origin, report_bool_error = _parse_bool_arg(args, "report_to_origin")
     if report_bool_error:
         return tool_error(report_bool_error)
+    if report_to_origin and args.get("coordination") is None:
+        origin_platform = get_session_env("HERMES_SESSION_PLATFORM", "")
+        origin_chat = get_session_env("HERMES_SESSION_CHAT_ID", "")
+        origin_session_key = (
+            get_session_env("HERMES_SESSION_KEY", "")
+            or os.environ.get("HERMES_SESSION_KEY", "")
+        )
+        if not session_id or not (
+            (origin_platform and origin_chat) or origin_session_key
+        ):
+            return tool_error(
+                "report_to_origin requires a verified originating session and "
+                "delivery binding; no task was created"
+            )
     coordination = args.get("coordination")
     if coordination is not None and not isinstance(coordination, dict):
         return tool_error("coordination must be an object")
@@ -2130,6 +2144,15 @@ def _handle_create(args: dict, **kw) -> str:
                         initial_status=str(initial_status),
                         created_by=_task_creator(),
                         session_id=session_id,
+                        lifecycle_type=args.get("lifecycle_type"),
+                        original_author=args.get("original_author"),
+                        implementer=args.get("implementer"),
+                        technical_reviewer=args.get("technical_reviewer"),
+                        intent_validator=args.get("intent_validator"),
+                        activation_owner=args.get("activation_owner"),
+                        closure_owner=args.get("closure_owner"),
+                        current_phase=args.get("current_phase"),
+                        return_to=args.get("return_to"),
                     )
                     new_task = kb.get_task(conn, new_tid)
                     # Exactly the accepted root owns the human origin route.

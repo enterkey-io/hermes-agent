@@ -629,8 +629,29 @@ _CTX_MAX_COMMENTS       = 30      # most recent N comments shown in full
 _CTX_MAX_FIELD_BYTES    = 4 * 1024   # 4 KB per summary/error/metadata/result
 _CTX_MAX_BODY_BYTES     = 8 * 1024   # 8 KB per task.body (opening post)
 _CTX_MAX_COMMENT_BYTES  = 2 * 1024   # 2 KB per comment
+_CTX_MAX_LIFECYCLE_EVENTS = 20       # selected lifecycle transitions in history
 _TERMINAL_REVIEW_MAX_EVIDENCE_PATHS = 12
 _TERMINAL_REVIEW_MAX_RECOVERY_SUCCESSES = 8
+
+# Keep worker context focused on durable state and ownership transitions.
+# Operational claim, heartbeat, spawn, and retry noise remains in the full log.
+_LIFECYCLE_CONTEXT_EVENT_KINDS = frozenset(
+    {
+        "created",
+        "assigned",
+        "review_requested",
+        "review_passed",
+        "handoff_created",
+        "changes_requested",
+        "review_reopened",
+        "blocked",
+        "unblocked",
+        "completed",
+        "lifecycle_preflight_failed",
+        "activation_recovery_checkpoint",
+        "lifecycle_manager_notified",
+    }
+)
 
 
 def _relative_age(ts: Optional[int], now: Optional[int] = None) -> str:
@@ -1294,6 +1315,17 @@ class Task:
     # Unblock-loop counter. See the column comment in SCHEMA_SQL and
     # ``BLOCK_RECURRENCE_LIMIT``. Reset only on successful completion.
     block_recurrences: int = 0
+    # Optional same-card lifecycle provenance.  ``lifecycle_type is None``
+    # keeps legacy cards on their existing advisory behavior.
+    original_author: Optional[str] = None
+    implementer: Optional[str] = None
+    technical_reviewer: Optional[str] = None
+    intent_validator: Optional[str] = None
+    activation_owner: Optional[str] = None
+    closure_owner: Optional[str] = None
+    current_phase: Optional[str] = None
+    lifecycle_type: Optional[str] = None
+    return_to: Optional[str] = None
     # Trusted in-memory dispatch annotation. Never persisted or accepted from
     # task/tool input; the review lane sets it after an authorized claim.
     coordination_purpose: Optional[str] = None
@@ -3605,6 +3637,454 @@ def _require_operational_assignee(assignee: Optional[str]) -> None:
         )
 
 
+def lifecycle_enforcement_enabled(config: Optional[Mapping[str, Any]] = None) -> bool:
+    """Return the staging-safe lifecycle gate (default off)."""
+    if config is None:
+        try:
+            from hermes_cli.config import load_config_readonly
+
+            config = load_config_readonly()
+        except Exception:
+            return False
+    kanban = config.get("kanban", {}) if isinstance(config, Mapping) else {}
+    return bool(
+        isinstance(kanban, Mapping)
+        and kanban.get("lifecycle_enforcement", False)
+    )
+
+
+def lifecycle_observer_enabled(config: Optional[Mapping[str, Any]] = None) -> bool:
+    """Return whether the deterministic stale-handoff observer is enabled."""
+    if config is None:
+        try:
+            from hermes_cli.config import load_config_readonly
+
+            config = load_config_readonly()
+        except Exception:
+            return False
+    kanban = config.get("kanban", {}) if isinstance(config, Mapping) else {}
+    return bool(
+        isinstance(kanban, Mapping)
+        and kanban.get("lifecycle_observer", False)
+    )
+
+
+def _normalize_lifecycle_value(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    return _canonical_assignee(str(value)) or None
+
+
+def lifecycle_identities_match(first: str, second: str) -> bool:
+    """Compare stored agent/profile aliases through canonical identity."""
+    from hermes_cli.workforce_org import load_organization
+
+    org = load_organization()
+    return org.resolve_profile(first).agent == org.resolve_profile(second).agent
+
+
+def _bundled_skill_dir(skill_name: str) -> Optional[Path]:
+    root = Path(__file__).resolve().parents[1] / "skills"
+    matches = list(root.glob(f"*/{skill_name}/SKILL.md"))
+    return matches[0].parent if len(matches) == 1 else None
+
+
+def _profile_has_skill(profile_path: Path, skill_name: str) -> bool:
+    """Check installed/profile-external skill sources without running setup."""
+    wanted = str(skill_name or "").strip()
+    if not wanted:
+        return False
+
+    def _matches(root: Path) -> bool:
+        if not root.is_dir():
+            return False
+        direct = root / wanted / "SKILL.md"
+        if direct.is_file():
+            return True
+        for skill_file in root.glob("*/" + wanted + "/SKILL.md"):
+            if skill_file.is_file():
+                return True
+        for skill_file in root.rglob("SKILL.md"):
+            try:
+                head = skill_file.read_text(encoding="utf-8-sig")[:4096]
+            except OSError:
+                continue
+            if re.search(
+                rf"^name:\s*['\"]?{re.escape(wanted)}['\"]?\s*$",
+                head,
+                re.MULTILINE,
+            ):
+                return True
+        return False
+
+    if _bundled_skill_dir(wanted) is not None:
+        return True
+    if _matches(profile_path / "skills"):
+        return True
+    try:
+        cfg = yaml.safe_load(
+            (profile_path / "config.yaml").read_text(encoding="utf-8-sig")
+        ) or {}
+    except (OSError, yaml.YAMLError):
+        cfg = {}
+    skills_cfg = cfg.get("skills") if isinstance(cfg, dict) else None
+    external = (
+        skills_cfg.get("external_dirs", [])
+        if isinstance(skills_cfg, dict)
+        else []
+    )
+    if isinstance(external, str):
+        external = [external]
+    for value in external:
+        if not value:
+            continue
+        expanded = os.path.expanduser(os.path.expandvars(str(value).strip()))
+        root = Path(expanded)
+        if not root.is_absolute():
+            root = profile_path / root
+        if _matches(root.resolve()):
+            return True
+    return False
+
+
+def _profile_has_static_model_route(profile_path: Path, task: Task | None = None) -> bool:
+    """Validate configured model/provider presence without network polling."""
+    try:
+        cfg = yaml.safe_load(
+            (profile_path / "config.yaml").read_text(encoding="utf-8-sig")
+        ) or {}
+    except (OSError, yaml.YAMLError):
+        return False
+    if not isinstance(cfg, dict):
+        return False
+    model_cfg = cfg.get("model") or {}
+    if isinstance(model_cfg, str):
+        configured_model = model_cfg.strip()
+        configured_provider = ""
+    elif isinstance(model_cfg, Mapping):
+        configured_model = str(
+            model_cfg.get("default") or model_cfg.get("model") or ""
+        ).strip()
+        configured_provider = str(model_cfg.get("provider") or "").strip()
+    else:
+        return False
+    model = (task.model_override if task else None) or configured_model
+    provider = (task.provider_override if task else None) or configured_provider
+    return bool(str(model or "").strip() or str(provider or "").strip())
+
+
+def _task_lifecycle_roles(task: Task) -> dict[str, Optional[str]]:
+    return {
+        "original_author": task.original_author,
+        "implementer": task.implementer,
+        "technical_reviewer": task.technical_reviewer,
+        "intent_validator": task.intent_validator,
+        "activation_owner": task.activation_owner,
+        "closure_owner": task.closure_owner,
+        "return_to": task.return_to,
+    }
+
+
+def _lifecycle_manager_for(task: Task) -> Optional[str]:
+    if not task.lifecycle_type:
+        return None
+    owner = task.assignee or task.implementer or task.return_to or task.original_author
+    if not owner:
+        return None
+    try:
+        from hermes_cli.workforce_org import derive_lifecycle_route, load_organization
+
+        return derive_lifecycle_route(load_organization(), owner).stuck_route
+    except Exception:
+        return None
+
+
+def _append_lifecycle_manager_notification(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    kind: str,
+    detail: Optional[str] = None,
+) -> bool:
+    """Append one deduplicated manager-notification event without model spend."""
+    task = get_task(conn, task_id)
+    if task is None or not task.lifecycle_type:
+        return False
+    manager = _lifecycle_manager_for(task)
+    if not manager:
+        return False
+    rows = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? "
+        "AND kind = 'lifecycle_manager_notified' ORDER BY id DESC",
+        (task_id,),
+    ).fetchall()
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if payload.get("exception_kind") == kind:
+            return False
+    _append_event(
+        conn,
+        task_id,
+        "lifecycle_manager_notified",
+        {
+            "manager": manager,
+            "exception_kind": kind,
+            "detail": str(detail or "")[:400] or None,
+            "model_calls": 0,
+        },
+    )
+    return True
+
+
+def observe_lifecycle_handoffs(
+    conn: sqlite3.Connection,
+    *,
+    now: Optional[int] = None,
+    stale_after_seconds: int = 3600,
+) -> list[dict[str, str]]:
+    """Flag stale assignments or missing successors deterministically."""
+    current = int(time.time() if now is None else now)
+    threshold = max(1, int(stale_after_seconds))
+    rows = conn.execute(
+        "SELECT * FROM tasks WHERE lifecycle_type IS NOT NULL "
+        "AND status NOT IN ('done','archived','blocked','triage','scheduled') "
+        "ORDER BY created_at, id"
+    ).fetchall()
+    results: list[dict[str, str]] = []
+    with write_txn(conn):
+        for row in rows:
+            task = Task.from_row(row)
+            kind: Optional[str] = None
+            if not task.assignee or not task.return_to:
+                kind = "missing_successor"
+            elif task.status in {"ready", "review"}:
+                last = conn.execute(
+                    "SELECT MAX(created_at) AS ts FROM task_events "
+                    "WHERE task_id = ? AND kind IN "
+                    "('assigned','handoff_created','review_passed','review_requested')",
+                    (task.id,),
+                ).fetchone()
+                assigned_at = int(last["ts"] or task.created_at)
+                if current - assigned_at >= threshold:
+                    kind = "stale_assignment"
+            if not kind:
+                continue
+            if _append_lifecycle_manager_notification(
+                conn, task.id, kind=kind, detail=f"phase={task.current_phase}"
+            ):
+                manager = _lifecycle_manager_for(task)
+                if manager:
+                    results.append(
+                        {"task_id": task.id, "kind": kind, "manager": manager}
+                    )
+    return results
+
+
+def lifecycle_preflight_errors(
+    conn: sqlite3.Connection,
+    task: Task,
+    *,
+    check_duplicate: bool = False,
+) -> list[str]:
+    """Return deterministic corrections for an opted-in lifecycle card."""
+    if not task.lifecycle_type:
+        return []
+    errors: list[str] = []
+    try:
+        from hermes_cli.workforce_org import (
+            WorkforceOrganizationError,
+            load_organization,
+            validate_lifecycle_assignment,
+        )
+
+        org = load_organization()
+        actor_ids = {
+            task.assignee,
+            task.original_author,
+            task.implementer,
+            task.technical_reviewer,
+            task.intent_validator,
+            task.activation_owner,
+            task.closure_owner,
+            task.return_to,
+        }
+        for actor in sorted(value for value in actor_ids if value):
+            try:
+                resolved = org.validate_execution_profile(actor)
+            except WorkforceOrganizationError as exc:
+                errors.append(f"lifecycle actor {actor!r} is not operational: {exc}")
+                continue
+            profile = Path(resolved.profile_path or "")
+            if not profile.is_dir():
+                errors.append(
+                    f"lifecycle actor {actor!r} profile does not exist: {profile}"
+                )
+        if task.assignee and task.current_phase:
+            try:
+                validate_lifecycle_assignment(
+                    org,
+                    task.assignee,
+                    task.current_phase,
+                    _task_lifecycle_roles(task),
+                )
+            except WorkforceOrganizationError as exc:
+                errors.append(str(exc))
+        try:
+            assignee_agent = org.resolve_profile(task.assignee or "")
+            assignee_profile: Optional[Path] = (
+                Path(assignee_agent.profile_path)
+                if assignee_agent.profile_path
+                else None
+            )
+        except WorkforceOrganizationError:
+            assignee_profile = None
+    except Exception as exc:
+        errors.append(f"organization route cannot be resolved: {exc}")
+        assignee_profile = None
+
+    if task.current_phase not in VALID_LIFECYCLE_PHASES:
+        errors.append(
+            f"current_phase must be one of {sorted(VALID_LIFECYCLE_PHASES)}"
+        )
+    if task.lifecycle_type not in VALID_LIFECYCLE_TYPES:
+        errors.append(
+            f"lifecycle_type must be one of {sorted(VALID_LIFECYCLE_TYPES)}"
+        )
+    if not task.original_author:
+        errors.append("original_author is required")
+    if not task.closure_owner:
+        errors.append("closure_owner is required")
+    if not task.implementer:
+        errors.append("implementer is required")
+
+    if assignee_profile is not None and assignee_profile.is_dir():
+        for skill_name in task.skills or []:
+            if not _profile_has_skill(assignee_profile, skill_name):
+                errors.append(
+                    f"skill {skill_name!r} is not installed for profile "
+                    f"{task.assignee!r}"
+                )
+        if not _profile_has_static_model_route(assignee_profile, task):
+            errors.append(
+                f"profile {task.assignee!r} has no statically configured model/provider route"
+            )
+
+    if _bundled_skill_dir(KANBAN_LIFECYCLE_SKILL) is None:
+        errors.append(
+            f"mandatory bundled skill {KANBAN_LIFECYCLE_SKILL!r} is missing"
+        )
+
+    if task.workspace_kind == "dir":
+        path = Path(task.workspace_path or "").expanduser()
+        if not path.is_absolute() or not path.is_dir():
+            errors.append("dir workspace must name an existing absolute directory")
+    elif task.workspace_kind == "worktree":
+        anchor_error = _lifecycle_worktree_anchor_error(task.workspace_path)
+        if anchor_error:
+            errors.append(anchor_error)
+
+    if check_duplicate:
+        duplicate = conn.execute(
+            "SELECT id FROM tasks WHERE id != ? AND status NOT IN ('done','archived') "
+            "AND lifecycle_type = ? AND lower(trim(title)) = lower(trim(?)) "
+            "AND COALESCE(original_author, '') = COALESCE(?, '') LIMIT 1",
+            (task.id, task.lifecycle_type, task.title, task.original_author),
+        ).fetchone()
+        if duplicate:
+            errors.append(
+                f"duplicate live card {duplicate['id']} already owns this outcome"
+            )
+    return list(dict.fromkeys(errors))
+
+
+def _lifecycle_worktree_anchor_error(workspace_path: Optional[str]) -> Optional[str]:
+    raw_path = str(workspace_path or "").strip()
+    if not raw_path:
+        return "worktree workspace requires an absolute repository/worktree anchor"
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        return "worktree workspace requires an absolute repository/worktree anchor"
+    if path.exists():
+        usable = _git_toplevel(path) is not None
+    else:
+        usable = _repo_root_for_worktree_target(path) is not None
+    if not usable:
+        return "worktree workspace anchor is not usable as a repository/worktree"
+    return None
+
+
+def _activation_preflight_fingerprint(task: Task) -> str:
+    material = {
+        "assignee": task.assignee,
+        "current_phase": task.current_phase,
+        "lifecycle_type": task.lifecycle_type,
+        "workspace_kind": task.workspace_kind,
+        "workspace_path": task.workspace_path,
+    }
+    encoded = json.dumps(material, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _has_verified_activation_recovery_checkpoint(
+    conn: sqlite3.Connection, task: Task,
+) -> bool:
+    if task.current_phase != "activation":
+        return False
+    row = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? "
+        "AND kind = 'activation_recovery_checkpoint' ORDER BY id DESC LIMIT 1",
+        (task.id,),
+    ).fetchone()
+    if row is None or not row["payload"]:
+        return False
+    try:
+        payload = json.loads(row["payload"])
+    except (TypeError, ValueError):
+        return False
+    return (
+        isinstance(payload, dict)
+        and payload.get("preflight_fingerprint")
+        == _activation_preflight_fingerprint(task)
+    )
+
+
+def _record_lifecycle_preflight_failure(
+    conn: sqlite3.Connection,
+    task_id: str,
+    reason: str,
+) -> None:
+    with write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET status = 'blocked', current_phase = 'recovery', "
+            "claim_lock = NULL, claim_expires = NULL, worker_pid = NULL "
+            "WHERE id = ? AND status IN ('ready','review')",
+            (task_id,),
+        )
+        _append_event(conn, task_id, "lifecycle_preflight_failed", {"reason": reason})
+        _append_lifecycle_manager_notification(
+            conn,
+            task_id,
+            kind="invalid_preflight",
+            detail=reason,
+        )
+
+
+def _preflight_claim(conn: sqlite3.Connection, task_id: str) -> bool:
+    task = get_task(conn, task_id)
+    if task is None or not task.lifecycle_type or not lifecycle_enforcement_enabled():
+        return True
+    if _has_verified_activation_recovery_checkpoint(conn, task):
+        return True
+    errors = lifecycle_preflight_errors(conn, task)
+    if not errors:
+        return True
+    _record_lifecycle_preflight_failure(conn, task_id, "; ".join(errors))
+    return False
+
+
 def _inherited_coordination_root(
     conn: sqlite3.Connection,
     *,
@@ -3664,6 +4144,15 @@ def create_task(
     project_source_task_id: Optional[str] = None,
     coordination_source_task_id: Optional[str] = None,
     coordination_origin_message_id: Optional[str] = None,
+    lifecycle_type: Optional[str] = None,
+    original_author: Optional[str] = None,
+    implementer: Optional[str] = None,
+    technical_reviewer: Optional[str] = None,
+    intent_validator: Optional[str] = None,
+    activation_owner: Optional[str] = None,
+    closure_owner: Optional[str] = None,
+    current_phase: Optional[str] = None,
+    return_to: Optional[str] = None,
 ) -> str:
     """Create a new task and optionally link it under parent tasks.
 
@@ -4035,8 +4524,11 @@ def create_task(
                         max_runtime_seconds,
                         skills, max_retries, model_override, provider_override,
                         reasoning_effort,
-                        goal_mode, goal_max_turns, session_id, request_root_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        goal_mode, goal_max_turns, session_id, request_root_id,
+                        original_author, implementer, technical_reviewer,
+                        intent_validator, activation_owner, closure_owner,
+                        current_phase, lifecycle_type, return_to
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -4063,6 +4555,15 @@ def create_task(
                         int(goal_max_turns) if goal_max_turns is not None else None,
                         session_id,
                         request_root_id,
+                        original_author,
+                        implementer,
+                        technical_reviewer,
+                        intent_validator,
+                        activation_owner,
+                        closure_owner,
+                        current_phase,
+                        lifecycle_type,
+                        return_to,
                     ),
                 )
                 for pid in parents:
@@ -4092,12 +4593,29 @@ def create_task(
                         "model_override": model_override,
                         "provider_override": provider_override,
                         "request_root_id": request_root_id,
+                        "lifecycle_type": lifecycle_type,
+                        "current_phase": current_phase,
+                        "original_author": original_author,
+                        "implementer": implementer,
+                        "technical_reviewer": technical_reviewer,
+                        "intent_validator": intent_validator,
+                        "activation_owner": activation_owner,
+                        "closure_owner": closure_owner,
+                        "return_to": return_to,
                         "coordination_origin_message_id": (
                             str(coordination_origin_message_id)
                             if coordination_origin_message_id else None
                         ),
                     },
                 )
+                if lifecycle_type and lifecycle_enforcement_enabled():
+                    candidate = get_task(conn, task_id)
+                    assert candidate is not None
+                    preflight_errors = lifecycle_preflight_errors(
+                        conn, candidate, check_duplicate=True
+                    )
+                    if preflight_errors:
+                        raise LifecyclePreflightError("; ".join(preflight_errors))
                 if (
                     request_root_id
                     and assignee
@@ -7097,7 +7615,8 @@ def claim_task(
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
     with write_txn(conn, allow_nested=_allow_nested):
         guarded = conn.execute(
-            "SELECT status, body, assignee, request_root_id FROM tasks WHERE id = ?",
+            "SELECT status, body, assignee, request_root_id, current_phase "
+            "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
         if (
@@ -7922,6 +8441,78 @@ class HallucinatedCardsError(ValueError):
 
 class ArtifactPreservationError(RuntimeError):
     """Raised when a declared scratch deliverable cannot be preserved."""
+
+
+def _lifecycle_event_exists(
+    conn: sqlite3.Connection,
+    task_id: str,
+    kind: str,
+    *,
+    source_phase: Optional[str] = None,
+) -> bool:
+    rows = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind = ? ORDER BY id",
+        (task_id, kind),
+    ).fetchall()
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if source_phase is None or payload.get("source_phase") == source_phase:
+            return True
+    return False
+
+
+def _validate_lifecycle_completion(
+    conn: sqlite3.Connection,
+    task: Task,
+    metadata: Optional[dict],
+) -> None:
+    """Enforce closure ownership and phase evidence for opted-in cards."""
+    if not task.lifecycle_type or not lifecycle_enforcement_enabled():
+        return
+    try:
+        owns_closure = bool(task.closure_owner) and lifecycle_identities_match(
+            task.assignee or "", task.closure_owner or ""
+        )
+    except Exception as exc:
+        raise LifecycleEnforcementError(
+            "closure ownership identity cannot be verified"
+        ) from exc
+    if not owns_closure:
+        raise LifecycleEnforcementError(
+            f"only closure owner {task.closure_owner!r} may complete this task"
+        )
+    if task.current_phase not in {"live_acceptance", "closure"}:
+        raise LifecycleEnforcementError(
+            "completion requires live_acceptance or closure phase"
+        )
+    if task.technical_reviewer and not _lifecycle_event_exists(
+        conn, task.id, "review_passed"
+    ):
+        raise LifecycleEnforcementError(
+            "completion requires technical review PASS evidence"
+        )
+    if task.intent_validator and not _lifecycle_event_exists(
+        conn, task.id, "handoff_created", source_phase="intent_review"
+    ):
+        raise LifecycleEnforcementError(
+            "completion requires intent review evidence"
+        )
+    if task.activation_owner and not _lifecycle_event_exists(
+        conn, task.id, "handoff_created", source_phase="activation"
+    ):
+        raise LifecycleEnforcementError(
+            "completion requires activation and canary evidence"
+        )
+    live_evidence = metadata.get("live_evidence") if isinstance(metadata, dict) else None
+    if not live_evidence and not _lifecycle_event_exists(
+        conn, task.id, "handoff_created", source_phase="live_acceptance"
+    ):
+        raise LifecycleEnforcementError(
+            "completion requires metadata.live_evidence or a live-acceptance handoff"
+        )
 
 
 def _source_acceptance_handoff(body: Optional[str]) -> Optional[dict]:
@@ -10118,8 +10709,11 @@ def request_review(
         if not _parents_satisfied(conn, task_id):
             return _ret(False, "parent dependencies are not satisfied")
         trow = conn.execute(
-            "SELECT assignee, status, claim_lock, current_run_id, body "
-            "FROM tasks WHERE id = ?", (task_id,),
+            "SELECT assignee, status, claim_lock, current_run_id, body, "
+            "lifecycle_type, current_phase, implementer, technical_reviewer, "
+            "original_author, intent_validator, activation_owner, closure_owner, "
+            "return_to FROM tasks WHERE id = ?",
+            (task_id,),
         ).fetchone()
         if trow is None:
             return _ret(False, "task not found")
@@ -10138,6 +10732,8 @@ def request_review(
                 "override) instead of clearing the live run's claim",
             )
         implementer = trow["assignee"]
+        if trow["lifecycle_type"] and trow["implementer"]:
+            implementer = trow["implementer"]
         decision_authority = None
         if reserved_decision is not None:
             try:
@@ -10170,6 +10766,8 @@ def request_review(
             if reviewer is not None and _canonical_assignee(reviewer) != source:
                 return _ret(False, "handoff review must return to its source")
             reviewer = source
+        if reviewer is None and trow["lifecycle_type"]:
+            reviewer = trow["technical_reviewer"]
         if reviewer is None:
             changes_run = conn.execute(
                 "SELECT id FROM task_runs "
@@ -10330,6 +10928,9 @@ def request_review(
                 **decision_authority, "review_requested_event_id": review_event_id,
                 "reserved_decision": reserved_decision,
             }, run_id=run_id)
+    notify_task_updated(
+        conn, task_id, ("status", "assignee", "current_phase", "return_to")
+    )
     return _ret(True)
 
 
@@ -13501,6 +14102,9 @@ def _record_task_failure(
     end_run: bool = False,
     event_payload_extra: Optional[dict] = None,
     coordination_classification: str = "transient",
+    lifecycle_recovery_checkpoint: Optional[dict] = None,
+    expected_run_id: Optional[int] = None,
+    expected_claim_lock: Optional[str] = None,
 ) -> bool:
     """Record a non-success outcome (spawn_failed / crashed / timed_out)
     and maybe trip the circuit breaker.
@@ -13564,7 +14168,8 @@ def _record_task_failure(
     with write_txn(conn):
         row = conn.execute(
             "SELECT consecutive_failures, status, max_retries, current_run_id, "
-            "request_root_id "
+            "request_root_id, claim_lock, lifecycle_type, current_phase, assignee, "
+            "workspace_kind, workspace_path "
             "FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
         if row is None:

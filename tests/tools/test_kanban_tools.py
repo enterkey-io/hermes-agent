@@ -1689,6 +1689,31 @@ def test_create_subscribes_gateway_session_when_opted_in(
     assert s["delivery_mode"] == "notify+wake"
 
 
+def test_create_direct_commitment_requires_origin_binding(monkeypatch, worker_env):
+    from gateway.session_context import reset_session_vars
+    from tools import kanban_tools as kt
+
+    reset_session_vars()
+    for key in (
+        "HERMES_SESSION_PLATFORM",
+        "HERMES_SESSION_CHAT_ID",
+        "HERMES_SESSION_KEY",
+        "HERMES_SESSION_ID",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    result = json.loads(
+        kt._handle_create(
+            {
+                "title": "unbound direct commitment",
+                "assignee": "peer",
+                "report_to_origin": True,
+            }
+        )
+    )
+    assert "ok" not in result
+    assert "origin" in result["error"].lower()
+
+
 def test_create_subscribes_tui_session_via_session_key(monkeypatch, worker_env):
     """TUI / desktop sessions don't have a platform/chat_id (single
     local channel), but the parent process exports HERMES_SESSION_KEY.

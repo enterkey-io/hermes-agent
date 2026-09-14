@@ -29,6 +29,8 @@ _TERMINAL_KANBAN_TOOLS = frozenset(
         "kanban_block",
         "kanban_request_review",
         "kanban_request_changes",
+        "kanban_handoff",
+        "kanban_pass_review",
     }
 )
 
@@ -60,6 +62,50 @@ def _tool_result_payload(content: Any) -> Optional[Mapping[str, Any]]:
     return payload if isinstance(payload, Mapping) else None
 
 
+def _tool_result_failure_reason(msg: Mapping[str, Any]) -> Optional[str]:
+    """Return a concise reason when a tool result reports an operation failure."""
+    content = msg.get("content")
+    payload = _tool_result_payload(content)
+    if payload is not None:
+        error = payload.get("error")
+        if error:
+            return str(error).strip()
+        if payload.get("ok") is False:
+            return "tool returned ok=false"
+        if payload.get("success") is False:
+            return "tool returned success=false"
+        status = str(payload.get("status") or "").strip().casefold()
+        if status in {"error", "failed", "failure"}:
+            return f"tool returned status={status}"
+        for field in ("exit_code", "returncode"):
+            code = payload.get(field)
+            if isinstance(code, int) and not isinstance(code, bool) and code != 0:
+                meaning = str(payload.get("exit_code_meaning") or "").strip()
+                return f"{field}={code}" + (f" ({meaning})" if meaning else "")
+        return None
+    if isinstance(content, str):
+        text = content.strip()
+        if text.casefold().startswith(("error:", "failed:", "failure:")):
+            return text
+    return None
+
+
+def latest_operational_failure(
+    messages: Iterable[dict] | None,
+) -> Optional[str]:
+    """Return the newest concrete tool failure observed in this worker run."""
+    if not messages:
+        return None
+    for msg in reversed(list(messages)):
+        if not isinstance(msg, Mapping) or msg.get("role") != "tool":
+            continue
+        reason = _tool_result_failure_reason(msg)
+        if reason:
+            name = str(msg.get("name") or "tool").strip() or "tool"
+            return f"{name}: {reason}"
+    return None
+
+
 def _successful_terminal_result(msg: Mapping[str, Any]) -> bool:
     name = str(msg.get("name") or msg.get("tool_name") or "")
     if name not in _TERMINAL_KANBAN_TOOLS:
@@ -75,6 +121,8 @@ def _successful_terminal_result(msg: Mapping[str, Any]) -> bool:
         return False
 
     if name == "kanban_complete":
+        return True
+    if name in {"kanban_handoff", "kanban_pass_review"}:
         return True
 
     status = str(payload.get("status") or "").strip().lower()
@@ -95,6 +143,21 @@ def session_called_kanban_terminal(messages: Iterable[dict] | None) -> bool:
         if msg.get("role") == "tool" and _successful_terminal_result(msg):
             return True
     return False
+
+
+def kanban_stop_requires_failure_recovery(
+    *,
+    messages: Iterable[dict] | None = None,
+    attempts: int = 0,
+    max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
+) -> bool:
+    """Return whether a surviving tool failure now needs durable recovery."""
+    return bool(
+        (os.environ.get("HERMES_KANBAN_TASK") or "").strip()
+        and (attempts >= max_attempts or not kanban_stop_nudge_enabled())
+        and not session_called_kanban_terminal(messages)
+        and latest_operational_failure(messages)
+    )
 
 
 def _worker_run_is_scheduled() -> bool:
@@ -141,6 +204,8 @@ def build_kanban_stop_nudge(
         return None
     if _worker_run_is_scheduled():
         return None
+    if attempts >= max_attempts:
+        return None
 
     tid = (task_id or os.environ.get("HERMES_KANBAN_TASK") or "").strip() or "this task"
     failure = latest_operational_failure(messages)
@@ -158,7 +223,8 @@ def build_kanban_stop_nudge(
         "terminal state for the board.\n\n"
         f"No successful terminal transition was verified for task `{tid}`. Ending now without one "
         "causes a protocol violation (clean exit with no "
-        "`kanban_complete` / `kanban_block` / `kanban_request_review`).\n\n"
+        "`kanban_complete` / `kanban_block` / `kanban_request_review`)."
+        f"{failure_guidance}\n\n"
         "Do this immediately in your next response — do not narrate intent:\n"
         "1. Finish any remaining deliverable (write the required file(s) now).\n"
         "2. Call `kanban_complete(summary=..., artifacts=[...])` if the work "
