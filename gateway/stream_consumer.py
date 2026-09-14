@@ -2369,6 +2369,45 @@ class GatewayStreamConsumer:
                         content=text,
                         finalize=finalize,
                     )
+                    raw_response = getattr(result, "raw_response", None)
+                    if (
+                        isinstance(raw_response, dict)
+                        and raw_response.get("partial_overflow")
+                    ):
+                        # An adapter delivered the original chunk plus zero or
+                        # more continuations, but not the complete response.
+                        # Some adapters report this as success and others as
+                        # failure; the structured partial marker takes
+                        # precedence over that coarse status bit.
+                        self._track_preview_ids_from_result(result)
+                        continuation_ids = (
+                            getattr(result, "continuation_message_ids", ()) or ()
+                        )
+                        if continuation_ids:
+                            self._turn_split_delivery = True
+                        self._message_id = str(
+                            raw_response.get("last_message_id")
+                            or result.message_id
+                            or self._message_id
+                        )
+                        delivered_prefix = raw_response.get("delivered_prefix")
+                        if isinstance(delivered_prefix, str) and delivered_prefix:
+                            self._last_sent_text = delivered_prefix
+                            self._fallback_prefix = delivered_prefix
+                            self._fallback_preserve_partial_messages = text.startswith(
+                                delivered_prefix
+                            )
+                        else:
+                            self._fallback_prefix = self._visible_prefix()
+                            self._fallback_preserve_partial_messages = False
+                        self._fallback_final_send = True
+                        self._edit_supported = False
+                        self._already_sent = True
+                        self._final_response_sent = False
+                        self._final_content_delivered = False
+                        if continuation_ids:
+                            self._notify_new_message()
+                        return False
                     if result.success:
                         self._already_sent = True
                         # Record any continuation fragments an oversized edit
@@ -2430,35 +2469,6 @@ class GatewayStreamConsumer:
                             # already-visible answer, reintroducing the
                             # duplicate #45517 fixed (#36965 / #25349).
                             self._record_turn_final_payload(text)
-                        raw_response = getattr(result, "raw_response", None)
-                        if isinstance(raw_response, dict) and raw_response.get("partial_overflow"):
-                            # Telegram edited/sent one or more overflow chunks,
-                            # but not the complete response.  Preserve the
-                            # visible prefix so the got_done fallback sends the
-                            # missing tail instead of marking a clipped topic
-                            # reply as final delivery.
-                            self._message_id = str(
-                                raw_response.get("last_message_id")
-                                or result.message_id
-                                or self._message_id
-                            )
-                            delivered_prefix = raw_response.get("delivered_prefix")
-                            if isinstance(delivered_prefix, str) and delivered_prefix:
-                                self._last_sent_text = delivered_prefix
-                                self._fallback_prefix = delivered_prefix
-                                self._fallback_preserve_partial_messages = text.startswith(
-                                    delivered_prefix
-                                )
-                            else:
-                                self._fallback_prefix = self._visible_prefix()
-                                self._fallback_preserve_partial_messages = False
-                            self._fallback_final_send = True
-                            self._edit_supported = False
-                            self._already_sent = True
-                            if getattr(result, "continuation_message_ids", ()):
-                                self._notify_new_message()
-                            return False
-
                         # Edit failed.  If this looks like flood control / rate
                         # limiting, use adaptive backoff: double the edit interval
                         # and retry on the next cycle.  Only permanently disable

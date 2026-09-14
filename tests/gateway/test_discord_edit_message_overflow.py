@@ -241,6 +241,39 @@ class TestFinalOverflowSplits:
         delivered = "".join(edits + [s["content"] for s in sends])
         assert "END_MARKER_XYZ" in delivered
 
+    @pytest.mark.asyncio
+    async def test_later_continuation_failure_reports_partial_overflow(self):
+        adapter = _make_adapter()
+        msg = SimpleNamespace(
+            id=42,
+            to_reference=MagicMock(return_value=SimpleNamespace(kind="ref")),
+            edit=AsyncMock(),
+        )
+
+        def send_effect(index, content, reference):
+            if index == 1:
+                return SimpleNamespace(id=9001)
+            raise RuntimeError("discord continuation failed")
+
+        _wire_channel(
+            adapter,
+            original_msg=msg,
+            send_side_effect=send_effect,
+        )
+
+        result = await adapter.edit_message("555", "42", "q" * 8000, finalize=True)
+
+        assert result.success is True
+        assert result.message_id == "9001"
+        assert result.continuation_message_ids == ("9001",)
+        assert result.raw_response == {
+            "partial_overflow": True,
+            "delivered_chunks": 2,
+            "total_chunks": 5,
+            "last_message_id": "9001",
+            "continuation_message_ids": ("9001",),
+        }
+
 
 # --------------------------------------------------------------------------- #
 # Reactive overflow — Discord 50035 mid-edit triggers the same branch logic
