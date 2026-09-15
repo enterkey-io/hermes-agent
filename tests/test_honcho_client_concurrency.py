@@ -104,8 +104,19 @@ def test_unbound_identity_is_not_published_before_paths_are_ready(monkeypatch):
     config = HonchoClientConfig(api_key="test-key", workspace_id="ws")
     resolving = threading.Event()
     release = threading.Event()
+    second_contending = threading.Event()
     original_resolve = honcho_client.resolve_config_path
+    original_lock = honcho_client._client_slots_lock
     results, errors = [], []
+
+    class ObservedLock:
+        def __enter__(self):
+            if threading.current_thread().name == "second-caller":
+                second_contending.set()
+            return original_lock.__enter__()
+
+        def __exit__(self, *args):
+            return original_lock.__exit__(*args)
 
     def paused_resolve(context):
         resolving.set()
@@ -119,13 +130,15 @@ def test_unbound_identity_is_not_published_before_paths_are_ready(monkeypatch):
             errors.append(exc)
 
     monkeypatch.setattr(honcho_client, "resolve_config_path", paused_resolve)
+    monkeypatch.setattr(honcho_client, "_client_slots_lock", ObservedLock())
     first = threading.Thread(target=worker)
-    second = threading.Thread(target=worker)
+    second = threading.Thread(target=worker, name="second-caller")
     first.start()
     try:
         assert resolving.wait(10)
         assert config.profile_context is None
         second.start()
+        assert second_contending.wait(10)
     finally:
         release.set()
         first.join(10)
