@@ -315,9 +315,39 @@ def test_coordinated_handoff_uses_its_request_bound_named_board(
     assert response["success"] is True
     task_id = response["result"]["task_id"]
     with kanban_db.connect_closing(named_board) as conn:
+        from hermes_cli.workforce_handoffs import acknowledge_handoff
+
         task = kanban_db.get_task(conn, task_id)
         assert task is not None
         assert task.request_root_id == request.id
+        acknowledge_handoff(conn, task_id, actor="aurora", organization=org)
+
+    with scoped_coordination_budget(
+        request_root_id=request.id,
+        task_id=task_id,
+        purpose="work",
+        db_path=named_board,
+    ):
+        checkpoint = json.loads(_handle({
+            "action": "checkpoint",
+            "task_id": task_id,
+            "evidence_references": ["execution:named-board-checkpoint"],
+        }))
+
+    assert checkpoint["success"] is True
+    assert checkpoint["result"]["state"] == "active"
+    worker_bound_checkpoint = json.loads(_handle({
+        "action": "checkpoint",
+        "task_id": task_id,
+        "evidence_references": ["execution:worker-bound-checkpoint"],
+    }))
+    assert worker_bound_checkpoint["success"] is True
+    with kanban_db.connect_closing(named_board) as conn:
+        task = kanban_db.get_task(conn, task_id)
+        assert task is not None
+        assert json.loads(task.body)["checkpoint_evidence"] == [
+            "execution:worker-bound-checkpoint"
+        ]
     with kanban_db.connect_closing(board) as conn:
         assert kanban_db.get_task(conn, task_id) is None
 

@@ -158,8 +158,16 @@ def _handle(args: dict[str, Any], **_kwargs: Any) -> str:
                         ),
                     })
         else:
+            if action in {"acknowledge", "checkpoint"}:
+                from agent.coordination_budget import current_coordination_db_path
+
+                database_path = (
+                    current_coordination_db_path() or kanban_db.kanban_db_path()
+                )
+            else:
+                database_path = kanban_db.canonical_coordination_db_path()
             with kanban_db.connect_closing(
-                kanban_db.canonical_coordination_db_path()
+                database_path
             ) as conn:
                 if action == "acknowledge":
                     result = acknowledge_handoff(
