@@ -410,6 +410,84 @@ def test_ordinary_handoff_inherits_existing_request_from_trusted_source(
     assert event.payload["coordination_origin_message_id"] == "origin-message"
 
 
+@pytest.mark.parametrize("boundary", ["return_pending", "checkpoint"])
+def test_linked_handoff_cannot_acknowledge_after_request_closes(
+    conn, boundary, monkeypatch,
+):
+    monkeypatch.setenv(
+        "HERMES_WORKFORCE_ORG",
+        str(Path(__file__).parents[2] / "workforce" / "organization.yaml"),
+    )
+    now = int(time.time())
+    root_id = kanban_db.create_task(
+        conn,
+        title="Return the accepted request",
+        assignee="aurora",
+        session_id="origin-session",
+    )
+    kanban_db.add_notify_sub(
+        conn,
+        task_id=root_id,
+        platform="telegram",
+        chat_id="origin-chat",
+        notifier_profile="aurora",
+        delivery_mode="wake",
+    )
+    request = kanban_db.create_coordination_request(
+        conn,
+        root_task_id=root_id,
+        origin_session_id="origin-session",
+        origin_message_id="origin-message",
+        checkpoint_seconds=20,
+        organization=ORG,
+        now=now,
+    )
+    created = create_handoff(
+        conn,
+        source_agent="aurora",
+        target_agent="alina",
+        expected_outcome="Repair one host issue",
+        acceptance_test="The repair has full-path evidence",
+        evidence_references=["kanban:t_source"],
+        acknowledgment_deadline=_iso(now + 60),
+        checkpoint_at=_iso(now + 120),
+        organization=ORG,
+        coordination_source_task_id=root_id,
+        session_id="origin-session",
+        coordination_origin_message_id="origin-message",
+    )
+    pickup = claim_workforce_handoff_pickup(
+        conn, target_agent="alina", organization=ORG, now=now + 1,
+    )
+    assert pickup is not None
+    accepted_at = now + 2
+    if boundary == "return_pending":
+        with kanban_db.write_txn(conn):
+            conn.execute(
+                "UPDATE coordination_requests SET status = 'return_pending' "
+                "WHERE id = ?",
+                (request.id,),
+            )
+    else:
+        accepted_at = request.checkpoint_at
+
+    with pytest.raises(ValueError, match="no longer active"):
+        acknowledge_handoff(
+            conn,
+            created["task_id"],
+            actor="alina",
+            organization=ORG,
+            now=accepted_at,
+        )
+
+    task = kanban_db.get_task(conn, created["task_id"])
+    assert task.status == "triage"
+    assert json.loads(task.body)["state"] == "pending_acknowledgment"
+    assert "workforce_handoff_acknowledged" not in {
+        event.kind for event in kanban_db.list_events(conn, task.id)
+    }
+
+
 def test_ordinary_handoff_inside_owned_failure_request_is_visible_and_claimed(
     conn, monkeypatch,
 ):

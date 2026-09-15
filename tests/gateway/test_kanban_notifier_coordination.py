@@ -140,6 +140,24 @@ def test_readiness_runs_without_any_adapter(board):
         assert kb.get_coordination_request(conn, request.id).status == "return_pending"
 
 
+def test_final_return_readiness_is_prepared_on_a_named_board(
+    board, monkeypatch,
+):
+    monkeypatch.delenv("HERMES_KANBAN_DB")
+    kb.create_board("side-project")
+    named_board = kb.kanban_db_path("side-project").resolve()
+    _, request = ready_request(named_board)
+
+    asyncio.run(finish_tick(Runner()))
+
+    with kb.connect_closing(named_board) as conn:
+        current = kb.get_coordination_request(conn, request.id)
+        assert current is not None
+        assert current.status == "return_pending"
+    with kb.connect_closing(board) as conn:
+        assert kb.get_coordination_request(conn, request.id) is None
+
+
 @pytest.mark.parametrize("paused", [False, True])
 def test_real_owned_failure_is_claimed_without_chat_subscription(board, monkeypatch, paused):
     from hermes_cli.workforce_handoffs import create_handoff
@@ -223,6 +241,64 @@ def test_real_ordinary_handoff_is_claimed_by_receiving_profile(board):
     restarted._kanban_pickup_workforce_handoff = AsyncMock()
     asyncio.run(finish_tick(restarted))
     restarted._kanban_pickup_workforce_handoff.assert_not_awaited()
+
+
+def test_request_linked_handoff_is_claimed_from_its_named_board(
+    board, monkeypatch,
+):
+    from hermes_cli.workforce_handoffs import create_handoff
+
+    monkeypatch.delenv("HERMES_KANBAN_DB")
+    kb.create_board("side-project")
+    named_board = kb.kanban_db_path("side-project").resolve()
+    now = datetime.now(timezone.utc)
+    with kb.connect_closing(named_board) as conn:
+        root_id = kb.create_task(
+            conn,
+            title="Return the named-board request",
+            assignee="director",
+            session_id="named-origin-session",
+        )
+        kb.add_notify_sub(
+            conn,
+            task_id=root_id,
+            platform="telegram",
+            chat_id="named-origin-chat",
+            notifier_profile="director",
+            delivery_mode="wake",
+        )
+        request = kb.create_coordination_request(
+            conn,
+            root_task_id=root_id,
+            origin_session_id="named-origin-session",
+            origin_message_id="named-origin-message",
+        )
+        created = create_handoff(
+            conn,
+            source_agent="director",
+            target_agent="builder",
+            expected_outcome="Complete the named-board child",
+            acceptance_test="The child records verified evidence",
+            evidence_references=[f"kanban:{root_id}"],
+            acknowledgment_deadline=(now + timedelta(minutes=2)).isoformat(),
+            checkpoint_at=(now + timedelta(minutes=20)).isoformat(),
+            coordination_source_task_id=root_id,
+            session_id="named-origin-session",
+            coordination_origin_message_id="named-origin-message",
+        )
+
+    runner = Runner()
+    runner._active_profile_name = lambda: "builder"
+    runner._kanban_pickup_workforce_handoff = AsyncMock()
+    asyncio.run(finish_tick(runner))
+
+    runner._kanban_pickup_workforce_handoff.assert_awaited_once()
+    pickup = runner._kanban_pickup_workforce_handoff.call_args.args[0]
+    assert pickup["task_id"] == created["task_id"]
+    assert pickup["request_root_id"] == request.id
+    assert pickup["database_path"] == named_board
+    with kb.connect_closing(board) as conn:
+        assert kb.get_task(conn, created["task_id"]) is None
 
 
 def test_pickup_without_adapter_or_sub_does_not_block_next_tick(board, monkeypatch):

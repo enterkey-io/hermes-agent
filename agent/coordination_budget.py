@@ -106,6 +106,17 @@ def current_coordination_execution() -> tuple[str, str, str] | None:
         return scope.request_root_id, scope.task_id, scope.purpose
 
 
+def current_coordination_db_path() -> Path | None:
+    """Return the request-bound board without consulting ambient board state."""
+    scope = _current_scope()
+    if scope is None:
+        return None
+    with scope.lock:
+        if scope.closed.is_set():
+            raise ValueError("coordination turn already ended")
+        return Path(scope.db_path)
+
+
 def declares_coordination_acceptance(function_name: str, arguments: object) -> bool:
     """Return whether one parsed native tool call declares root acceptance."""
     if function_name != "kanban_create" or not isinstance(arguments, dict):

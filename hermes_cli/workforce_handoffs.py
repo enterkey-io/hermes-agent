@@ -153,6 +153,25 @@ def _authorized_route(org: WorkforceOrganization, source: str, target: str) -> N
     raise ValueError("cross-team handoffs and non-report assignments must route through Aurora")
 
 
+def handoff_request_is_active(
+    conn: sqlite3.Connection,
+    task: kanban_db.Task,
+    *,
+    now: int | None = None,
+) -> bool:
+    """Return whether a linked handoff still has live request authority."""
+    if not task.request_root_id:
+        return True
+    request = kanban_db.get_coordination_request(conn, task.request_root_id)
+    timestamp = int(time.time() if now is None else now)
+    return bool(
+        request is not None
+        and request.kind in kanban_db.WORKFORCE_HANDOFF_INHERITABLE_REQUEST_KINDS
+        and request.status == "active"
+        and timestamp < request.checkpoint_at
+    )
+
+
 def create_handoff(
     conn: sqlite3.Connection,
     *,
@@ -407,20 +426,38 @@ def acknowledge_handoff(
             target_agent=target,
         ):
             raise ValueError("workforce handoff contract changed before acknowledgment")
-    accepted_at = int(now if now is not None else time.time())
-    if accepted_at > int(payload["acknowledgment_deadline"]):
-        raise ValueError("acknowledgment deadline has passed; Aurora must review the overdue handoff")
-    payload.update({"state": "accepted", "acknowledged_at": accepted_at})
     with write_txn(conn):
+        accepted_at = int(now if now is not None else time.time())
+        if accepted_at > int(payload["acknowledgment_deadline"]):
+            raise ValueError(
+                "acknowledgment deadline has passed; Aurora must review the overdue handoff"
+            )
+        current_task = kanban_db.get_task(conn, task_id)
+        if (
+            current_task is None
+            or current_task.status != task.status
+            or current_task.request_root_id != task.request_root_id
+            or _body(current_task) != payload
+        ):
+            raise ValueError("workforce handoff changed before acknowledgment")
+        if not handoff_request_is_active(conn, current_task, now=accepted_at):
+            raise ValueError(
+                "inherited coordination request is unsupported or no longer active"
+            )
+        accepted_payload = dict(payload)
+        accepted_payload.update({
+            "state": "accepted",
+            "acknowledged_at": accepted_at,
+        })
         conn.execute(
             "UPDATE tasks SET body = ?, status = 'ready' WHERE id = ?",
-            (json.dumps(payload, indent=2, sort_keys=True), task_id),
+            (json.dumps(accepted_payload, indent=2, sort_keys=True), task_id),
         )
         kanban_db._append_event(
             conn, task_id, "workforce_handoff_acknowledged", {"actor": actor_id}
         )
     kanban_db.notify_task_updated(conn, task_id, ("body", "status"))
-    return {"task_id": task_id, **payload}
+    return {"task_id": task_id, **accepted_payload}
 
 
 def _claim_workforce_handoff_pickup(
@@ -539,11 +576,8 @@ def _claim_workforce_handoff_pickup(
                     conn, task.request_root_id
                 )
                 if (
-                    request is None
-                    or request.kind
-                    not in kanban_db.WORKFORCE_HANDOFF_INHERITABLE_REQUEST_KINDS
-                    or request.status != "active"
-                    or claimed_at >= request.checkpoint_at
+                    not handoff_request_is_active(conn, task, now=claimed_at)
+                    or request is None
                 ):
                     continue
             kanban_db._append_event(

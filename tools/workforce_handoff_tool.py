@@ -33,6 +33,7 @@ def _handle(args: dict[str, Any], **_kwargs: Any) -> str:
         if action == "create":
             from agent.coordination_budget import (
                 coordination_materialization_binding,
+                current_coordination_db_path,
                 register_uncoordinated_materialization,
             )
             from gateway.session_context import get_session_env
@@ -69,8 +70,15 @@ def _handle(args: dict[str, Any], **_kwargs: Any) -> str:
                     )
                     or get_session_env("HERMES_SESSION_KEY", "")
                 )
+                database_path = (
+                    current_coordination_db_path()
+                    if coordination_context is not None
+                    else kanban_db.canonical_coordination_db_path()
+                )
+                if database_path is None:  # pragma: no cover - bound invariant
+                    raise ValueError("coordination database binding is missing")
                 with kanban_db.connect_closing(
-                    kanban_db.canonical_coordination_db_path()
+                    database_path
                 ) as conn:
                     if coordination_context is not None:
                         assert source_task_id is not None

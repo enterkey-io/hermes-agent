@@ -934,9 +934,14 @@ def canonical_coordination_db_path() -> Path:
     board is pinned.
     """
     override = os.environ.get("HERMES_KANBAN_DB", "").strip()
-    pinned = _normalize_board_slug(
-        os.environ.get("HERMES_KANBAN_BOARD", "").strip()
-    )
+    try:
+        pinned = _normalize_board_slug(
+            os.environ.get("HERMES_KANBAN_BOARD", "").strip()
+        )
+    except ValueError:
+        # Match get_current_board(): a malformed manual pin must not disable
+        # machine-wide coordination when the canonical path is still usable.
+        pinned = None
     if override and pinned in {None, DEFAULT_BOARD}:
         return Path(override).expanduser()
     return kanban_home() / "kanban.db"

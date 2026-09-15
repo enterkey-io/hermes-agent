@@ -244,56 +244,75 @@ class GatewayKanbanWatchersMixin:
         pickup_allowed = _kanban_dispatch_allowed()
 
         def collect():
-            # Coordination roots are canonical-board contracts, independent
-            # of the currently selected dashboard board or chat adapters.
-            path = kb.canonical_coordination_db_path().resolve()
-            if not kb.has_coordination_tick_work(
-                path,
-                notifier_profiles=routable_profiles,
-                notifier_agents=agents,
-                include_unowned=include_unowned,
-            ):
-                return [], []
-            conn = kb.connect(path)
+            # Accepted requests stay on their originating board. Scan every
+            # live board once while keeping the one-turn-per-profile limit
+            # global across the tick.
             try:
-                available_deliveries = kb.prepare_coordination_final_return_deliveries(
-                    conn,
+                boards = kb.list_boards(include_archived=False)
+            except Exception:
+                boards = [{
+                    "slug": kb.DEFAULT_BOARD,
+                    "db_path": str(kb.canonical_coordination_db_path()),
+                }]
+            deliveries = []
+            pickups = []
+            available_profiles = set(idle_profiles)
+            seen_db_paths: set[Path] = set()
+            for board in boards:
+                raw_path = board.get("db_path")
+                slug = board.get("slug") or kb.DEFAULT_BOARD
+                path = Path(
+                    raw_path or kb.kanban_db_path(str(slug))
+                ).expanduser().resolve()
+                if path in seen_db_paths:
+                    continue
+                seen_db_paths.add(path)
+                if not kb.has_coordination_tick_work(
+                    path,
                     notifier_profiles=routable_profiles,
                     notifier_agents=agents,
                     include_unowned=include_unowned,
-                )
-                deliveries = []
-                final_profiles: set[str] = set()
-                for delivery in available_deliveries:
-                    execution_profile = next((
-                        profile for profile in sorted(idle_profiles)
-                        if profile_agents.get(profile) == delivery["responsible_agent"]
-                    ), None)
-                    if execution_profile is None:
-                        continue
-                    deliveries.append({
-                        **delivery,
-                        "execution_profile": execution_profile,
-                    })
-                    final_profiles.add(execution_profile)
-                pickups = []
-                if pickup_allowed:
-                    pickup_profiles = (
-                        (idle_profiles - final_profiles) & profile_agents.keys()
-                    )
-                    for profile in sorted(pickup_profiles):
-                        claim = claim_workforce_handoff_pickup(
-                            conn, target_agent=profile_agents[profile],
+                ):
+                    continue
+                conn = kb.connect(path)
+                try:
+                    available_deliveries = (
+                        kb.prepare_coordination_final_return_deliveries(
+                            conn,
+                            notifier_profiles=routable_profiles,
+                            notifier_agents=agents,
+                            include_unowned=include_unowned,
                         )
-                        if claim is not None:
-                            pickups.append({
-                                **claim,
-                                "execution_profile": profile,
-                                "database_path": path,
-                            })
-                return deliveries, pickups
-            finally:
-                conn.close()
+                    )
+                    for delivery in available_deliveries:
+                        execution_profile = next((
+                            profile for profile in sorted(available_profiles)
+                            if profile_agents.get(profile)
+                            == delivery["responsible_agent"]
+                        ), None)
+                        if execution_profile is None:
+                            continue
+                        deliveries.append({
+                            **delivery,
+                            "execution_profile": execution_profile,
+                        })
+                        available_profiles.remove(execution_profile)
+                    if pickup_allowed:
+                        pickup_profiles = available_profiles & profile_agents.keys()
+                        for profile in sorted(pickup_profiles):
+                            claim = claim_workforce_handoff_pickup(
+                                conn, target_agent=profile_agents[profile],
+                            )
+                            if claim is not None:
+                                pickups.append({
+                                    **claim,
+                                    "execution_profile": profile,
+                                    "database_path": path,
+                                })
+                                available_profiles.remove(profile)
+                finally:
+                    conn.close()
+            return deliveries, pickups
 
         deliveries, pickups = await asyncio.to_thread(collect)
         for delivery in deliveries:

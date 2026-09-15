@@ -114,6 +114,16 @@ def test_named_board_worker_persists_handoff_on_canonical_board(
         assert kanban_db.get_task(conn, task_id) is None
 
 
+def test_malformed_board_pin_does_not_disable_canonical_handoffs(
+    board, monkeypatch,
+):
+    monkeypatch.setenv("HERMES_KANBAN_BOARD", "../not-a-board")
+
+    assert kanban_db.canonical_coordination_db_path() == board
+    monkeypatch.delenv("HERMES_KANBAN_DB")
+    assert kanban_db.canonical_coordination_db_path() == board
+
+
 def test_gateway_create_rolls_back_when_its_return_route_cannot_persist(
     board, monkeypatch,
 ):
@@ -250,6 +260,66 @@ def test_coordinated_handoff_inherits_request_and_keeps_one_final_route(board):
         assert task.session_id == "origin-session"
         assert kanban_db.list_notify_subs(conn, task.id) == []
         assert len(kanban_db.list_notify_subs(conn, root_id)) == 1
+
+
+def test_coordinated_handoff_uses_its_request_bound_named_board(
+    board, monkeypatch,
+):
+    named_board = board.parent / "kanban" / "boards" / "side-project" / "kanban.db"
+    kanban_db.init_db(named_board)
+    org = load_organization(ORG_PATH)
+    with kanban_db.connect_closing(named_board) as conn:
+        root_id = kanban_db.create_task(
+            conn,
+            title="Return the named-board request",
+            assignee="alina",
+            session_id="origin-session",
+        )
+        kanban_db.add_notify_sub(
+            conn,
+            task_id=root_id,
+            platform="telegram",
+            chat_id="origin-chat",
+            notifier_profile="alina",
+            delivery_mode="wake",
+        )
+        request = kanban_db.create_coordination_request(
+            conn,
+            root_task_id=root_id,
+            origin_session_id="origin-session",
+            origin_message_id="origin-message",
+            organization=org,
+        )
+
+    monkeypatch.setenv("HERMES_KANBAN_BOARD", "side-project")
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(named_board))
+    tokens = set_session_vars(
+        platform="telegram",
+        chat_id="origin-chat",
+        chat_type="dm",
+        session_id="origin-session",
+        message_id="origin-message",
+        profile="alina",
+    )
+    try:
+        with scoped_coordination_budget(
+            request_root_id=request.id,
+            task_id=root_id,
+            purpose="work",
+            db_path=named_board,
+        ):
+            response = json.loads(_handle(_create_args()))
+    finally:
+        clear_session_vars(tokens)
+
+    assert response["success"] is True
+    task_id = response["result"]["task_id"]
+    with kanban_db.connect_closing(named_board) as conn:
+        task = kanban_db.get_task(conn, task_id)
+        assert task is not None
+        assert task.request_root_id == request.id
+    with kanban_db.connect_closing(board) as conn:
+        assert kanban_db.get_task(conn, task_id) is None
 
 
 def test_ordinary_handoff_completion_wakes_original_source_session(

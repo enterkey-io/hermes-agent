@@ -116,7 +116,10 @@ def _payload(raw: Any) -> dict[str, Any]:
 def _durable_claim_matches(scope: dict[str, str]) -> bool:
     """Read fresh task/event state instead of trusting child environment data."""
     from hermes_cli import kanban_db
-    from hermes_cli.workforce_handoffs import v1_handoff_creation_is_current
+    from hermes_cli.workforce_handoffs import (
+        handoff_request_is_active,
+        v1_handoff_creation_is_current,
+    )
 
     db_path = Path(scope["HERMES_KANBAN_DB"])
     if not db_path.is_absolute() or not db_path.is_file():
@@ -157,6 +160,8 @@ def _durable_claim_matches(scope: dict[str, str]) -> bool:
             source_agent=source,
             target_agent=target,
         ):
+            return False
+        if root_id and not handoff_request_is_active(conn, task):
             return False
         for event in reversed(kanban_db.list_events(conn, task_id)):
             if event.kind != "workforce_handoff_pickup_claimed":

@@ -424,3 +424,85 @@ def test_claim_scope_rechecks_the_ordinary_contract_before_acknowledgment(
 
     assert scope is not None
     assert _durable_claim_matches(scope) is False
+
+
+def test_claim_scope_rechecks_linked_request_liveness_before_acknowledgment(
+    monkeypatch, tmp_path,
+):
+    from hermes_cli import kanban_db
+    from hermes_cli.workforce_handoffs import (
+        claim_workforce_handoff_pickup,
+        create_handoff,
+    )
+    from hermes_cli.workforce_org import load_organization
+    from tools.workforce_handoff_pickup_scope import _durable_claim_matches, _scope_env
+
+    _clear_scope(monkeypatch)
+    monkeypatch.setenv(
+        "HERMES_WORKFORCE_ORG",
+        str(Path(__file__).parents[2] / "workforce" / "organization.yaml"),
+    )
+    org = load_organization()
+    now = int(time.time())
+    iso = lambda offset: datetime.fromtimestamp(now + offset, timezone.utc).isoformat()
+    db_path = tmp_path / "kanban.db"
+    with kanban_db.connect_closing(db_path) as conn:
+        root_id = kanban_db.create_task(
+            conn,
+            title="Return the accepted request",
+            assignee="aurora",
+            session_id="origin-session",
+        )
+        kanban_db.add_notify_sub(
+            conn,
+            task_id=root_id,
+            platform="telegram",
+            chat_id="origin-chat",
+            notifier_profile="aurora",
+            delivery_mode="wake",
+        )
+        request = kanban_db.create_coordination_request(
+            conn,
+            root_task_id=root_id,
+            origin_session_id="origin-session",
+            origin_message_id="origin-message",
+            organization=org,
+            now=now,
+        )
+        created = create_handoff(
+            conn,
+            source_agent="aurora",
+            target_agent="alina",
+            expected_outcome="Complete the ordinary handoff",
+            acceptance_test="The result is verified",
+            evidence_references=[f"kanban:{root_id}"],
+            acknowledgment_deadline=iso(60),
+            checkpoint_at=iso(3600),
+            organization=org,
+            coordination_source_task_id=root_id,
+            session_id="origin-session",
+            coordination_origin_message_id="origin-message",
+        )
+        pickup = claim_workforce_handoff_pickup(
+            conn, target_agent="alina", organization=org, now=now + 1,
+        )
+        with kanban_db.write_txn(conn):
+            conn.execute(
+                "UPDATE coordination_requests SET status = 'return_pending' "
+                "WHERE id = ?",
+                (request.id,),
+            )
+
+    assert pickup is not None
+    _install_scope(monkeypatch)
+    monkeypatch.setenv("HERMES_COORDINATION_REQUEST_ROOT", request.id)
+    monkeypatch.setenv("HERMES_COORDINATION_TASK_ID", created["task_id"])
+    monkeypatch.setenv(
+        "HERMES_WORKFORCE_HANDOFF_PICKUP_TASK", created["task_id"]
+    )
+    monkeypatch.setenv("HERMES_WORKFORCE_HANDOFF_PICKUP_KIND", "ordinary")
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    scope = _scope_env()
+
+    assert scope is not None
+    assert _durable_claim_matches(scope) is False
