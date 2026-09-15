@@ -133,6 +133,30 @@ class TestPathResolution:
         assert kb.kanban_db_path() == named
         assert kb.get_current_board() == "side-project"
 
+    @pytest.mark.parametrize("pin", ["side-project", "Side-Project", "  Side-Project  "])
+    def test_scoped_workspace_preserves_matching_normalized_pin(
+        self, fresh_home, monkeypatch, pin
+    ):
+        named = fresh_home / "kanban/boards/side-project/kanban.db"
+        custom = fresh_home / "custom-mount/workspaces"
+        monkeypatch.setenv("HERMES_KANBAN_BOARD", pin)
+        monkeypatch.setenv("HERMES_KANBAN_WORKSPACES_ROOT", str(custom))
+        with kb.scoped_board_database("side-project", named):
+            assert kb.workspaces_root() == custom
+        with kb.scoped_board_database("default", fresh_home / "kanban.db"):
+            assert kb.workspaces_root() == fresh_home / "kanban/workspaces"
+
+    @pytest.mark.parametrize("pin", ["../invalid", "", "  DEFAULT  "])
+    def test_scoped_workspace_default_pin_fallback(self, fresh_home, monkeypatch, pin):
+        custom = fresh_home / "custom-mount/workspaces"
+        monkeypatch.setenv("HERMES_KANBAN_BOARD", pin)
+        monkeypatch.setenv("HERMES_KANBAN_WORKSPACES_ROOT", str(custom))
+        with kb.scoped_board_database("default", fresh_home / "kanban.db"):
+            assert kb.workspaces_root() == custom
+        named = fresh_home / "kanban/boards/side-project/kanban.db"
+        with kb.scoped_board_database("side-project", named):
+            assert kb.workspaces_root() == named.parent / "workspaces"
+
 
 # ---------------------------------------------------------------------------
 # Current-board resolution
@@ -369,4 +393,3 @@ class TestCLI:
         assert titlesA == ["Task A"]
         assert titlesB == ["Task B"]
         assert titlesD == []
-

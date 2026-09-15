@@ -983,7 +983,11 @@ def workspaces_root(board: Optional[str] = None) -> Path:
     if scoped is not None:
         # A named worker's workspace pin belongs to that board, not every
         # board visited by a global dispatcher sharing this process.
-        pinned = os.environ.get("HERMES_KANBAN_BOARD", "").strip() or DEFAULT_BOARD
+        try:
+            pinned = _normalize_board_slug(os.environ.get("HERMES_KANBAN_BOARD"))
+        except ValueError:
+            pinned = None
+        pinned = pinned or DEFAULT_BOARD
         if pinned != scoped[0]:
             override = ""
         board = scoped[0]
