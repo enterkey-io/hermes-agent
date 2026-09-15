@@ -1460,7 +1460,17 @@ def get_honcho_client(config: HonchoClientConfig | None = None) -> Honcho:
     if config is None:
         context = resolve_profile_context()
         config = HonchoClientConfig.from_global_config(context=context)
-    elif config.profile_context is not None:
+    else:
+        if config.profile_context is None:
+            # Publish the bound context only after its cache-key paths are ready.
+            # Concurrent first callers must never see a partially bound identity.
+            with _client_slots_lock:
+                if config.profile_context is None:
+                    context = resolve_profile_context()
+                    _validate_profile_host(config.host, context.profile)
+                    config.config_path = resolve_config_path(context)
+                    config.hermes_home = context.root
+                    config.profile_context = context
         context = config.profile_context
         _validate_profile_host(config.host, context.profile)
         if config.host != context.host:
@@ -1468,13 +1478,6 @@ def get_honcho_client(config: HonchoClientConfig | None = None) -> Honcho:
                 f"Honcho host {config.host!r} does not match context host "
                 f"{context.host!r}"
             )
-    else:
-        # Hand-built configs remain strict to the current runtime profile.
-        context = resolve_profile_context()
-        _validate_profile_host(config.host, context.profile)
-        config.profile_context = context
-        config.config_path = resolve_config_path(context)
-        config.hermes_home = context.root
 
     key = _client_cache_key(config)
     slot = _slot_for(key)
