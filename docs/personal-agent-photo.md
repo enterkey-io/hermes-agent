@@ -90,6 +90,11 @@ resolution, disabled-memory policy and `skip_memory=True` initialization. Do not
 reset sessions, replace Honcho peers, or rewrite archived history to restore
 tool availability.
 
+For a route already using the platform defaults, preserve that composite while
+adding the personal photo tool, for example `buzz: [hermes-buzz, agent_photo]`.
+Do not replace a route's established selection with a photo-only list. Conversely,
+do not add a broad platform composite to a route that was intentionally restricted.
+
 ## Deployment Boundary
 
 The maintained shared snapshot includes `characters_assets.py` and the ordered

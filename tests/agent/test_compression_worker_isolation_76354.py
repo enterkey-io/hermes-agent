@@ -80,10 +80,10 @@ def test_f3_mutating_engine_cannot_touch_live_transcript_after_timeout(
     agent = _build_agent_with_db(db, session_id)
     agent._cached_system_prompt = "sys"
 
-    # Fast host timeout for the owned wrapper.
+    # Leave room for cold imports and durable-lock setup on a busy CI worker.
     monkeypatch.setattr(
         "agent.conversation_compression.resolve_context_compression_timeouts",
-        lambda cfg=None: (0.6, 1.2),
+        lambda cfg=None: (5.0, 10.0),
     )
 
     engine_started = threading.Event()
@@ -142,7 +142,6 @@ def test_f4_five_step_stale_holder_regression(tmp_path: Path) -> None:
        publish stale state.
     """
     from agent.conversation_compression import (
-        CompressionCommitFence,
         run_compress_context_with_progress_timeout,
     )
 
@@ -157,6 +156,7 @@ def test_f4_five_step_stale_holder_regression(tmp_path: Path) -> None:
 
     summary_started = threading.Event()
     release_summary = threading.Event()
+    worker_finished = threading.Event()
 
     def _blocked_summary(*_args, **_kwargs):
         summary_started.set()
@@ -176,17 +176,20 @@ def test_f4_five_step_stale_holder_regression(tmp_path: Path) -> None:
     messages = [{"role": "user", "content": f"m{i}"} for i in range(20)]
 
     def _worker(fence):
-        return agent._compress_context(
-            messages, "sys", approx_tokens=120_000, commit_fence=fence
-        )
+        try:
+            return agent._compress_context(
+                messages, "sys", approx_tokens=120_000, commit_fence=fence
+            )
+        finally:
+            worker_finished.set()
 
     # Step 2: host-owned progress wait times out while summary is blocked.
     result_msgs, _prompt = run_compress_context_with_progress_timeout(
         worker=_worker,
         messages=messages,
         system_prompt_fallback="fallback",
-        idle_timeout_seconds=0.6,
-        total_ceiling_seconds=1.2,
+        idle_timeout_seconds=5.0,
+        total_ceiling_seconds=10.0,
     )
     assert summary_started.wait(timeout=5)
     assert not release_summary.is_set()  # old worker STILL blocked
@@ -215,14 +218,7 @@ def test_f4_five_step_stale_holder_regression(tmp_path: Path) -> None:
     # Step 4: release the old worker.
     release_summary.set()
     # Wait for the late worker to fully unwind (it must NOT touch the lock).
-    deadline = time.time() + 5
-    while time.time() < deadline:
-        if db.get_compression_lock_holder(session_id) != new_holder:
-            break  # would be a failure — checked below
-        if cooldown_cleared:
-            break
-        time.sleep(0.02)
-    time.sleep(0.3)  # settle: give the stale worker every chance to misbehave
+    assert worker_finished.wait(timeout=10)
 
     # Step 5a: it cannot clear the cooldown.
     assert not cooldown_cleared, (

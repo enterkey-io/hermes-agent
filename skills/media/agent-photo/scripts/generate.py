@@ -178,17 +178,11 @@ def media_lines(paths: list[Path]) -> list[str]:
 
 def image_bytes_and_mime(path: Path, max_size_mb: float) -> tuple[bytes, str]:
     """Prepare an image and report the MIME type matching the returned bytes."""
-    was_compressed = path.stat().st_size > max_size_mb * 1024 * 1024
     raw = compress_image_if_needed(path, max_size_mb=max_size_mb)
-    if was_compressed:
-        mime = "image/jpeg"
-    else:
-        mime = {
-            ".jpg": "image/jpeg",
-            ".jpeg": "image/jpeg",
-            ".png": "image/png",
-            ".webp": "image/webp",
-        }[path.suffix.lower()]
+    with Image.open(BytesIO(raw)) as image:
+        mime = {"JPEG": "image/jpeg", "PNG": "image/png", "WEBP": "image/webp"}.get(image.format)
+    if mime is None:
+        raise ValueError("Reference must contain JPEG, PNG, or WebP image bytes")
     return raw, mime
 
 

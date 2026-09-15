@@ -566,6 +566,18 @@ def test_personal_memory_opt_in_preserves_photo_and_cron_isolation(personal_prof
     assert not agent.valid_tool_names
 
 
+def test_personal_buzz_photo_opt_in_preserves_existing_platform_defaults(personal_profile):
+    from hermes_cli.tools_config import _get_platform_tools
+
+    personal_profile("amy")
+    before = _get_platform_tools({}, "buzz")
+    after = _get_platform_tools({"platform_toolsets": {"buzz": ["hermes-buzz", "agent_photo"]}}, "buzz")
+    assert after - before == {"agent_photo"}
+    assert not before - after
+    definitions = get_tool_definitions(enabled_toolsets=["agent_photo"], quiet_mode=True, skip_tool_search_assembly=True)
+    assert any(tool["function"]["name"] == "agent_photo" for tool in definitions)
+
+
 @pytest.mark.parametrize(
     "first,second,expected",
     [
