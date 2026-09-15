@@ -138,6 +138,25 @@ def test_deploy_publishes_complete_snapshot_and_fixed_launcher(tmp_path):
     assert "must-not-appear" not in refusal.stdout + refusal.stderr
 
 
+def test_deploy_ignores_scratch_checkout_skills(tmp_path):
+    profiles = tmp_path / "profiles"
+    scratch = _write_profile_photo_skill(profiles, "amy/scratch/review", "scratch checkout")
+    result = _run_sourced_deploy(tmp_path, "")
+    assert result.returncode == 0, result.stderr
+    assert (scratch / "SKILL.md").read_text() == "scratch checkout"
+    assert _tree_hashes(tmp_path / "shared-skills/agent-photo") == _tree_hashes(SOURCE)
+
+
+def test_deploy_refuses_uncategorized_active_skill(tmp_path):
+    skill = tmp_path / "profiles/amy/skills/agent-photo"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("active override")
+    result = _run_sourced_deploy(tmp_path, "")
+    assert result.returncode == 2
+    assert (skill / "SKILL.md").read_text() == "active override"
+    assert not (tmp_path / "shared-skills/agent-photo").exists()
+
+
 def test_atomic_exchange_rollback_restores_previous_snapshot(tmp_path):
     target = tmp_path / "agent-photo"
     staged = tmp_path / "agent-photo.stage"

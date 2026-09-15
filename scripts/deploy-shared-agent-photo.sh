@@ -320,13 +320,18 @@ archive_profile_skill() {
   printf 'Archived local skill: %s -> %s\n' "$skill_dir" "$archive_dir"
 }
 
+list_profile_shadows() {
+  local skills_dir
+  for skills_dir in "$profiles_dir"/*/skills; do
+    [[ -d "$skills_dir" ]] || continue
+    find "$skills_dir" \
+      \( -path "$skills_dir/.archive" -o -path "$skills_dir/.curator_backups" \) \
+      -prune -o -type f -path '*/agent-photo/SKILL.md' -print0
+  done
+}
+
 handle_profile_shadows() {
-  mapfile -d '' local_skills < <(
-    find "$profiles_dir" -type f -path '*/skills/*/agent-photo/SKILL.md' \
-      ! -path '*/skills/.archive/*' \
-      ! -path '*/skills/.curator_backups/*' \
-      -print0 2>/dev/null | sort -z
-  )
+  mapfile -d '' local_skills < <(list_profile_shadows | sort -z)
 
   if (( ${#local_skills[@]} > 0 )) && [[ "$archive_local" != true ]]; then
     printf 'Profile-local agent-photo skills still shadow the shared package:\n' >&2
@@ -343,13 +348,8 @@ handle_profile_shadows() {
     done
   fi
 
-  local remaining
-  remaining="$({
-    find "$profiles_dir" -type f -path '*/skills/*/agent-photo/SKILL.md' \
-      ! -path '*/skills/.archive/*' \
-      ! -path '*/skills/.curator_backups/*' \
-      -print 2>/dev/null
-  } | wc -l)"
+  mapfile -d '' local_skills < <(list_profile_shadows)
+  local remaining="${#local_skills[@]}"
   if [[ "$remaining" -ne 0 ]]; then
     printf 'Deployment incomplete: %s active profile-local copies remain.\n' "$remaining" >&2
     return 3
