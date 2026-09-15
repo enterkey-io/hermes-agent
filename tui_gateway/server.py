@@ -9815,36 +9815,15 @@ def _collect_kanban_notifications(session: dict) -> list:
     except Exception:
         return []
     texts: list = []
-    try:
-        boards = _kb.list_boards(include_archived=False)
-    except Exception:
-        try:
-            boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
-        except Exception:
-            return []
-    # Poll each resolved DB path once — multiple slugs can point at the same
-    # DB when HERMES_KANBAN_DB pins the board path (same guard as the gateway
-    # notifier).
-    seen_db_paths: set = set()
-    for board_meta in boards:
-        slug = (board_meta or {}).get("slug") or _kb.DEFAULT_BOARD
-        db_path = (board_meta or {}).get("db_path")
-        try:
-            resolved = (
-                str(Path(db_path).expanduser().resolve())
-                if db_path else str(_kb.kanban_db_path(slug).resolve())
-            )
-        except Exception:
-            resolved = f"slug:{slug}"
-        if resolved in seen_db_paths:
-            continue
-        seen_db_paths.add(resolved)
+    for slug, database_path in _kb.list_physical_board_db_paths(
+        include_archived=False,
+    ):
         # A poller runs per live TUI/Desktop session. Avoid opening this board
         # writable unless it has a subscription owned by this exact session;
         # subscriptions for gateways or other sessions are not actionable here.
         try:
             if _kb.count_notify_subs(
-                board=slug,
+                db_path=database_path,
                 platform="tui",
                 chat_id=session_key,
             ) == 0:
@@ -9854,7 +9833,7 @@ def _collect_kanban_notifications(session: dict) -> list:
             # locked, corrupt, or otherwise unusual database.
             pass
         try:
-            conn = _kb.connect(board=slug)
+            conn = _kb.connect(database_path)
         except Exception:
             continue
         try:

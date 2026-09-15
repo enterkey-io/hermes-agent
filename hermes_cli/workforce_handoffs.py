@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 import hashlib
 import json
+import logging
 import sqlite3
 import time
 from typing import Any
@@ -15,6 +16,7 @@ from hermes_cli.workforce_org import WorkforceOrganization, load_organization
 
 
 HANDOFF_KIND = "workforce_handoff"
+logger = logging.getLogger(__name__)
 
 
 def _timestamp(value: str) -> int:
@@ -814,4 +816,39 @@ def sweep_overdue_handoffs(
                 "decision_owner": "aurora",
             }
         )
+    return changed
+
+
+def sweep_overdue_handoffs_across_boards(
+    *,
+    actor: str,
+    organization: WorkforceOrganization | None = None,
+    now: int | None = None,
+) -> list[dict[str, Any]]:
+    """Sweep every live physical board without one failure blocking another."""
+    org = organization or load_organization()
+    actor_id = org.validate_execution_profile(actor).agent
+    if actor_id not in {"aurora", "chloe"}:
+        raise ValueError("only Aurora or Chloe may perform the mechanical overdue sweep")
+    changed: list[dict[str, Any]] = []
+    for slug, database_path in kanban_db.list_physical_board_db_paths(
+        include_archived=False,
+    ):
+        try:
+            with kanban_db.connect_closing(database_path) as conn:
+                changed.extend(
+                    sweep_overdue_handoffs(
+                        conn,
+                        actor=actor_id,
+                        organization=org,
+                        now=now,
+                    )
+                )
+        except Exception as exc:
+            logger.warning(
+                "workforce handoff sweep failed for board %s (%s): %s",
+                slug,
+                database_path,
+                exc,
+            )
     return changed

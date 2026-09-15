@@ -105,6 +105,23 @@ class TestPathResolution:
         assert kb.kanban_db_path() == forced
         assert kb.kanban_db_path(board="ignored") == forced
 
+    def test_physical_inventory_ignores_named_worker_redirect(
+        self, fresh_home, monkeypatch,
+    ):
+        kb.init_db()
+        kb.create_board("side-project")
+        canonical = (fresh_home / "kanban.db").resolve()
+        named = (
+            fresh_home / "kanban" / "boards" / "side-project" / "kanban.db"
+        ).resolve()
+        monkeypatch.setenv("HERMES_KANBAN_BOARD", "side-project")
+        monkeypatch.setenv("HERMES_KANBAN_DB", str(named))
+
+        assert kb.list_physical_board_db_paths(include_archived=False) == [
+            ("default", canonical),
+            ("side-project", named),
+        ]
+
 
 # ---------------------------------------------------------------------------
 # Current-board resolution
@@ -341,6 +358,5 @@ class TestCLI:
         assert titlesA == ["Task A"]
         assert titlesB == ["Task B"]
         assert titlesD == []
-
 
 

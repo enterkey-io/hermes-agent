@@ -352,8 +352,9 @@ def test_coordinated_handoff_uses_its_request_bound_named_board(
         assert kanban_db.get_task(conn, task_id) is None
 
 
+@pytest.mark.parametrize("fail_first", [False, True])
 def test_ordinary_handoff_completion_wakes_original_source_session(
-    board, monkeypatch,
+    board, monkeypatch, fail_first,
 ):
     tokens = set_session_vars(
         platform="telegram",
@@ -387,6 +388,15 @@ def test_ordinary_handoff_completion_wakes_original_source_session(
             "last_event_id"
         ]
 
+    # A worker process may still carry its named-board pins while the gateway
+    # notifier performs machine-wide delivery. Those pins must not redirect
+    # collection or the later cursor mutation away from the canonical handoff.
+    monkeypatch.delenv("HERMES_KANBAN_DB")
+    kanban_db.create_board("side-project")
+    named_board = kanban_db.kanban_db_path("side-project").resolve()
+    monkeypatch.setenv("HERMES_KANBAN_BOARD", "side-project")
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(named_board))
+
     adapter = SimpleNamespace(send=AsyncMock())
 
     class Runner(GatewayKanbanWatchersMixin):
@@ -412,6 +422,8 @@ def test_ordinary_handoff_completion_wakes_original_source_session(
     wake = AsyncMock(return_value=SimpleNamespace(
         state="acknowledged", returned_message_id="wake:1",
     ))
+    if fail_first:
+        wake.side_effect = RuntimeError("temporary wake failure")
     monkeypatch.setattr("gateway.wake.deliver_wake", wake)
     real_sleep = asyncio.sleep
 
@@ -423,6 +435,16 @@ def test_ordinary_handoff_completion_wakes_original_source_session(
     monkeypatch.setattr(asyncio, "sleep", stop_after_tick)
     asyncio.run(runner._kanban_notifier_loop(interval=0.01))
 
+    if fail_first:
+        wake.assert_awaited_once()
+        with kanban_db.connect_closing(board) as conn:
+            assert kanban_db.list_notify_subs(conn, task_id)[0][
+                "last_event_id"
+            ] == original_cursor
+        wake.reset_mock(side_effect=True)
+        runner._running = True
+        asyncio.run(runner._kanban_notifier_loop(interval=0.01))
+
     wake.assert_awaited_once()
     assert wake.call_args.kwargs["session_id"] == "origin-session"
     assert wake.call_args.kwargs["source"].profile == "alina"
@@ -432,6 +454,8 @@ def test_ordinary_handoff_completion_wakes_original_source_session(
         assert kanban_db.list_notify_subs(conn, task_id)[0][
             "last_event_id"
         ] > original_cursor
+    with kanban_db.connect_closing(named_board) as conn:
+        assert kanban_db.list_notify_subs(conn) == []
 
 
 def test_overdue_handoff_wakes_source_with_blocked_outcome(board, monkeypatch):
@@ -514,3 +538,51 @@ def test_overdue_handoff_wakes_source_with_blocked_outcome(board, monkeypatch):
         assert kanban_db.list_notify_subs(conn, task_id)[0][
             "last_event_id"
         ] > original_cursor
+
+
+def test_global_sweep_flags_named_board_despite_worker_redirect(board, monkeypatch):
+    from hermes_cli.workforce_handoffs import create_handoff
+
+    monkeypatch.delenv("HERMES_KANBAN_DB")
+    kanban_db.create_board("side-project")
+    named_board = kanban_db.kanban_db_path("side-project").resolve()
+    broken_board = kanban_db.board_dir("aa-broken") / "kanban.db"
+    broken_board.parent.mkdir(parents=True)
+    broken_board.write_bytes(b"not a sqlite database")
+    now = datetime.now(timezone.utc)
+    with kanban_db.connect_closing(named_board) as conn:
+        created = create_handoff(
+            conn,
+            source_agent="alina",
+            target_agent="aurora",
+            expected_outcome="Complete the overdue named-board work",
+            acceptance_test="The global sweep flags this exact handoff",
+            evidence_references=["execution:named-sweep"],
+            acknowledgment_deadline=(now - timedelta(minutes=2)).isoformat(),
+            checkpoint_at=(now + timedelta(minutes=20)).isoformat(),
+            allow_overdue=True,
+        )
+
+    monkeypatch.setenv("HERMES_KANBAN_BOARD", "side-project")
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(named_board))
+    monkeypatch.setattr("tools.workforce_handoff_tool._source", lambda: "aurora")
+    response = json.loads(_handle({"action": "sweep"}))
+
+    assert response["success"] is True
+    assert created["task_id"] in {
+        item["task_id"] for item in response["result"]["changed"]
+    }
+    with kanban_db.connect_closing(named_board) as conn:
+        task = kanban_db.get_task(conn, created["task_id"])
+        assert task is not None
+        assert task.status == "blocked"
+        assert json.loads(task.body)["state"] == "acknowledgment_overdue"
+    with kanban_db.connect_closing(board) as conn:
+        assert kanban_db.get_task(conn, created["task_id"]) is None
+    assert broken_board.read_bytes() == b"not a sqlite database"
+
+
+def test_global_sweep_preserves_actor_authorization(board):
+    response = json.loads(_handle({"action": "sweep"}))
+    assert response.get("success") is not True
+    assert "only Aurora or Chloe" in response["error"]

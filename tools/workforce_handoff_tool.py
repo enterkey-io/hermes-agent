@@ -9,7 +9,7 @@ from hermes_cli.workforce_handoffs import (
     acknowledge_handoff,
     create_handoff,
     record_checkpoint,
-    sweep_overdue_handoffs,
+    sweep_overdue_handoffs_across_boards,
 )
 from hermes_cli.workforce_org import active_workforce_agent
 from tools.registry import registry, tool_error, tool_result
@@ -158,6 +158,11 @@ def _handle(args: dict[str, Any], **_kwargs: Any) -> str:
                         ),
                     })
         else:
+            if action == "sweep":
+                result = {
+                    "changed": sweep_overdue_handoffs_across_boards(actor=actor)
+                }
+                return tool_result(success=True, action=action, result=result)
             if action in {"acknowledge", "checkpoint"}:
                 from agent.coordination_budget import current_coordination_db_path
 
@@ -181,8 +186,6 @@ def _handle(args: dict[str, Any], **_kwargs: Any) -> str:
                         evidence_references=list(args.get("evidence_references") or []),
                         next_checkpoint_at=args.get("next_checkpoint_at"),
                     )
-                elif action == "sweep":
-                    result = {"changed": sweep_overdue_handoffs(conn, actor=actor)}
                 else:
                     raise ValueError("action must be create, acknowledge, checkpoint, or sweep")
         return tool_result(success=True, action=action, result=result)

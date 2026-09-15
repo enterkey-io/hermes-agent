@@ -1209,6 +1209,39 @@ def list_boards(*, include_archived: bool = True) -> list[dict]:
     return entries
 
 
+def list_physical_board_db_paths(
+    *, include_archived: bool = True,
+) -> list[tuple[str, Path]]:
+    """Return each live board's physical database path exactly once.
+
+    Global coordination and notification loops must not reopen a board through
+    :func:`kanban_db_path`: a dispatched worker's ``HERMES_KANBAN_DB`` pin
+    intentionally redirects that resolver to its own board.  The canonical
+    coordination database remains first, while named boards are derived from
+    their on-disk directories rather than redirectable metadata.
+    """
+    canonical = canonical_coordination_db_path().expanduser().resolve()
+    paths: list[tuple[str, Path]] = [(DEFAULT_BOARD, canonical)]
+    seen = {canonical}
+    try:
+        boards = list_boards(include_archived=include_archived)
+    except Exception:
+        return paths
+    for board in boards:
+        try:
+            slug = _normalize_board_slug(board.get("slug")) or DEFAULT_BOARD
+            if slug == DEFAULT_BOARD:
+                continue
+            path = (board_dir(slug) / "kanban.db").expanduser().resolve()
+            if path in seen:
+                continue
+            seen.add(path)
+            paths.append((slug, path))
+        except Exception:
+            continue
+    return paths
+
+
 def remove_board(slug: str, *, archive: bool = True) -> dict:
     """Remove or archive a board.
 
@@ -15786,8 +15819,8 @@ def count_running_tasks_other_boards(board: Optional[str] = None) -> int:
     number of active boards — reproduced in review of OOF-30: two boards
     each spawned N workers on a derived N-worker host budget.
 
-    Boards are matched by resolved DB path, so the ``HERMES_KANBAN_DB``
-    override (which pins every board to one file) naturally yields 0.
+    Boards are matched by resolved DB path. A worker's ``HERMES_KANBAN_DB``
+    pin identifies the current database without hiding other physical boards.
     Fails open per board: one broken/corrupt board must not brick dispatch
     on the healthy ones.
     """
@@ -15795,21 +15828,15 @@ def count_running_tasks_other_boards(board: Optional[str] = None) -> int:
         current_path = str(kanban_db_path(board=board).expanduser().resolve())
     except Exception:
         current_path = None
-    try:
-        boards = list_boards(include_archived=False)
-    except Exception:
-        return 0
     total = 0
-    for meta in boards:
-        slug = meta.get("slug") or DEFAULT_BOARD
+    for _slug, path in list_physical_board_db_paths(include_archived=False):
         try:
-            path = kanban_db_path(board=slug).expanduser()
             resolved = str(path.resolve())
             if current_path is not None and resolved == current_path:
                 continue
             if not path.exists():
                 continue
-            other = connect(board=slug)
+            other = connect(path)
             try:
                 total += count_running_tasks(other)
             finally:

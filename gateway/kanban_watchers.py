@@ -248,29 +248,14 @@ class GatewayKanbanWatchersMixin:
             # live board while keeping the one-turn-per-profile limit global
             # across the tick. The canonical entry is explicit because a
             # worker's board pin redirects list_boards() metadata paths.
-            try:
-                boards = kb.list_boards(include_archived=False)
-            except Exception:
-                boards = []
-            boards = [{"slug": kb.DEFAULT_BOARD}, *boards]
             deliveries = []
             pickups = []
             available_profiles = set(idle_profiles)
-            seen_db_paths: set[Path] = set()
             scan_boards: list[tuple[str, Path]] = []
-            for board in boards:
-                slug = kb.DEFAULT_BOARD
-                path = None
+            for slug, path in kb.list_physical_board_db_paths(
+                include_archived=False,
+            ):
                 try:
-                    slug = board.get("slug") or kb.DEFAULT_BOARD
-                    path = (
-                        kb.canonical_coordination_db_path()
-                        if slug == kb.DEFAULT_BOARD
-                        else kb.board_dir(str(slug)) / "kanban.db"
-                    ).expanduser().resolve()
-                    if path in seen_db_paths:
-                        continue
-                    seen_db_paths.add(path)
                     if not kb.has_coordination_tick_work(
                         path,
                         notifier_profiles=routable_profiles,
@@ -631,30 +616,9 @@ class GatewayKanbanWatchersMixin:
                         logger.debug("kanban notifier: no connected adapters; skipping tick")
                         return deliveries
 
-                    # Enumerate every board on disk, but poll each resolved DB
-                    # path once. Multiple slugs can point at the same DB when
-                    # HERMES_KANBAN_DB pins the board path; without this guard
-                    # one gateway could collect the same subscription/event
-                    # more than once before advancing the cursor.
-                    try:
-                        boards = _kb.list_boards(include_archived=False)
-                    except Exception:
-                        boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
-                    seen_db_paths: set[str] = set()
-                    for board_meta in boards:
-                        slug = board_meta.get("slug") or _kb.DEFAULT_BOARD
-                        db_path = board_meta.get("db_path")
-                        try:
-                            resolved_db_path = str(Path(db_path).expanduser().resolve()) if db_path else str(_kb.kanban_db_path(slug).resolve())
-                        except Exception:
-                            resolved_db_path = f"slug:{slug}"
-                        if resolved_db_path in seen_db_paths:
-                            logger.debug(
-                                "kanban notifier: skipping duplicate board slug %s for DB %s",
-                                slug, resolved_db_path,
-                            )
-                            continue
-                        seen_db_paths.add(resolved_db_path)
+                    for slug, database_path in _kb.list_physical_board_db_paths(
+                        include_archived=False,
+                    ):
                         # Zero-subscription early exit: probe the board with a
                         # cheap read-only connection BEFORE the writable
                         # `connect()`. A board with no subscriptions has
@@ -664,7 +628,7 @@ class GatewayKanbanWatchersMixin:
                         # this skip avoids.
                         try:
                             if _kb.count_notify_subs(
-                                board=slug,
+                                db_path=database_path,
                                 notifier_profiles=notifier_profiles,
                                 include_unowned=include_unowned,
                             ) == 0:
@@ -680,7 +644,7 @@ class GatewayKanbanWatchersMixin:
                                 slug, exc,
                             )
                         try:
-                            conn = _kb.connect(board=slug)
+                            conn = _kb.connect(database_path)
                         except Exception as exc:
                             logger.debug("kanban notifier: cannot open board %s: %s", slug, exc)
                             continue
@@ -789,6 +753,7 @@ class GatewayKanbanWatchersMixin:
                                         "events": events,
                                         "task": task,
                                         "board": slug,
+                                        "database_path": database_path,
                                     })
                                 except Exception as sub_exc:
                                     # Isolate per-subscription failures so one
@@ -798,6 +763,11 @@ class GatewayKanbanWatchersMixin:
                                         "kanban notifier: subscription for %s on board %s failed: %s",
                                         sub.get("task_id"), slug, sub_exc,
                                     )
+                        except Exception as exc:
+                            logger.warning(
+                                "kanban notifier: board %s collection failed: %s",
+                                slug, exc,
+                            )
                         finally:
                             conn.close()
                     return deliveries
@@ -807,6 +777,7 @@ class GatewayKanbanWatchersMixin:
                     sub = d["sub"]
                     task = d["task"]
                     board_slug = d.get("board")
+                    database_path = d.get("database_path")
                     platform_str = (sub["platform"] or "").lower()
                     try:
                         plat = _Platform(platform_str)
@@ -814,7 +785,11 @@ class GatewayKanbanWatchersMixin:
                         # Unknown platform string; skip and advance cursor so
                         # we don't replay forever.
                         await asyncio.to_thread(
-                            self._kanban_advance, sub, d["cursor"], board_slug,
+                            self._kanban_advance,
+                            sub,
+                            d["cursor"],
+                            board_slug,
+                            database_path,
                         )
                         continue
                     sub_profile = sub.get("notifier_profile") or ""
@@ -839,6 +814,7 @@ class GatewayKanbanWatchersMixin:
                             d["cursor"],
                             d.get("old_cursor", 0),
                             board_slug,
+                            database_path,
                         )
                         continue
                     title = (task.title if task else sub["task_id"])[:120]
@@ -1084,7 +1060,12 @@ class GatewayKanbanWatchersMixin:
                                     "%s on %s after %d consecutive send failures",
                                     sub["task_id"], platform_str, fails,
                                 )
-                                await asyncio.to_thread(self._kanban_unsub, sub, board_slug)
+                                await asyncio.to_thread(
+                                    self._kanban_unsub,
+                                    sub,
+                                    board_slug,
+                                    database_path,
+                                )
                                 sub_fail_counts.pop(sub_key, None)
                             else:
                                 await asyncio.to_thread(
@@ -1093,6 +1074,7 @@ class GatewayKanbanWatchersMixin:
                                     d["cursor"],
                                     d.get("old_cursor", 0),
                                     board_slug,
+                                    database_path,
                                 )
                             # Rewind the pre-send claim on transient failure so
                             # a later tick can retry. After too many failures,
@@ -1212,7 +1194,12 @@ class GatewayKanbanWatchersMixin:
                                         "%s on %s after %d consecutive wake failures",
                                         sub["task_id"], platform_str, fails,
                                     )
-                                    await asyncio.to_thread(self._kanban_unsub, sub, board_slug)
+                                    await asyncio.to_thread(
+                                        self._kanban_unsub,
+                                        sub,
+                                        board_slug,
+                                        database_path,
+                                    )
                                     sub_fail_counts.pop(sub_key, None)
                                 else:
                                     # Rewind the pre-send claim so the next
@@ -1224,6 +1211,7 @@ class GatewayKanbanWatchersMixin:
                                         d["cursor"],
                                         d.get("old_cursor", 0),
                                         board_slug,
+                                        database_path,
                                     )
                                 continue
 
@@ -1312,7 +1300,12 @@ class GatewayKanbanWatchersMixin:
                                         "%s on %s after %d consecutive wake failures",
                                         sub["task_id"], platform_str, fails,
                                     )
-                                    await asyncio.to_thread(self._kanban_unsub, sub, board_slug)
+                                    await asyncio.to_thread(
+                                        self._kanban_unsub,
+                                        sub,
+                                        board_slug,
+                                        database_path,
+                                    )
                                     sub_fail_counts.pop(sub_key, None)
                                 else:
                                     # Rewind the pre-send claim so the next
@@ -1324,6 +1317,7 @@ class GatewayKanbanWatchersMixin:
                                         d["cursor"],
                                         d.get("old_cursor", 0),
                                         board_slug,
+                                        database_path,
                                     )
                                 continue
 
@@ -1333,7 +1327,11 @@ class GatewayKanbanWatchersMixin:
                         # mechanism — it prevents re-delivery of the same
                         # event on subsequent ticks.
                         await asyncio.to_thread(
-                            self._kanban_advance, sub, d["cursor"], board_slug,
+                            self._kanban_advance,
+                            sub,
+                            d["cursor"],
+                            board_slug,
+                            database_path,
                         )
                         if not _is_push_adapter:
                             # Nothing left to deliver on this path (the wake,
@@ -1363,7 +1361,10 @@ class GatewayKanbanWatchersMixin:
                                 )
                         if task_terminal:
                             await asyncio.to_thread(
-                                self._kanban_unsub, sub, board_slug,
+                                self._kanban_unsub,
+                                sub,
+                                board_slug,
+                                database_path,
                             )
             except Exception as exc:
                 logger.warning("kanban notifier tick failed: %s", exc)
@@ -1374,7 +1375,11 @@ class GatewayKanbanWatchersMixin:
                 await asyncio.sleep(1)
 
     def _kanban_advance(
-        self, sub: dict, cursor: int, board: Optional[str] = None,
+        self,
+        sub: dict,
+        cursor: int,
+        board: Optional[str] = None,
+        database_path: Optional[Path] = None,
     ) -> None:
         """Sync helper: advance a subscription's cursor. Runs in to_thread.
 
@@ -1382,7 +1387,9 @@ class GatewayKanbanWatchersMixin:
         subscription. Unsub cursors in one board can't touch another's.
         """
         from hermes_cli import kanban_db as _kb
-        conn = _kb.connect(board=board)
+        conn = _kb.connect(
+            database_path if database_path is not None else _kb.kanban_db_path(board)
+        )
         try:
             _kb.advance_notify_cursor(
                 conn,
@@ -1395,9 +1402,16 @@ class GatewayKanbanWatchersMixin:
         finally:
             conn.close()
 
-    def _kanban_unsub(self, sub: dict, board: Optional[str] = None) -> None:
+    def _kanban_unsub(
+        self,
+        sub: dict,
+        board: Optional[str] = None,
+        database_path: Optional[Path] = None,
+    ) -> None:
         from hermes_cli import kanban_db as _kb
-        conn = _kb.connect(board=board)
+        conn = _kb.connect(
+            database_path if database_path is not None else _kb.kanban_db_path(board)
+        )
         try:
             _kb.remove_notify_sub(
                 conn,
@@ -1415,10 +1429,13 @@ class GatewayKanbanWatchersMixin:
         claimed_cursor: int,
         old_cursor: int,
         board: Optional[str] = None,
+        database_path: Optional[Path] = None,
     ) -> None:
         """Sync helper: undo a claimed notification cursor after send failure."""
         from hermes_cli import kanban_db as _kb
-        conn = _kb.connect(board=board)
+        conn = _kb.connect(
+            database_path if database_path is not None else _kb.kanban_db_path(board)
+        )
         try:
             _kb.rewind_notify_cursor(
                 conn,
