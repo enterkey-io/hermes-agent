@@ -16,6 +16,7 @@ Covers the pieces added when boards became a first-class concept:
 from __future__ import annotations
 
 import json
+from contextvars import Context
 import os
 import subprocess
 import sys
@@ -104,6 +105,57 @@ class TestPathResolution:
         monkeypatch.setenv("HERMES_KANBAN_DB", str(forced))
         assert kb.kanban_db_path() == forced
         assert kb.kanban_db_path(board="ignored") == forced
+
+    def test_physical_inventory_ignores_named_worker_redirect(
+        self, fresh_home, monkeypatch,
+    ):
+        kb.init_db()
+        kb.create_board("side-project")
+        canonical = (fresh_home / "kanban.db").resolve()
+        named = (
+            fresh_home / "kanban" / "boards" / "side-project" / "kanban.db"
+        ).resolve()
+        monkeypatch.setenv("HERMES_KANBAN_BOARD", "side-project")
+        monkeypatch.setenv("HERMES_KANBAN_DB", str(named))
+
+        assert kb.list_physical_board_db_paths(include_archived=False) == [
+            ("default", canonical),
+            ("side-project", named),
+        ]
+
+        with pytest.raises(RuntimeError, match="scope exit"):
+            with kb.scoped_board_database("default", canonical):
+                assert kb.kanban_db_path() == canonical
+                assert kb.get_current_board() == "default"
+                assert Context().run(kb.kanban_db_path) == named
+                assert os.environ["HERMES_KANBAN_DB"] == str(named)
+                raise RuntimeError("scope exit")
+        assert kb.kanban_db_path() == named
+        assert kb.get_current_board() == "side-project"
+
+    @pytest.mark.parametrize("pin", ["side-project", "Side-Project", "  Side-Project  "])
+    def test_scoped_workspace_preserves_matching_normalized_pin(
+        self, fresh_home, monkeypatch, pin
+    ):
+        named = fresh_home / "kanban/boards/side-project/kanban.db"
+        custom = fresh_home / "custom-mount/workspaces"
+        monkeypatch.setenv("HERMES_KANBAN_BOARD", pin)
+        monkeypatch.setenv("HERMES_KANBAN_WORKSPACES_ROOT", str(custom))
+        with kb.scoped_board_database("side-project", named):
+            assert kb.workspaces_root() == custom
+        with kb.scoped_board_database("default", fresh_home / "kanban.db"):
+            assert kb.workspaces_root() == fresh_home / "kanban/workspaces"
+
+    @pytest.mark.parametrize("pin", ["../invalid", "", "  DEFAULT  "])
+    def test_scoped_workspace_default_pin_fallback(self, fresh_home, monkeypatch, pin):
+        custom = fresh_home / "custom-mount/workspaces"
+        monkeypatch.setenv("HERMES_KANBAN_BOARD", pin)
+        monkeypatch.setenv("HERMES_KANBAN_WORKSPACES_ROOT", str(custom))
+        with kb.scoped_board_database("default", fresh_home / "kanban.db"):
+            assert kb.workspaces_root() == custom
+        named = fresh_home / "kanban/boards/side-project/kanban.db"
+        with kb.scoped_board_database("side-project", named):
+            assert kb.workspaces_root() == named.parent / "workspaces"
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +393,3 @@ class TestCLI:
         assert titlesA == ["Task A"]
         assert titlesB == ["Task B"]
         assert titlesD == []
-
-
-

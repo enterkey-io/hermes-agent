@@ -222,7 +222,7 @@ class GatewayKanbanWatchersMixin:
     async def _kanban_coordination_tick(self) -> None:
         """Run deterministic checks and admit at most one turn per profile."""
         from hermes_cli import kanban_db as kb
-        from hermes_cli.workforce_handoffs import claim_owned_failure_handoff_pickup
+        from hermes_cli.workforce_handoffs import claim_workforce_handoff_pickup
 
         profiles = {self._active_profile_name()}
         profiles.update(
@@ -244,56 +244,102 @@ class GatewayKanbanWatchersMixin:
         pickup_allowed = _kanban_dispatch_allowed()
 
         def collect():
-            # Coordination roots are canonical-board contracts, independent
-            # of the currently selected dashboard board or chat adapters.
-            path = kb.kanban_db_path(kb.DEFAULT_BOARD).resolve()
-            if not kb.has_coordination_tick_work(
-                path,
-                notifier_profiles=routable_profiles,
-                notifier_agents=agents,
-                include_unowned=include_unowned,
+            # Accepted requests stay on their originating board. Scan every
+            # live board while keeping the one-turn-per-profile limit global
+            # across the tick. The canonical entry is explicit because a
+            # worker's board pin redirects list_boards() metadata paths.
+            deliveries = []
+            pickups = []
+            available_profiles = set(idle_profiles)
+            scan_boards: list[tuple[str, Path]] = []
+            for slug, path in kb.list_physical_board_db_paths(
+                include_archived=False,
             ):
-                return [], []
-            conn = kb.connect(path)
-            try:
-                available_deliveries = kb.prepare_coordination_final_return_deliveries(
-                    conn,
-                    notifier_profiles=routable_profiles,
-                    notifier_agents=agents,
-                    include_unowned=include_unowned,
-                )
-                deliveries = []
-                final_profiles: set[str] = set()
-                for delivery in available_deliveries:
-                    execution_profile = next((
-                        profile for profile in sorted(idle_profiles)
-                        if profile_agents.get(profile) == delivery["responsible_agent"]
-                    ), None)
-                    if execution_profile is None:
+                try:
+                    if not kb.has_coordination_tick_work(
+                        path,
+                        notifier_profiles=routable_profiles,
+                        notifier_agents=agents,
+                        include_unowned=include_unowned,
+                    ):
                         continue
-                    deliveries.append({
-                        **delivery,
-                        "execution_profile": execution_profile,
-                    })
-                    final_profiles.add(execution_profile)
-                pickups = []
-                if pickup_allowed:
-                    pickup_profiles = (
-                        (idle_profiles - final_profiles) & profile_agents.keys()
+                    scan_boards.append((str(slug), path))
+                except Exception as exc:
+                    logger.warning(
+                        "kanban coordination: board %s (%s) probe failed: %s",
+                        slug,
+                        path or "unresolved",
+                        exc,
                     )
-                    for profile in sorted(pickup_profiles):
-                        claim = claim_owned_failure_handoff_pickup(
-                            conn, target_agent=profile_agents[profile],
+
+            # Final returns close an accepted user request, so allocate every
+            # board's return work before new handoff pickups consume a profile.
+            for slug, path in scan_boards:
+                try:
+                    conn = kb.connect(path)
+                    try:
+                        available_deliveries = (
+                            kb.prepare_coordination_final_return_deliveries(
+                                conn,
+                                notifier_profiles=routable_profiles,
+                                notifier_agents=agents,
+                                include_unowned=include_unowned,
+                            )
                         )
-                        if claim is not None:
-                            pickups.append({
-                                **claim,
-                                "execution_profile": profile,
-                                "database_path": path,
+                        for delivery in available_deliveries:
+                            execution_profile = next((
+                                profile for profile in sorted(available_profiles)
+                                if profile_agents.get(profile)
+                                == delivery["responsible_agent"]
+                            ), None)
+                            if execution_profile is None:
+                                continue
+                            deliveries.append({
+                                **delivery,
+                                "execution_profile": execution_profile,
                             })
-                return deliveries, pickups
-            finally:
-                conn.close()
+                            available_profiles.remove(execution_profile)
+                    finally:
+                        conn.close()
+                except Exception as exc:
+                    logger.warning(
+                        "kanban coordination: board %s (%s) return scan failed: %s",
+                        slug,
+                        path,
+                        exc,
+                    )
+
+            if pickup_allowed:
+                for slug, path in scan_boards:
+                    if not available_profiles:
+                        break
+                    try:
+                        conn = kb.connect(path)
+                        try:
+                            pickup_profiles = (
+                                available_profiles & profile_agents.keys()
+                            )
+                            for profile in sorted(pickup_profiles):
+                                claim = claim_workforce_handoff_pickup(
+                                    conn, target_agent=profile_agents[profile],
+                                )
+                                if claim is not None:
+                                    pickups.append({
+                                        **claim,
+                                        "execution_profile": profile,
+                                        "database_path": path,
+                                    })
+                                    available_profiles.remove(profile)
+                        finally:
+                            conn.close()
+                    except Exception as exc:
+                        logger.warning(
+                            "kanban coordination: board %s (%s) pickup scan failed: %s",
+                            slug,
+                            path,
+                            exc,
+                        )
+            return deliveries, pickups
 
         deliveries, pickups = await asyncio.to_thread(collect)
         for delivery in deliveries:
@@ -306,7 +352,7 @@ class GatewayKanbanWatchersMixin:
         for pickup in pickups:
             profile = pickup["execution_profile"]
             jobs[profile] = asyncio.create_task(
-                self._kanban_pickup_owned_failure(pickup),
+                self._kanban_pickup_workforce_handoff(pickup),
                 name=f"kanban-handoff-pickup:{profile}",
             )
         from gateway.operational_outcomes import operational_outcome_profiles
@@ -337,7 +383,7 @@ class GatewayKanbanWatchersMixin:
                     logger.warning("operational outcome delivery withheld for profile %s", profile)
             cursors[profile] = cursor
 
-    async def _kanban_pickup_owned_failure(self, pickup: dict) -> None:
+    async def _kanban_pickup_workforce_handoff(self, pickup: dict) -> None:
         from hermes_cli.workforce_handoff_pickup import run_workforce_handoff_pickup
 
         result = await run_workforce_handoff_pickup(
@@ -347,10 +393,11 @@ class GatewayKanbanWatchersMixin:
             execution_profile=pickup["execution_profile"],
             source_agent=pickup["source_agent"],
             database_path=pickup["database_path"],
+            claim_kind=pickup["claim_kind"],
         )
         logger.info(
             "kanban handoff pickup task=%s profile=%s acknowledged=%s timed_out=%s returncode=%s",
-            pickup["task_id"], pickup["target_agent"], result.acknowledged,
+            pickup["task_id"], pickup["execution_profile"], result.acknowledged,
             result.timed_out, result.returncode,
         )
 
@@ -569,30 +616,9 @@ class GatewayKanbanWatchersMixin:
                         logger.debug("kanban notifier: no connected adapters; skipping tick")
                         return deliveries
 
-                    # Enumerate every board on disk, but poll each resolved DB
-                    # path once. Multiple slugs can point at the same DB when
-                    # HERMES_KANBAN_DB pins the board path; without this guard
-                    # one gateway could collect the same subscription/event
-                    # more than once before advancing the cursor.
-                    try:
-                        boards = _kb.list_boards(include_archived=False)
-                    except Exception:
-                        boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
-                    seen_db_paths: set[str] = set()
-                    for board_meta in boards:
-                        slug = board_meta.get("slug") or _kb.DEFAULT_BOARD
-                        db_path = board_meta.get("db_path")
-                        try:
-                            resolved_db_path = str(Path(db_path).expanduser().resolve()) if db_path else str(_kb.kanban_db_path(slug).resolve())
-                        except Exception:
-                            resolved_db_path = f"slug:{slug}"
-                        if resolved_db_path in seen_db_paths:
-                            logger.debug(
-                                "kanban notifier: skipping duplicate board slug %s for DB %s",
-                                slug, resolved_db_path,
-                            )
-                            continue
-                        seen_db_paths.add(resolved_db_path)
+                    for slug, database_path in _kb.list_physical_board_db_paths(
+                        include_archived=False,
+                    ):
                         # Zero-subscription early exit: probe the board with a
                         # cheap read-only connection BEFORE the writable
                         # `connect()`. A board with no subscriptions has
@@ -602,7 +628,7 @@ class GatewayKanbanWatchersMixin:
                         # this skip avoids.
                         try:
                             if _kb.count_notify_subs(
-                                board=slug,
+                                db_path=database_path,
                                 notifier_profiles=notifier_profiles,
                                 include_unowned=include_unowned,
                             ) == 0:
@@ -618,7 +644,7 @@ class GatewayKanbanWatchersMixin:
                                 slug, exc,
                             )
                         try:
-                            conn = _kb.connect(board=slug)
+                            conn = _kb.connect(database_path)
                         except Exception as exc:
                             logger.debug("kanban notifier: cannot open board %s: %s", slug, exc)
                             continue
@@ -727,6 +753,7 @@ class GatewayKanbanWatchersMixin:
                                         "events": events,
                                         "task": task,
                                         "board": slug,
+                                        "database_path": database_path,
                                     })
                                 except Exception as sub_exc:
                                     # Isolate per-subscription failures so one
@@ -736,6 +763,11 @@ class GatewayKanbanWatchersMixin:
                                         "kanban notifier: subscription for %s on board %s failed: %s",
                                         sub.get("task_id"), slug, sub_exc,
                                     )
+                        except Exception as exc:
+                            logger.warning(
+                                "kanban notifier: board %s collection failed: %s",
+                                slug, exc,
+                            )
                         finally:
                             conn.close()
                     return deliveries
@@ -745,6 +777,7 @@ class GatewayKanbanWatchersMixin:
                     sub = d["sub"]
                     task = d["task"]
                     board_slug = d.get("board")
+                    database_path = d.get("database_path")
                     platform_str = (sub["platform"] or "").lower()
                     try:
                         plat = _Platform(platform_str)
@@ -752,7 +785,11 @@ class GatewayKanbanWatchersMixin:
                         # Unknown platform string; skip and advance cursor so
                         # we don't replay forever.
                         await asyncio.to_thread(
-                            self._kanban_advance, sub, d["cursor"], board_slug,
+                            self._kanban_advance,
+                            sub,
+                            d["cursor"],
+                            board_slug,
+                            database_path,
                         )
                         continue
                     sub_profile = sub.get("notifier_profile") or ""
@@ -777,6 +814,7 @@ class GatewayKanbanWatchersMixin:
                             d["cursor"],
                             d.get("old_cursor", 0),
                             board_slug,
+                            database_path,
                         )
                         continue
                     title = (task.title if task else sub["task_id"])[:120]
@@ -1022,7 +1060,12 @@ class GatewayKanbanWatchersMixin:
                                     "%s on %s after %d consecutive send failures",
                                     sub["task_id"], platform_str, fails,
                                 )
-                                await asyncio.to_thread(self._kanban_unsub, sub, board_slug)
+                                await asyncio.to_thread(
+                                    self._kanban_unsub,
+                                    sub,
+                                    board_slug,
+                                    database_path,
+                                )
                                 sub_fail_counts.pop(sub_key, None)
                             else:
                                 await asyncio.to_thread(
@@ -1031,6 +1074,7 @@ class GatewayKanbanWatchersMixin:
                                     d["cursor"],
                                     d.get("old_cursor", 0),
                                     board_slug,
+                                    database_path,
                                 )
                             # Rewind the pre-send claim on transient failure so
                             # a later tick can retry. After too many failures,
@@ -1150,7 +1194,12 @@ class GatewayKanbanWatchersMixin:
                                         "%s on %s after %d consecutive wake failures",
                                         sub["task_id"], platform_str, fails,
                                     )
-                                    await asyncio.to_thread(self._kanban_unsub, sub, board_slug)
+                                    await asyncio.to_thread(
+                                        self._kanban_unsub,
+                                        sub,
+                                        board_slug,
+                                        database_path,
+                                    )
                                     sub_fail_counts.pop(sub_key, None)
                                 else:
                                     # Rewind the pre-send claim so the next
@@ -1162,6 +1211,7 @@ class GatewayKanbanWatchersMixin:
                                         d["cursor"],
                                         d.get("old_cursor", 0),
                                         board_slug,
+                                        database_path,
                                     )
                                 continue
 
@@ -1250,7 +1300,12 @@ class GatewayKanbanWatchersMixin:
                                         "%s on %s after %d consecutive wake failures",
                                         sub["task_id"], platform_str, fails,
                                     )
-                                    await asyncio.to_thread(self._kanban_unsub, sub, board_slug)
+                                    await asyncio.to_thread(
+                                        self._kanban_unsub,
+                                        sub,
+                                        board_slug,
+                                        database_path,
+                                    )
                                     sub_fail_counts.pop(sub_key, None)
                                 else:
                                     # Rewind the pre-send claim so the next
@@ -1262,6 +1317,7 @@ class GatewayKanbanWatchersMixin:
                                         d["cursor"],
                                         d.get("old_cursor", 0),
                                         board_slug,
+                                        database_path,
                                     )
                                 continue
 
@@ -1271,7 +1327,11 @@ class GatewayKanbanWatchersMixin:
                         # mechanism — it prevents re-delivery of the same
                         # event on subsequent ticks.
                         await asyncio.to_thread(
-                            self._kanban_advance, sub, d["cursor"], board_slug,
+                            self._kanban_advance,
+                            sub,
+                            d["cursor"],
+                            board_slug,
+                            database_path,
                         )
                         if not _is_push_adapter:
                             # Nothing left to deliver on this path (the wake,
@@ -1301,7 +1361,10 @@ class GatewayKanbanWatchersMixin:
                                 )
                         if task_terminal:
                             await asyncio.to_thread(
-                                self._kanban_unsub, sub, board_slug,
+                                self._kanban_unsub,
+                                sub,
+                                board_slug,
+                                database_path,
                             )
             except Exception as exc:
                 logger.warning("kanban notifier tick failed: %s", exc)
@@ -1312,7 +1375,11 @@ class GatewayKanbanWatchersMixin:
                 await asyncio.sleep(1)
 
     def _kanban_advance(
-        self, sub: dict, cursor: int, board: Optional[str] = None,
+        self,
+        sub: dict,
+        cursor: int,
+        board: Optional[str] = None,
+        database_path: Optional[Path] = None,
     ) -> None:
         """Sync helper: advance a subscription's cursor. Runs in to_thread.
 
@@ -1320,7 +1387,9 @@ class GatewayKanbanWatchersMixin:
         subscription. Unsub cursors in one board can't touch another's.
         """
         from hermes_cli import kanban_db as _kb
-        conn = _kb.connect(board=board)
+        conn = _kb.connect(
+            database_path if database_path is not None else _kb.kanban_db_path(board)
+        )
         try:
             _kb.advance_notify_cursor(
                 conn,
@@ -1333,9 +1402,16 @@ class GatewayKanbanWatchersMixin:
         finally:
             conn.close()
 
-    def _kanban_unsub(self, sub: dict, board: Optional[str] = None) -> None:
+    def _kanban_unsub(
+        self,
+        sub: dict,
+        board: Optional[str] = None,
+        database_path: Optional[Path] = None,
+    ) -> None:
         from hermes_cli import kanban_db as _kb
-        conn = _kb.connect(board=board)
+        conn = _kb.connect(
+            database_path if database_path is not None else _kb.kanban_db_path(board)
+        )
         try:
             _kb.remove_notify_sub(
                 conn,
@@ -1353,10 +1429,13 @@ class GatewayKanbanWatchersMixin:
         claimed_cursor: int,
         old_cursor: int,
         board: Optional[str] = None,
+        database_path: Optional[Path] = None,
     ) -> None:
         """Sync helper: undo a claimed notification cursor after send failure."""
         from hermes_cli import kanban_db as _kb
-        conn = _kb.connect(board=board)
+        conn = _kb.connect(
+            database_path if database_path is not None else _kb.kanban_db_path(board)
+        )
         try:
             _kb.rewind_notify_cursor(
                 conn,
@@ -1706,8 +1785,7 @@ class GatewayKanbanWatchersMixin:
             str, tuple[tuple[str, int | None, int | None], float]
         ] = {}
 
-        def _board_db_fingerprint(slug: str) -> tuple[str, int | None, int | None]:
-            path = _kb.kanban_db_path(slug)
+        def _board_db_fingerprint(path: Path) -> tuple[str, int | None, int | None]:
             try:
                 resolved = str(path.expanduser().resolve())
             except Exception:
@@ -1730,7 +1808,7 @@ class GatewayKanbanWatchersMixin:
                 or "database disk image is malformed" in msg
             )
 
-        def _tick_once_for_board(slug: str) -> "Optional[object]":
+        def _tick_once_for_board(slug: str, database_path: Path) -> "Optional[object]":
             """Run one dispatch_once for a specific board.
 
             Runs in a worker thread via `asyncio.to_thread`. `board=slug`
@@ -1740,7 +1818,7 @@ class GatewayKanbanWatchersMixin:
             connection handle or accidentally claim across each other.
             """
             conn = None
-            fingerprint = _board_db_fingerprint(slug)
+            fingerprint = _board_db_fingerprint(database_path)
             disabled_entry = disabled_corrupt_boards.get(slug)
             if disabled_entry is not None:
                 disabled_fingerprint, disabled_at = disabled_entry
@@ -1764,24 +1842,25 @@ class GatewayKanbanWatchersMixin:
                     )
                 disabled_corrupt_boards.pop(slug, None)
             try:
-                conn = _kb.connect(board=slug)
+                conn = _kb.connect(database_path)
                 # `connect()` runs the schema + idempotent migration on
                 # first open per process; the previous explicit
                 # `init_db()` call here busted the per-process cache and
                 # re-ran the migration on a second connection, racing
                 # the first. See the matching comment in
                 # `_kanban_notifier_watcher` and issue #21378.
-                return _kb.dispatch_once(
-                    conn,
-                    board=slug,
-                    max_spawn=max_spawn,
-                    max_in_progress=max_in_progress,
-                    failure_limit=failure_limit,
-                    stale_timeout_seconds=stale_timeout_seconds,
-                    default_assignee=default_assignee,
-                    max_in_progress_per_profile=max_in_progress_per_profile,
-                    reconcile_orphans=reconcile_orphans,
-                )
+                with _kb.scoped_board_database(slug, database_path):
+                    return _kb.dispatch_once(
+                        conn,
+                        board=slug,
+                        max_spawn=max_spawn,
+                        max_in_progress=max_in_progress,
+                        failure_limit=failure_limit,
+                        stale_timeout_seconds=stale_timeout_seconds,
+                        default_assignee=default_assignee,
+                        max_in_progress_per_profile=max_in_progress_per_profile,
+                        reconcile_orphans=reconcile_orphans,
+                    )
             except sqlite3.DatabaseError as exc:
                 if _is_corrupt_board_db_error(exc):
                     disabled_corrupt_boards[slug] = (fingerprint, time.monotonic())
@@ -1826,14 +1905,11 @@ class GatewayKanbanWatchersMixin:
             when users create a new board mid-run: no restart required,
             the next tick picks it up automatically.
             """
-            try:
-                boards = _kb.list_boards(include_archived=False)
-            except Exception:
-                boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
             out: list[tuple[str, "Optional[object]"]] = []
-            for b in boards:
-                slug = b.get("slug") or _kb.DEFAULT_BOARD
-                out.append((slug, _tick_once_for_board(slug)))
+            for slug, database_path in _kb.list_physical_board_db_paths(
+                include_archived=False,
+            ):
+                out.append((slug, _tick_once_for_board(slug, database_path)))
             return out
 
         def _ready_nonempty() -> bool:
@@ -1855,15 +1931,12 @@ class GatewayKanbanWatchersMixin:
             # fire a false "dispatcher stuck" warning that never clears. Shares
             # the exact gate the dispatcher uses so the two can't drift.
             _review_probe = _kb.review_dispatch_enabled()
-            try:
-                boards = _kb.list_boards(include_archived=False)
-            except Exception:
-                boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
-            for b in boards:
-                slug = b.get("slug") or _kb.DEFAULT_BOARD
+            for _slug, database_path in _kb.list_physical_board_db_paths(
+                include_archived=False,
+            ):
                 conn = None
                 try:
-                    conn = _kb.connect(board=slug)
+                    conn = _kb.connect(database_path)
                     if _kb.has_spawnable_ready(conn):
                         return True
                     if _review_probe and _kb.has_spawnable_review(conn):
@@ -1909,23 +1982,14 @@ class GatewayKanbanWatchersMixin:
                     "kanban auto-decompose: import failed (%s); skipping", exc,
                 )
                 return 0
-            try:
-                boards = _kb.list_boards(include_archived=False)
-            except Exception:
-                boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
             attempted = 0
             successes = 0
-            for b in boards:
-                slug = b.get("slug") or _kb.DEFAULT_BOARD
+            for slug, database_path in _kb.list_physical_board_db_paths(
+                include_archived=False,
+            ):
                 if attempted >= auto_decompose_per_tick:
                     break
-                # Pin this board for the duration of the call — same
-                # pattern as the dashboard specify endpoint. The
-                # decomposer module connects with no board kwarg and
-                # relies on the env var.
-                prev_env = os.environ.get("HERMES_KANBAN_BOARD")
-                try:
-                    os.environ["HERMES_KANBAN_BOARD"] = slug
+                with _kb.scoped_board_database(slug, database_path):
                     try:
                         triage_ids = _decomp.list_triage_ids()
                     except Exception as exc:
@@ -1967,11 +2031,6 @@ class GatewayKanbanWatchersMixin:
                                 "kanban auto-decompose [%s]: %s skipped: %s",
                                 slug, tid, outcome.reason,
                             )
-                finally:
-                    if prev_env is None:
-                        os.environ.pop("HERMES_KANBAN_BOARD", None)
-                    else:
-                        os.environ["HERMES_KANBAN_BOARD"] = prev_env
             return successes
 
         logger.info(

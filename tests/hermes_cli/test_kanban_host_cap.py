@@ -235,6 +235,27 @@ def test_count_running_tasks_other_boards_fails_open(
     assert kb.count_running_tasks_other_boards() == 0
 
 
+def test_host_count_uses_physical_boards_under_worker_redirect(
+    kanban_home, monkeypatch,
+):
+    kb.create_board("second")
+    second = (kb.board_dir("second") / "kanban.db").resolve()
+    with kb.connect(second) as conn:
+        tid = kb.create_task(conn, title="busy", assignee="alice")
+        assert kb.claim_task(conn, tid) is not None
+    with kb.connect(kanban_home / "kanban.db") as conn:
+        for title in ("canonical busy one", "canonical busy two"):
+            tid = kb.create_task(conn, title=title, assignee="alice")
+            assert kb.claim_task(conn, tid) is not None
+
+    monkeypatch.setenv("HERMES_KANBAN_BOARD", "second")
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(second))
+
+    assert kb.count_running_tasks_other_boards(board="second") == 2
+    monkeypatch.delenv("HERMES_KANBAN_DB")
+    assert kb.count_running_tasks_other_boards(board="default") == 1
+
+
 def test_max_spawn_stays_per_board(kanban_home, all_assignees_spawnable):
     """``max_spawn`` keeps its historical per-board semantics."""
     kb.create_board("second")

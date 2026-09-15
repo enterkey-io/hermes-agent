@@ -834,6 +834,121 @@ def test_promote_rechecks_handoff_state_inside_write_transaction(
     assert _ledger(conn)["events"] == events_before
 
 
+@pytest.mark.parametrize("changed_field", ["assignee", "created_by"])
+def test_acknowledgment_rechecks_route_inside_write_transaction(
+    conn,
+    monkeypatch,
+    changed_field,
+):
+    import hermes_cli.workforce_handoffs as workforce_handoffs
+
+    now = int(time.time())
+    task_id = _create_handoff(
+        conn,
+        now=now,
+        label=f"ack-{changed_field}-race",
+        owned=False,
+    )
+    original = kanban_db.get_task(conn, task_id)
+    original_write_txn = workforce_handoffs.write_txn
+    injected = False
+
+    @contextmanager
+    def inject_route_change(connection, *args, **kwargs):
+        nonlocal injected
+        if not injected:
+            injected = True
+            if changed_field == "assignee":
+                assert kanban_db.assign_task(
+                    connection, task_id, "aurora"
+                ) is True
+            else:
+                connection.execute(
+                    "UPDATE tasks SET created_by = 'alina' WHERE id = ?",
+                    (task_id,),
+                )
+                connection.commit()
+        with original_write_txn(connection, *args, **kwargs):
+            yield
+
+    monkeypatch.setattr(workforce_handoffs, "write_txn", inject_route_change)
+    with pytest.raises(
+        ValueError,
+        match="workforce handoff route changed before acknowledgment",
+    ):
+        acknowledge_handoff(
+            conn,
+            task_id,
+            actor="alina",
+            organization=ORG,
+            now=now + 1,
+        )
+
+    assert injected is True
+    current = kanban_db.get_task(conn, task_id)
+    assert current.status == "triage"
+    assert current.body == original.body
+    assert json.loads(current.body)["state"] == "pending_acknowledgment"
+    assert all(
+        event.kind != "workforce_handoff_acknowledged"
+        for event in kanban_db.list_events(conn, task_id)
+    )
+
+
+def test_acknowledgment_rechecks_creation_provenance_inside_write_transaction(
+    conn,
+    monkeypatch,
+):
+    import hermes_cli.workforce_handoffs as workforce_handoffs
+
+    now = int(time.time())
+    task_id = _create_handoff(
+        conn,
+        now=now,
+        label="ack-provenance-race",
+        owned=False,
+    )
+    original = kanban_db.get_task(conn, task_id)
+    original_write_txn = workforce_handoffs.write_txn
+    injected = False
+
+    @contextmanager
+    def inject_provenance_change(connection, *args, **kwargs):
+        nonlocal injected
+        if not injected:
+            injected = True
+            connection.execute(
+                "DELETE FROM task_events WHERE task_id = ? "
+                "AND kind = 'workforce_handoff_created'",
+                (task_id,),
+            )
+            connection.commit()
+        with original_write_txn(connection, *args, **kwargs):
+            yield
+
+    monkeypatch.setattr(workforce_handoffs, "write_txn", inject_provenance_change)
+    with pytest.raises(
+        ValueError,
+        match="workforce handoff contract changed before acknowledgment",
+    ):
+        acknowledge_handoff(
+            conn,
+            task_id,
+            actor="alina",
+            organization=ORG,
+            now=now + 1,
+        )
+
+    assert injected is True
+    current = kanban_db.get_task(conn, task_id)
+    assert current.status == "triage"
+    assert current.body == original.body
+    assert all(
+        event.kind != "workforce_handoff_acknowledged"
+        for event in kanban_db.list_events(conn, task_id)
+    )
+
+
 def test_reservation_rechecks_handoff_link_inside_write_transaction(
     conn,
     monkeypatch,

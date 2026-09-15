@@ -160,6 +160,10 @@ DEFAULT_COORDINATION_MAX_MODEL_CALLS = 40
 DEFAULT_COORDINATION_FINAL_CALL_RESERVE = 2
 DEFAULT_COORDINATION_CHECKPOINT_SECONDS = 20 * 60
 DEFAULT_COORDINATION_MAX_TRANSIENT_RETRIES = 1
+WORKFORCE_HANDOFF_INHERITABLE_REQUEST_KINDS = frozenset({
+    "origin_request",
+    "owned_operational_failure",
+})
 INTERNAL_FAILURE_MAX_LEAF_LAUNCHES = 2
 INTERNAL_FAILURE_MAX_CONCURRENT_LEAF = 1
 INTERNAL_FAILURE_MAX_MODEL_CALLS = 20
@@ -714,6 +718,21 @@ _CURRENT_BOARD_OVERRIDE: ContextVar[str | None] = ContextVar(
     "hermes_kanban_current_board_override",
     default=None,
 )
+_BOARD_DATABASE_OVERRIDE: ContextVar[tuple[str, Path] | None] = ContextVar(
+    "hermes_kanban_board_database_override", default=None,
+)
+
+
+@contextlib.contextmanager
+def scoped_board_database(slug: str, database_path: Path):
+    """Bind a global scanner's board through locks, helpers, and worker launch."""
+    normalized = _normalize_board_slug(slug) or DEFAULT_BOARD
+    token = _BOARD_DATABASE_OVERRIDE.set((normalized, database_path))
+    try:
+        with scoped_current_board(normalized):
+            yield
+    finally:
+        _BOARD_DATABASE_OVERRIDE.reset(token)
 
 
 @contextlib.contextmanager
@@ -900,6 +919,8 @@ def kanban_db_path(board: Optional[str] = None) -> Path:
 
     Resolution (highest precedence first):
 
+    0. :func:`scoped_board_database` binds a global scan's exact database
+       for the current context, including downstream worker launch.
     1. ``HERMES_KANBAN_DB`` env var — pins the path directly. Honoured for
        back-compat and for the dispatcher→worker handoff (defense in
        depth: dispatcher injects this into worker env so workers are
@@ -909,6 +930,9 @@ def kanban_db_path(board: Optional[str] = None) -> Path:
     3. Board ``default`` → ``<root>/kanban.db`` (back-compat path).
        Other boards → ``<root>/kanban/boards/<slug>/kanban.db``.
     """
+    scoped = _BOARD_DATABASE_OVERRIDE.get()
+    if scoped is not None:
+        return scoped[1]
     override = os.environ.get("HERMES_KANBAN_DB", "").strip()
     if override:
         return Path(override).expanduser()
@@ -918,6 +942,29 @@ def kanban_db_path(board: Optional[str] = None) -> Path:
     if slug == DEFAULT_BOARD:
         return kanban_home() / "kanban.db"
     return board_dir(slug) / "kanban.db"
+
+
+def canonical_coordination_db_path() -> Path:
+    """Return the default board used by cross-profile coordination.
+
+    A dispatched worker receives both ``HERMES_KANBAN_BOARD`` and
+    ``HERMES_KANBAN_DB`` for its project board. Those pins must not redirect
+    workforce handoffs away from the machine-wide coordination board. A
+    standalone database override remains supported when no non-default worker
+    board is pinned.
+    """
+    override = os.environ.get("HERMES_KANBAN_DB", "").strip()
+    try:
+        pinned = _normalize_board_slug(
+            os.environ.get("HERMES_KANBAN_BOARD", "").strip()
+        )
+    except ValueError:
+        # Match get_current_board(): a malformed manual pin must not disable
+        # machine-wide coordination when the canonical path is still usable.
+        pinned = None
+    if override and pinned in {None, DEFAULT_BOARD}:
+        return Path(override).expanduser()
+    return kanban_home() / "kanban.db"
 
 
 def workspaces_root(board: Optional[str] = None) -> Path:
@@ -932,6 +979,18 @@ def workspaces_root(board: Optional[str] = None) -> Path:
     preserved. Other boards use ``<root>/kanban/boards/<slug>/workspaces/``.
     """
     override = os.environ.get("HERMES_KANBAN_WORKSPACES_ROOT", "").strip()
+    scoped = _BOARD_DATABASE_OVERRIDE.get()
+    if scoped is not None:
+        # A named worker's workspace pin belongs to that board, not every
+        # board visited by a global dispatcher sharing this process.
+        try:
+            pinned = _normalize_board_slug(os.environ.get("HERMES_KANBAN_BOARD"))
+        except ValueError:
+            pinned = None
+        pinned = pinned or DEFAULT_BOARD
+        if pinned != scoped[0]:
+            override = ""
+        board = scoped[0]
     if override:
         return Path(override).expanduser()
     slug = _normalize_board_slug(board)
@@ -1180,6 +1239,39 @@ def list_boards(*, include_archived: bool = True) -> list[dict]:
             entries.append(meta)
             seen.add(normed)
     return entries
+
+
+def list_physical_board_db_paths(
+    *, include_archived: bool = True,
+) -> list[tuple[str, Path]]:
+    """Return each live board's physical database path exactly once.
+
+    Global coordination and notification loops must not reopen a board through
+    :func:`kanban_db_path`: a dispatched worker's ``HERMES_KANBAN_DB`` pin
+    intentionally redirects that resolver to its own board.  The canonical
+    coordination database remains first, while named boards are derived from
+    their on-disk directories rather than redirectable metadata.
+    """
+    canonical = canonical_coordination_db_path().expanduser().resolve()
+    paths: list[tuple[str, Path]] = [(DEFAULT_BOARD, canonical)]
+    seen = {canonical}
+    try:
+        boards = list_boards(include_archived=include_archived)
+    except Exception:
+        return paths
+    for board in boards:
+        try:
+            slug = _normalize_board_slug(board.get("slug")) or DEFAULT_BOARD
+            if slug == DEFAULT_BOARD:
+                continue
+            path = (board_dir(slug) / "kanban.db").expanduser().resolve()
+            if path in seen:
+                continue
+            seen.add(path)
+            paths.append((slug, path))
+        except Exception:
+            continue
+    return paths
 
 
 def remove_board(slug: str, *, archive: bool = True) -> dict:
@@ -5659,7 +5751,7 @@ def has_coordination_tick_work(
     notifier_agents: Optional[Iterable[str]] = None,
     include_unowned: bool = False,
 ) -> bool:
-    """Cheap read-only probe for final-return or owned-failure intake work.
+    """Cheap read-only probe for final-return or workforce-handoff pickup work.
 
     This is the notifier's pre-open gate. It never creates or migrates a DB,
     and legacy boards without the coordination schema simply return ``False``.
@@ -5692,11 +5784,11 @@ def has_coordination_tick_work(
             row["name"]
             for row in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN "
-                "('coordination_requests', 'kanban_notify_subs', 'tasks')"
+                "('coordination_requests', 'kanban_notify_subs', 'tasks', 'task_events')"
             ).fetchall()
         }
         if {
-            "coordination_requests", "kanban_notify_subs", "tasks"
+            "coordination_requests", "kanban_notify_subs", "tasks", "task_events"
         }.issubset(tables):
             requests = conn.execute(
                 "SELECT id, root_task_id, responsible_agent FROM "
@@ -5732,8 +5824,12 @@ def has_coordination_tick_work(
                 )
                 params.extend(sorted(agents))
             candidates = conn.execute(
-                "SELECT assignee, body FROM tasks WHERE status = 'triage' "
-                "AND body LIKE '%\"kind\": \"workforce_handoff\"%'"
+                "SELECT id, assignee, body, request_root_id FROM tasks "
+                "WHERE status = 'triage' "
+                "AND body LIKE '%\"kind\": \"workforce_handoff\"%' "
+                "AND NOT EXISTS (SELECT 1 FROM task_events e "
+                "WHERE e.task_id = tasks.id "
+                "AND e.kind = 'workforce_handoff_pickup_claimed')"
                 + assignee_clause,
                 params,
             ).fetchall()
@@ -5741,7 +5837,6 @@ def has_coordination_tick_work(
             for candidate in candidates:
                 try:
                     payload = json.loads(candidate["body"] or "{}")
-                    context = payload.get("context")
                     acknowledgment_deadline = int(
                         payload.get("acknowledgment_deadline")
                     )
@@ -5752,13 +5847,52 @@ def has_coordination_tick_work(
                     isinstance(payload, dict)
                     and payload.get("kind") == "workforce_handoff"
                     and payload.get("state") == "pending_acknowledgment"
-                    and payload.get("requires_source_acceptance") is True
-                    and isinstance(context, dict)
-                    and context.get("kind") == "owned_operational_failure"
                     and str(payload.get("target_agent") or "").strip()
                     == str(candidate["assignee"] or "").strip()
                     and now <= acknowledgment_deadline < checkpoint_at
                 ):
+                    request_root_id = candidate["request_root_id"]
+                    context = payload.get("context")
+                    owned_failure = bool(
+                        payload.get("requires_source_acceptance") is True
+                        and isinstance(context, dict)
+                        and context.get("kind") == "owned_operational_failure"
+                    )
+                    if (
+                        isinstance(context, dict)
+                        and context.get("kind") == "owned_operational_failure"
+                        and not owned_failure
+                    ):
+                        continue
+                    if (
+                        not owned_failure
+                        and payload.get("delivery_contract_version") != 1
+                    ):
+                        continue
+                    if not owned_failure and conn.execute(
+                        "SELECT 1 FROM task_events WHERE task_id = ? "
+                        "AND kind = 'workforce_handoff_created' LIMIT 1",
+                        (candidate["id"],),
+                    ).fetchone() is None:
+                        continue
+                    if request_root_id:
+                        request = conn.execute(
+                            "SELECT kind, status, checkpoint_at FROM "
+                            "coordination_requests WHERE id = ?",
+                            (request_root_id,),
+                        ).fetchone()
+                        allowed_request_kinds = (
+                            {"owned_operational_failure"}
+                            if owned_failure
+                            else WORKFORCE_HANDOFF_INHERITABLE_REQUEST_KINDS
+                        )
+                        if (
+                            request is None
+                            or request["kind"] not in allowed_request_kinds
+                            or request["status"] != "active"
+                            or now >= int(request["checkpoint_at"])
+                        ):
+                            continue
                     return True
         return False
     except sqlite3.OperationalError:
@@ -15717,8 +15851,8 @@ def count_running_tasks_other_boards(board: Optional[str] = None) -> int:
     number of active boards — reproduced in review of OOF-30: two boards
     each spawned N workers on a derived N-worker host budget.
 
-    Boards are matched by resolved DB path, so the ``HERMES_KANBAN_DB``
-    override (which pins every board to one file) naturally yields 0.
+    Boards are matched by resolved DB path. A worker's ``HERMES_KANBAN_DB``
+    pin identifies the current database without hiding other physical boards.
     Fails open per board: one broken/corrupt board must not brick dispatch
     on the healthy ones.
     """
@@ -15726,21 +15860,15 @@ def count_running_tasks_other_boards(board: Optional[str] = None) -> int:
         current_path = str(kanban_db_path(board=board).expanduser().resolve())
     except Exception:
         current_path = None
-    try:
-        boards = list_boards(include_archived=False)
-    except Exception:
-        return 0
     total = 0
-    for meta in boards:
-        slug = meta.get("slug") or DEFAULT_BOARD
+    for _slug, path in list_physical_board_db_paths(include_archived=False):
         try:
-            path = kanban_db_path(board=slug).expanduser()
             resolved = str(path.resolve())
             if current_path is not None and resolved == current_path:
                 continue
             if not path.exists():
                 continue
-            other = connect(board=slug)
+            other = connect(path)
             try:
                 total += count_running_tasks(other)
             finally:

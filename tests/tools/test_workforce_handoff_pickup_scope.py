@@ -7,6 +7,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from tools.registry import ToolRegistry
 
 
@@ -37,6 +39,9 @@ def _install_scope(monkeypatch) -> None:
     monkeypatch.setenv("HERMES_WORKFORCE_HANDOFF_PICKUP_TASK", "t_pickup_123")
     monkeypatch.setenv("HERMES_WORKFORCE_HANDOFF_PICKUP_TARGET", "alina")
     monkeypatch.setenv("HERMES_WORKFORCE_HANDOFF_PICKUP_SOURCE", "aurora")
+    monkeypatch.setenv(
+        "HERMES_WORKFORCE_HANDOFF_PICKUP_KIND", "owned_operational_failure"
+    )
     monkeypatch.setenv("HERMES_KANBAN_DB", "/tmp/pickup-test.db")
 
 
@@ -97,6 +102,54 @@ def test_partial_pickup_metadata_fails_closed_for_every_tool(monkeypatch):
     assert calls == []
 
 
+def test_lone_pickup_kind_marker_also_fails_closed(monkeypatch):
+    _clear_scope(monkeypatch)
+    monkeypatch.setenv("HERMES_WORKFORCE_HANDOFF_PICKUP_KIND", "ordinary")
+    registry, calls = _registry()
+
+    denied = json.loads(registry.dispatch("terminal", {}))
+
+    assert denied["error_type"] == "workforce_handoff_pickup_scope_denied"
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("claim_kind", "missing_keys", "coordination_task_id"),
+    [
+        ("ordinary", ("HERMES_COORDINATION_REQUEST_ROOT",), "t_pickup_123"),
+        (
+            "owned_operational_failure",
+            (
+                "HERMES_COORDINATION_REQUEST_ROOT",
+                "HERMES_COORDINATION_TASK_ID",
+                "HERMES_COORDINATION_PURPOSE",
+            ),
+            None,
+        ),
+        ("unexpected", (), "t_pickup_123"),
+        ("ordinary", (), "t_mismatched"),
+    ],
+)
+def test_malformed_coordination_or_claim_kind_fails_closed(
+    monkeypatch, claim_kind, missing_keys, coordination_task_id,
+):
+    _clear_scope(monkeypatch)
+    _install_scope(monkeypatch)
+    monkeypatch.setenv("HERMES_WORKFORCE_HANDOFF_PICKUP_KIND", claim_kind)
+    for key in missing_keys:
+        monkeypatch.delenv(key, raising=False)
+    if coordination_task_id:
+        monkeypatch.setenv(
+            "HERMES_COORDINATION_TASK_ID", coordination_task_id
+        )
+    registry, calls = _registry()
+
+    denied = json.loads(registry.dispatch("terminal", {}))
+
+    assert denied["error_type"] == "workforce_handoff_pickup_scope_denied"
+    assert calls == []
+
+
 def test_normal_sessions_are_unchanged_without_pickup_metadata(monkeypatch):
     _clear_scope(monkeypatch)
     # Ordinary repair/review workers inherit all coordination fields.  They
@@ -109,6 +162,74 @@ def test_normal_sessions_are_unchanged_without_pickup_metadata(monkeypatch):
 
     assert json.loads(registry.dispatch("terminal", {})) == {"ok": True}
     assert calls == [("terminal", {})]
+
+
+def test_standalone_ordinary_pickup_needs_no_fabricated_coordination_root(
+    monkeypatch,
+):
+    _clear_scope(monkeypatch)
+    _install_scope(monkeypatch)
+    for key in (
+        "HERMES_COORDINATION_REQUEST_ROOT",
+        "HERMES_COORDINATION_TASK_ID",
+        "HERMES_COORDINATION_PURPOSE",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("HERMES_WORKFORCE_HANDOFF_PICKUP_KIND", "ordinary")
+    monkeypatch.setattr(
+        "tools.workforce_handoff_pickup_scope._durable_claim_matches",
+        lambda _scope: True,
+    )
+    monkeypatch.setattr(
+        "tools.workforce_handoff_pickup_scope._active_profile_matches",
+        lambda _target: True,
+    )
+    registry, calls = _registry()
+
+    accepted = json.loads(registry.dispatch(
+        "workforce_handoff",
+        {"action": "acknowledge", "task_id": "t_pickup_123"},
+    ))
+    denied = json.loads(registry.dispatch("terminal", {}))
+
+    assert accepted == {"ok": True}
+    assert calls == [(
+        "workforce_handoff",
+        {"action": "acknowledge", "task_id": "t_pickup_123"},
+    )]
+    assert denied["error_type"] == "workforce_handoff_pickup_scope_denied"
+
+
+def test_request_linked_ordinary_pickup_keeps_exact_coordination_scope(
+    monkeypatch,
+):
+    _clear_scope(monkeypatch)
+    _install_scope(monkeypatch)
+    monkeypatch.setenv("HERMES_WORKFORCE_HANDOFF_PICKUP_KIND", "ordinary")
+    monkeypatch.setattr(
+        "tools.workforce_handoff_pickup_scope._durable_claim_matches",
+        lambda scope: (
+            scope["HERMES_COORDINATION_REQUEST_ROOT"] == "cr_pickup_123"
+            and scope["HERMES_COORDINATION_TASK_ID"] == "t_pickup_123"
+            and scope["HERMES_COORDINATION_PURPOSE"] == "work"
+        ),
+    )
+    monkeypatch.setattr(
+        "tools.workforce_handoff_pickup_scope._active_profile_matches",
+        lambda _target: True,
+    )
+    registry, calls = _registry()
+
+    accepted = json.loads(registry.dispatch(
+        "workforce_handoff",
+        {"action": "acknowledge", "task_id": "t_pickup_123"},
+    ))
+
+    assert accepted == {"ok": True}
+    assert calls == [(
+        "workforce_handoff",
+        {"action": "acknowledge", "task_id": "t_pickup_123"},
+    )]
 
 
 def test_pickup_scope_rejects_a_process_running_as_another_profile(monkeypatch):
@@ -247,3 +368,141 @@ def test_real_registry_acknowledges_only_a_durably_claimed_pickup(monkeypatch, t
     assert accepted.get("success") is True, accepted
     with kanban_db.connect_closing(db_path) as conn:
         assert json.loads(kanban_db.get_task(conn, created["task_id"]).body)["state"] == "accepted"
+
+
+def test_claim_scope_rechecks_the_ordinary_contract_before_acknowledgment(
+    monkeypatch, tmp_path,
+):
+    from hermes_cli import kanban_db
+    from hermes_cli.workforce_handoffs import (
+        claim_workforce_handoff_pickup,
+        create_handoff,
+    )
+    from hermes_cli.workforce_org import load_organization
+    from tools.workforce_handoff_pickup_scope import _durable_claim_matches, _scope_env
+
+    _clear_scope(monkeypatch)
+    monkeypatch.setenv(
+        "HERMES_WORKFORCE_ORG",
+        str(Path(__file__).parents[2] / "workforce" / "organization.yaml"),
+    )
+    org = load_organization()
+    now = int(time.time())
+    iso = lambda offset: datetime.fromtimestamp(now + offset, timezone.utc).isoformat()
+    db_path = tmp_path / "kanban.db"
+    with kanban_db.connect_closing(db_path) as conn:
+        created = create_handoff(
+            conn,
+            source_agent="aurora",
+            target_agent="alina",
+            expected_outcome="Complete the ordinary handoff",
+            acceptance_test="The result is verified",
+            evidence_references=["kanban:t_source"],
+            acknowledgment_deadline=iso(60),
+            checkpoint_at=iso(3600),
+            organization=org,
+        )
+        pickup = claim_workforce_handoff_pickup(
+            conn, target_agent="alina", organization=org, now=now + 1,
+        )
+        task = kanban_db.get_task(conn, created["task_id"])
+        changed = json.loads(task.body)
+        changed["expected_outcome"] = "A substituted contract"
+        with kanban_db.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET body = ? WHERE id = ?",
+                (json.dumps(changed), task.id),
+            )
+
+    assert pickup is not None
+    monkeypatch.setenv("HERMES_WORKFORCE_HANDOFF_PICKUP_TASK", created["task_id"])
+    monkeypatch.setenv("HERMES_WORKFORCE_HANDOFF_PICKUP_TARGET", "alina")
+    monkeypatch.setenv("HERMES_WORKFORCE_HANDOFF_PICKUP_SOURCE", "aurora")
+    monkeypatch.setenv("HERMES_WORKFORCE_HANDOFF_PICKUP_KIND", "ordinary")
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    scope = _scope_env()
+
+    assert scope is not None
+    assert _durable_claim_matches(scope) is False
+
+
+def test_claim_scope_rechecks_linked_request_liveness_before_acknowledgment(
+    monkeypatch, tmp_path,
+):
+    from hermes_cli import kanban_db
+    from hermes_cli.workforce_handoffs import (
+        claim_workforce_handoff_pickup,
+        create_handoff,
+    )
+    from hermes_cli.workforce_org import load_organization
+    from tools.workforce_handoff_pickup_scope import _durable_claim_matches, _scope_env
+
+    _clear_scope(monkeypatch)
+    monkeypatch.setenv(
+        "HERMES_WORKFORCE_ORG",
+        str(Path(__file__).parents[2] / "workforce" / "organization.yaml"),
+    )
+    org = load_organization()
+    now = int(time.time())
+    iso = lambda offset: datetime.fromtimestamp(now + offset, timezone.utc).isoformat()
+    db_path = tmp_path / "kanban.db"
+    with kanban_db.connect_closing(db_path) as conn:
+        root_id = kanban_db.create_task(
+            conn,
+            title="Return the accepted request",
+            assignee="aurora",
+            session_id="origin-session",
+        )
+        kanban_db.add_notify_sub(
+            conn,
+            task_id=root_id,
+            platform="telegram",
+            chat_id="origin-chat",
+            notifier_profile="aurora",
+            delivery_mode="wake",
+        )
+        request = kanban_db.create_coordination_request(
+            conn,
+            root_task_id=root_id,
+            origin_session_id="origin-session",
+            origin_message_id="origin-message",
+            organization=org,
+            now=now,
+        )
+        created = create_handoff(
+            conn,
+            source_agent="aurora",
+            target_agent="alina",
+            expected_outcome="Complete the ordinary handoff",
+            acceptance_test="The result is verified",
+            evidence_references=[f"kanban:{root_id}"],
+            acknowledgment_deadline=iso(60),
+            checkpoint_at=iso(3600),
+            organization=org,
+            coordination_source_task_id=root_id,
+            session_id="origin-session",
+            coordination_origin_message_id="origin-message",
+        )
+        pickup = claim_workforce_handoff_pickup(
+            conn, target_agent="alina", organization=org, now=now + 1,
+        )
+        with kanban_db.write_txn(conn):
+            conn.execute(
+                "UPDATE coordination_requests SET status = 'return_pending' "
+                "WHERE id = ?",
+                (request.id,),
+            )
+
+    assert pickup is not None
+    _install_scope(monkeypatch)
+    monkeypatch.setenv("HERMES_COORDINATION_REQUEST_ROOT", request.id)
+    monkeypatch.setenv("HERMES_COORDINATION_TASK_ID", created["task_id"])
+    monkeypatch.setenv(
+        "HERMES_WORKFORCE_HANDOFF_PICKUP_TASK", created["task_id"]
+    )
+    monkeypatch.setenv("HERMES_WORKFORCE_HANDOFF_PICKUP_KIND", "ordinary")
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    scope = _scope_env()
+
+    assert scope is not None
+    assert _durable_claim_matches(scope) is False

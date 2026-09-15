@@ -231,6 +231,22 @@ class TestCollectKanbanNotifications:
         assert len(rows) == 1
         assert rows[0]["chat_id"] == SESSION_KEY
 
+    def test_named_worker_redirect_cannot_hide_canonical_subscription(
+        self, monkeypatch,
+    ):
+        tid = _create_subscribed_task()
+        _complete(tid, summary="canonical completion")
+        kb.create_board("side-project")
+        named = (kb.board_dir("side-project") / "kanban.db").resolve()
+        monkeypatch.setenv("HERMES_KANBAN_BOARD", "side-project")
+        monkeypatch.setenv("HERMES_KANBAN_DB", str(named))
+
+        texts = _collect_kanban_notifications(_session())
+
+        assert len(texts) == 1
+        assert tid in texts[0]
+        assert "canonical completion" in texts[0]
+
 
 class TestFormatKanbanEventText:
     SUB = {"task_id": "t_abc123"}

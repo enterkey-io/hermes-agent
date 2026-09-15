@@ -109,6 +109,9 @@ def test_canonical_compile_includes_active_chloe_and_emma(tmp_path):
         assert "If there is no inherited root, use ordinary internal task" in contract
         assert "do not require a worker or receiving manager" in contract
         assert "Never invent a user origin, session, or" in contract
+        assert "records a pending transfer" in contract
+        assert "delivery_mode` `session_wake` or `request_final_return`" in contract
+        assert "Never recreate or rebind the" in contract
 
     # Lifecycle blocks are derived from organization metadata, not copied into
     # 22 independent private profiles.

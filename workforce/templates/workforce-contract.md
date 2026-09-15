@@ -166,6 +166,16 @@ acceptance test, and next checkpoint. The receiver acknowledges it. A missed
 checkpoint is marked stalled and reported to Aurora and Chloe; Chloe records
 facts, while Aurora decides what changes.
 
+Creating a `workforce_handoff` records a pending transfer; it is not evidence
+that the receiver acknowledged, started, or completed the work. Report it as
+awaiting acknowledgment until the durable state changes. A successful create
+with `delivery_mode` `session_wake` or `request_final_return` preserves the
+originating agent's return path. `delivery_mode` `none` is unattached internal
+work and cannot support a promise of asynchronous user delivery; the source
+must retain an explicit canonical follow-up. Retry only the exact same create
+from the same origin after an uncertain response. Never recreate or rebind the
+handoff from another conversation to make it appear delivered.
+
 Internal coordination stays internal. Route a need to the accountable agent or
 manager through a durable workforce handoff or the existing canonical Kanban
 record; do not post an agent-directed handoff, routine status, old blocker, or
