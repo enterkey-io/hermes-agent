@@ -322,12 +322,21 @@ archive_profile_skill() {
 
 list_profile_shadows() {
   local profile_dir skills_dir
+  if [[ ! -d "$profiles_dir" || -L "$profiles_dir" \
+    || ! -r "$profiles_dir" || ! -x "$profiles_dir" ]]; then
+    printf 'Profile root is not a readable physical directory: %s\n' "$profiles_dir" >&2
+    return 1
+  fi
   for profile_dir in "$profiles_dir"/*; do
     if [[ -L "$profile_dir" || -L "$profile_dir/skills" ]]; then
       printf 'Refusing symlinked profile skills path: %s\n' "$profile_dir" >&2
       return 1
     fi
     [[ -d "$profile_dir" ]] || continue
+    if [[ ! -x "$profile_dir" ]]; then
+      printf 'Profile directory cannot be traversed: %s\n' "$profile_dir" >&2
+      return 1
+    fi
     skills_dir="$profile_dir/skills"
     [[ -d "$skills_dir" ]] || continue
     if ! find "$skills_dir" \
@@ -345,7 +354,10 @@ read_profile_shadows() {
     rm -f "$listing"
     return 1
   fi
-  mapfile -d '' local_skills < "$listing"
+  if ! mapfile -d '' local_skills < "$listing"; then
+    rm -f "$listing"
+    return 1
+  fi
   rm -f "$listing"
 }
 

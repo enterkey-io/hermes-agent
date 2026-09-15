@@ -171,6 +171,28 @@ def test_deploy_refuses_symlinked_profile_without_archiving_external_files(tmp_p
     assert not (tmp_path / "shared-skills/agent-photo").exists()
 
 
+def test_deploy_refuses_missing_profile_root(tmp_path):
+    result = _run_sourced_deploy(tmp_path, 'rmdir "$profiles_dir"')
+    assert result.returncode != 0
+    assert not (tmp_path / "shared-skills/agent-photo").exists()
+
+
+@pytest.mark.linux_only
+@pytest.mark.parametrize("blocked_parent", ["profiles", "profiles/amy"])
+def test_untraversable_parent_is_not_an_empty_profile_inventory(tmp_path, blocked_parent):
+    if os.geteuid() == 0:
+        pytest.skip("root bypasses filesystem permission checks")
+    _write_profile_photo_skill(tmp_path / "profiles", "amy", "active override")
+    blocked = tmp_path / blocked_parent
+    blocked.chmod(0)
+    try:
+        result = _run_sourced_deploy(tmp_path, "", "--archive-local")
+    finally:
+        blocked.chmod(0o700)
+    assert result.returncode != 0
+    assert not (tmp_path / "shared-skills/agent-photo").exists()
+
+
 @pytest.mark.linux_only
 @pytest.mark.parametrize("fail_after_first_scan", [False, True])
 def test_unreadable_skill_tree_stops_deployment_and_restores_overrides(
