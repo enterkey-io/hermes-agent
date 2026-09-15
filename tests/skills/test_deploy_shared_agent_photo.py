@@ -8,6 +8,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).parents[2]
 DEPLOY = REPO_ROOT / "scripts/deploy-shared-agent-photo.sh"
@@ -136,6 +138,96 @@ def test_deploy_publishes_complete_snapshot_and_fixed_launcher(tmp_path):
         timeout=30,
     )
     assert "must-not-appear" not in refusal.stdout + refusal.stderr
+
+
+def test_deploy_ignores_scratch_checkout_skills(tmp_path):
+    profiles = tmp_path / "profiles"
+    scratch = _write_profile_photo_skill(profiles, "amy/scratch/review", "scratch checkout")
+    result = _run_sourced_deploy(tmp_path, "")
+    assert result.returncode == 0, result.stderr
+    assert (scratch / "SKILL.md").read_text() == "scratch checkout"
+    assert _tree_hashes(tmp_path / "shared-skills/agent-photo") == _tree_hashes(SOURCE)
+
+
+def test_deploy_refuses_uncategorized_active_skill(tmp_path):
+    skill = tmp_path / "profiles/amy/skills/agent-photo"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("active override")
+    result = _run_sourced_deploy(tmp_path, "")
+    assert result.returncode == 2
+    assert (skill / "SKILL.md").read_text() == "active override"
+    assert not (tmp_path / "shared-skills/agent-photo").exists()
+
+
+def test_deploy_refuses_symlinked_profile_without_archiving_external_files(tmp_path):
+    external = _write_profile_photo_skill(tmp_path / "external", "amy", "external source")
+    profiles = tmp_path / "profiles"
+    profiles.mkdir()
+    (profiles / "amy").symlink_to(tmp_path / "external/amy", target_is_directory=True)
+    result = _run_sourced_deploy(tmp_path, "", "--archive-local")
+    assert result.returncode != 0
+    assert (external / "SKILL.md").read_text() == "external source"
+    assert not (tmp_path / "external/amy/skills/.archive").exists()
+    assert not (tmp_path / "shared-skills/agent-photo").exists()
+
+
+def test_deploy_refuses_missing_profile_root(tmp_path):
+    result = _run_sourced_deploy(tmp_path, 'rmdir "$profiles_dir"')
+    assert result.returncode != 0
+    assert not (tmp_path / "shared-skills/agent-photo").exists()
+
+
+@pytest.mark.linux_only
+@pytest.mark.parametrize("blocked_parent", ["profiles", "profiles/amy"])
+def test_untraversable_parent_is_not_an_empty_profile_inventory(tmp_path, blocked_parent):
+    if os.geteuid() == 0:
+        pytest.skip("root bypasses filesystem permission checks")
+    _write_profile_photo_skill(tmp_path / "profiles", "amy", "active override")
+    blocked = tmp_path / blocked_parent
+    blocked.chmod(0)
+    try:
+        result = _run_sourced_deploy(tmp_path, "", "--archive-local")
+    finally:
+        blocked.chmod(0o700)
+    assert result.returncode != 0
+    assert not (tmp_path / "shared-skills/agent-photo").exists()
+
+
+@pytest.mark.linux_only
+@pytest.mark.parametrize("fail_after_first_scan", [False, True])
+def test_unreadable_skill_tree_stops_deployment_and_restores_overrides(
+    tmp_path, fail_after_first_scan,
+):
+    if os.geteuid() == 0:
+        pytest.skip("root bypasses filesystem permission checks")
+    profiles = tmp_path / "profiles"
+    skill = _write_profile_photo_skill(profiles, "amy", "active override")
+    unreadable = profiles / "amy/skills/unreadable"
+    unreadable.mkdir()
+    # A later successful profile scan must not mask the first profile's error.
+    (profiles / "zeta/skills").mkdir(parents=True)
+    setup = ""
+    if fail_after_first_scan:
+        setup = f"""
+eval "$(declare -f list_profile_shadows | sed '1s/list_profile_shadows/original_list_profile_shadows/')"
+scan_count=0
+list_profile_shadows() {{
+  original_list_profile_shadows || return 1
+  scan_count=$((scan_count + 1))
+  if [[ "$scan_count" -eq 1 ]]; then
+    chmod 000 {shlex.quote(str(unreadable))}
+  fi
+}}
+"""
+    else:
+        unreadable.chmod(0)
+    try:
+        result = _run_sourced_deploy(tmp_path, setup, "--archive-local")
+    finally:
+        unreadable.chmod(0o700)
+    assert result.returncode != 0
+    assert (skill / "SKILL.md").read_text() == "active override"
+    assert not (tmp_path / "shared-skills/agent-photo").exists()
 
 
 def test_atomic_exchange_rollback_restores_previous_snapshot(tmp_path):

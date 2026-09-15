@@ -320,13 +320,49 @@ archive_profile_skill() {
   printf 'Archived local skill: %s -> %s\n' "$skill_dir" "$archive_dir"
 }
 
+list_profile_shadows() {
+  local profile_dir skills_dir
+  if [[ ! -d "$profiles_dir" || -L "$profiles_dir" \
+    || ! -r "$profiles_dir" || ! -x "$profiles_dir" ]]; then
+    printf 'Profile root is not a readable physical directory: %s\n' "$profiles_dir" >&2
+    return 1
+  fi
+  for profile_dir in "$profiles_dir"/*; do
+    if [[ -L "$profile_dir" || -L "$profile_dir/skills" ]]; then
+      printf 'Refusing symlinked profile skills path: %s\n' "$profile_dir" >&2
+      return 1
+    fi
+    [[ -d "$profile_dir" ]] || continue
+    if [[ ! -x "$profile_dir" ]]; then
+      printf 'Profile directory cannot be traversed: %s\n' "$profile_dir" >&2
+      return 1
+    fi
+    skills_dir="$profile_dir/skills"
+    [[ -d "$skills_dir" ]] || continue
+    if ! find "$skills_dir" \
+      \( -path "$skills_dir/.archive" -o -path "$skills_dir/.curator_backups" \) \
+      -prune -o -type f -path '*/agent-photo/SKILL.md' -print0; then
+      return 1
+    fi
+  done
+}
+
+read_profile_shadows() {
+  local listing
+  listing="$(mktemp)" || return 1
+  if ! list_profile_shadows > "$listing"; then
+    rm -f "$listing"
+    return 1
+  fi
+  if ! mapfile -d '' local_skills < "$listing"; then
+    rm -f "$listing"
+    return 1
+  fi
+  rm -f "$listing"
+}
+
 handle_profile_shadows() {
-  mapfile -d '' local_skills < <(
-    find "$profiles_dir" -type f -path '*/skills/*/agent-photo/SKILL.md' \
-      ! -path '*/skills/.archive/*' \
-      ! -path '*/skills/.curator_backups/*' \
-      -print0 2>/dev/null | sort -z
-  )
+  read_profile_shadows || return 1
 
   if (( ${#local_skills[@]} > 0 )) && [[ "$archive_local" != true ]]; then
     printf 'Profile-local agent-photo skills still shadow the shared package:\n' >&2
@@ -343,13 +379,8 @@ handle_profile_shadows() {
     done
   fi
 
-  local remaining
-  remaining="$({
-    find "$profiles_dir" -type f -path '*/skills/*/agent-photo/SKILL.md' \
-      ! -path '*/skills/.archive/*' \
-      ! -path '*/skills/.curator_backups/*' \
-      -print 2>/dev/null
-  } | wc -l)"
+  read_profile_shadows || return 1
+  local remaining="${#local_skills[@]}"
   if [[ "$remaining" -ne 0 ]]; then
     printf 'Deployment incomplete: %s active profile-local copies remain.\n' "$remaining" >&2
     return 3

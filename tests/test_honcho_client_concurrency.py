@@ -98,6 +98,60 @@ def test_reset_allows_rebuild(monkeypatch):
     assert c2 is not c1
 
 
+def test_unbound_identity_is_not_published_before_paths_are_ready(monkeypatch):
+    build_count = {"n": 0}
+    _install_fake_honcho_sdk(monkeypatch, build_count, threading.Lock())
+    config = HonchoClientConfig(api_key="test-key", workspace_id="ws")
+    resolving = threading.Event()
+    release = threading.Event()
+    second_contending = threading.Event()
+    original_resolve = honcho_client.resolve_config_path
+    original_lock = honcho_client._client_slots_lock
+    results, errors = [], []
+
+    class ObservedLock:
+        def __enter__(self):
+            if threading.current_thread().name == "second-caller":
+                second_contending.set()
+            return original_lock.__enter__()
+
+        def __exit__(self, *args):
+            return original_lock.__exit__(*args)
+
+    def paused_resolve(context):
+        resolving.set()
+        assert release.wait(10)
+        return original_resolve(context)
+
+    def worker():
+        try:
+            results.append(get_honcho_client(config))
+        except BaseException as exc:
+            errors.append(exc)
+
+    monkeypatch.setattr(honcho_client, "resolve_config_path", paused_resolve)
+    monkeypatch.setattr(honcho_client, "_client_slots_lock", ObservedLock())
+    first = threading.Thread(target=worker)
+    second = threading.Thread(target=worker, name="second-caller")
+    first.start()
+    try:
+        assert resolving.wait(10)
+        assert config.profile_context is None
+        second.start()
+        assert second_contending.wait(10)
+    finally:
+        release.set()
+        first.join(10)
+        if second.ident is not None:
+            second.join(10)
+    assert not first.is_alive() and not second.is_alive()
+    assert not errors
+    assert len(results) == 2 and results[0] is results[1]
+    assert build_count["n"] == 1
+    assert config.config_path is not None
+    assert config.hermes_home == config.profile_context.root
+
+
 def test_missing_credentials_still_raises_before_build(monkeypatch):
     build_count = {"n": 0}
     build_lock = threading.Lock()
