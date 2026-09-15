@@ -121,7 +121,7 @@ def _pickup_eager_tool_names(
     try:
         from tools.workforce_handoff_pickup_scope import pickup_scope_denial
 
-        task_id = os.environ.get("HERMES_COORDINATION_TASK_ID", "")
+        task_id = os.environ.get("HERMES_WORKFORCE_HANDOFF_PICKUP_TASK", "")
         denial = pickup_scope_denial(
             "workforce_handoff",
             {"action": "acknowledge", "task_id": task_id},

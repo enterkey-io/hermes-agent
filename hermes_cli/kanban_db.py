@@ -5659,7 +5659,7 @@ def has_coordination_tick_work(
     notifier_agents: Optional[Iterable[str]] = None,
     include_unowned: bool = False,
 ) -> bool:
-    """Cheap read-only probe for final-return or owned-failure intake work.
+    """Cheap read-only probe for final-return or workforce-handoff pickup work.
 
     This is the notifier's pre-open gate. It never creates or migrates a DB,
     and legacy boards without the coordination schema simply return ``False``.
@@ -5692,11 +5692,11 @@ def has_coordination_tick_work(
             row["name"]
             for row in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN "
-                "('coordination_requests', 'kanban_notify_subs', 'tasks')"
+                "('coordination_requests', 'kanban_notify_subs', 'tasks', 'task_events')"
             ).fetchall()
         }
         if {
-            "coordination_requests", "kanban_notify_subs", "tasks"
+            "coordination_requests", "kanban_notify_subs", "tasks", "task_events"
         }.issubset(tables):
             requests = conn.execute(
                 "SELECT id, root_task_id, responsible_agent FROM "
@@ -5732,8 +5732,12 @@ def has_coordination_tick_work(
                 )
                 params.extend(sorted(agents))
             candidates = conn.execute(
-                "SELECT assignee, body FROM tasks WHERE status = 'triage' "
-                "AND body LIKE '%\"kind\": \"workforce_handoff\"%'"
+                "SELECT id, assignee, body, request_root_id FROM tasks "
+                "WHERE status = 'triage' "
+                "AND body LIKE '%\"kind\": \"workforce_handoff\"%' "
+                "AND NOT EXISTS (SELECT 1 FROM task_events e "
+                "WHERE e.task_id = tasks.id "
+                "AND e.kind = 'workforce_handoff_pickup_claimed')"
                 + assignee_clause,
                 params,
             ).fetchall()
@@ -5741,7 +5745,6 @@ def has_coordination_tick_work(
             for candidate in candidates:
                 try:
                     payload = json.loads(candidate["body"] or "{}")
-                    context = payload.get("context")
                     acknowledgment_deadline = int(
                         payload.get("acknowledgment_deadline")
                     )
@@ -5752,13 +5755,51 @@ def has_coordination_tick_work(
                     isinstance(payload, dict)
                     and payload.get("kind") == "workforce_handoff"
                     and payload.get("state") == "pending_acknowledgment"
-                    and payload.get("requires_source_acceptance") is True
-                    and isinstance(context, dict)
-                    and context.get("kind") == "owned_operational_failure"
                     and str(payload.get("target_agent") or "").strip()
                     == str(candidate["assignee"] or "").strip()
                     and now <= acknowledgment_deadline < checkpoint_at
                 ):
+                    request_root_id = candidate["request_root_id"]
+                    context = payload.get("context")
+                    owned_failure = bool(
+                        payload.get("requires_source_acceptance") is True
+                        and isinstance(context, dict)
+                        and context.get("kind") == "owned_operational_failure"
+                    )
+                    if (
+                        isinstance(context, dict)
+                        and context.get("kind") == "owned_operational_failure"
+                        and not owned_failure
+                    ):
+                        continue
+                    if (
+                        not owned_failure
+                        and payload.get("delivery_contract_version") != 1
+                    ):
+                        continue
+                    if not owned_failure and conn.execute(
+                        "SELECT 1 FROM task_events WHERE task_id = ? "
+                        "AND kind = 'workforce_handoff_created' LIMIT 1",
+                        (candidate["id"],),
+                    ).fetchone() is None:
+                        continue
+                    if request_root_id:
+                        request = conn.execute(
+                            "SELECT kind, status, checkpoint_at FROM "
+                            "coordination_requests WHERE id = ?",
+                            (request_root_id,),
+                        ).fetchone()
+                        expected_kind = (
+                            "owned_operational_failure"
+                            if owned_failure else "origin_request"
+                        )
+                        if (
+                            request is None
+                            or request["kind"] != expected_kind
+                            or request["status"] != "active"
+                            or now >= int(request["checkpoint_at"])
+                        ):
+                            continue
                     return True
         return False
     except sqlite3.OperationalError:

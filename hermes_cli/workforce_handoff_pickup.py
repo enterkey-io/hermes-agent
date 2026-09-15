@@ -1,4 +1,4 @@
-"""Bounded, internal CLI pickup for one owned workforce handoff."""
+"""Bounded, internal CLI pickup for one workforce handoff."""
 
 from __future__ import annotations
 
@@ -127,10 +127,11 @@ def _pickup_env(
     *,
     database_path: Path,
     task_id: str,
-    request_root_id: str,
+    request_root_id: str | None,
     target_agent: str,
     execution_profile: str | None = None,
     source_agent: str,
+    claim_kind: str = "owned_operational_failure",
 ) -> dict[str, str]:
     profile = execution_profile or target_agent
     env = dict(os.environ)
@@ -141,6 +142,12 @@ def _pickup_env(
     for key in tuple(env):
         if key.startswith("HERMES_KANBAN_"):
             env.pop(key, None)
+    for key in (
+        "HERMES_COORDINATION_REQUEST_ROOT",
+        "HERMES_COORDINATION_TASK_ID",
+        "HERMES_COORDINATION_PURPOSE",
+    ):
+        env.pop(key, None)
 
     env.update({
         "HERMES_HOME": resolve_profile_env(profile),
@@ -148,13 +155,17 @@ def _pickup_env(
         # This must exist before cmd_chat resolves --continue/create-if-missing.
         "HERMES_SESSION_SOURCE": "tool",
         "HERMES_KANBAN_DB": str(database_path.resolve()),
-        "HERMES_COORDINATION_REQUEST_ROOT": request_root_id,
-        "HERMES_COORDINATION_TASK_ID": task_id,
-        "HERMES_COORDINATION_PURPOSE": "work",
         "HERMES_WORKFORCE_HANDOFF_PICKUP_TASK": task_id,
         "HERMES_WORKFORCE_HANDOFF_PICKUP_TARGET": target_agent,
         "HERMES_WORKFORCE_HANDOFF_PICKUP_SOURCE": source_agent,
+        "HERMES_WORKFORCE_HANDOFF_PICKUP_KIND": claim_kind,
     })
+    if request_root_id:
+        env.update({
+            "HERMES_COORDINATION_REQUEST_ROOT": request_root_id,
+            "HERMES_COORDINATION_TASK_ID": task_id,
+            "HERMES_COORDINATION_PURPOSE": "work",
+        })
     env.pop("HERMES_TUI", None)
     return env
 
@@ -162,7 +173,7 @@ def _pickup_env(
 def _pickup_command(
     *,
     target_agent: str,
-    request_root_id: str,
+    request_root_id: str | None,
     task_id: str,
     execution_profile: str | None = None,
 ) -> list[str]:
@@ -173,7 +184,11 @@ def _pickup_command(
         "--cli",
         "chat",
         "-Q",
-        "-c", f"{_SESSION_TITLE_PREFIX}{request_root_id}:{target_agent}",
+        "-c",
+        (
+            f"{_SESSION_TITLE_PREFIX}{request_root_id or 'standalone'}:"
+            f"{task_id}:{target_agent}"
+        ),
         "--create-if-missing",
         "--no-restore-cwd",
         "-t", "workforce",
@@ -189,9 +204,10 @@ def _fresh_acknowledgment(
     *,
     database_path: Path,
     task_id: str,
-    request_root_id: str,
+    request_root_id: str | None,
     target_agent: str,
     source_agent: str,
+    claim_kind: str = "owned_operational_failure",
 ) -> bool:
     """Require an acknowledgment after this exact pickup claim.
 
@@ -209,6 +225,8 @@ def _fresh_acknowledgment(
             payload = json.loads(task.body or "{}")
             if not isinstance(payload, dict) or payload.get("kind") != "workforce_handoff":
                 return False
+            if task.request_root_id != request_root_id:
+                return False
             claim_seen = False
             for event in kanban_db.list_events(conn, task_id):
                 if event.kind == "workforce_handoff_pickup_claimed":
@@ -219,7 +237,7 @@ def _fresh_acknowledgment(
                         and claim.get("target_agent") == target_agent
                         and claim.get("source_agent") == source_agent
                         and claim.get("request_root_id") == request_root_id
-                        and claim.get("claim_kind") == "owned_operational_failure"
+                        and claim.get("claim_kind") == claim_kind
                     )
                     continue
                 if (
@@ -237,15 +255,21 @@ def _fresh_acknowledgment(
 async def run_workforce_handoff_pickup(
     *,
     task_id: str,
-    request_root_id: str,
+    request_root_id: str | None,
     target_agent: str,
     execution_profile: str | None = None,
     source_agent: str,
     database_path: Path,
+    claim_kind: str = "owned_operational_failure",
 ) -> WorkforceHandoffPickupResult:
     """Run one bounded silent-owner turn and verify its durable acknowledgment."""
     task_id = _bounded_identifier(task_id, prefix="t_")
-    request_root_id = _bounded_identifier(request_root_id, prefix="cr_")
+    if request_root_id is not None:
+        request_root_id = _bounded_identifier(request_root_id, prefix="cr_")
+    if claim_kind not in {"ordinary", "owned_operational_failure"}:
+        raise ValueError("claim_kind is invalid")
+    if claim_kind == "owned_operational_failure" and request_root_id is None:
+        raise ValueError("owned-failure pickup requires a coordination request")
     target_agent = _canonical_agent(target_agent, field="target_agent")
     source_agent = _canonical_agent(source_agent, field="source_agent")
     execution_profile = _canonical_execution_profile(
@@ -262,6 +286,7 @@ async def run_workforce_handoff_pickup(
         target_agent=target_agent,
         execution_profile=execution_profile,
         source_agent=source_agent,
+        claim_kind=claim_kind,
     )
     command = _pickup_command(
         target_agent=target_agent,
@@ -299,6 +324,7 @@ async def run_workforce_handoff_pickup(
                 request_root_id=request_root_id,
                 target_agent=target_agent,
                 source_agent=source_agent,
+                claim_kind=claim_kind,
             )
             return WorkforceHandoffPickupResult(
                 acknowledged=acknowledged,
@@ -321,6 +347,7 @@ async def run_workforce_handoff_pickup(
         request_root_id=request_root_id,
         target_agent=target_agent,
         source_agent=source_agent,
+        claim_kind=claim_kind,
     )
     return WorkforceHandoffPickupResult(
         acknowledged=acknowledged,

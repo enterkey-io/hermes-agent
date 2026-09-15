@@ -8,6 +8,7 @@ from hermes_cli import kanban_db
 from hermes_cli.workforce_handoffs import (
     acknowledge_handoff,
     claim_owned_failure_handoff_pickup,
+    claim_workforce_handoff_pickup,
     create_handoff,
     record_checkpoint,
     sweep_overdue_handoffs,
@@ -68,6 +69,363 @@ def test_reporting_line_and_executive_peer_handoffs_route_internally(conn, sourc
     assert created["target_agent"] == target
 
 
+def test_exact_create_retry_returns_persisted_handoff_without_duplicate(conn):
+    now = int(time.time())
+    kwargs = {
+        "source_agent": "alina",
+        "target_agent": "aurora",
+        "expected_outcome": "Own one routed host decision",
+        "acceptance_test": "Aurora records the evidence-backed disposition",
+        "evidence_references": ["kanban:t_source"],
+        "acknowledgment_deadline": _iso(now + 60),
+        "checkpoint_at": _iso(now + 120),
+        "organization": ORG,
+        "session_id": "origin-session",
+        "coordination_origin_message_id": "origin-message",
+    }
+
+    first = create_handoff(conn, **kwargs)
+    retry = create_handoff(conn, **kwargs)
+
+    assert first["created"] is True
+    assert retry["created"] is False
+    assert retry == {**first, "created": False}
+    assert retry["creation_binding"].startswith("sha256:")
+    assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
+    assert [
+        event.kind for event in kanban_db.list_events(conn, first["task_id"])
+    ] == ["created", "workforce_handoff_created"]
+
+
+@pytest.mark.parametrize(
+    ("session_id", "origin_message_id", "acceptance_test"),
+    [
+        ("other-session", "origin-message", "Aurora records the disposition"),
+        ("origin-session", "other-message", "Aurora records the disposition"),
+        ("origin-session", "origin-message", "A changed acceptance contract"),
+    ],
+)
+def test_create_retry_rejects_changed_identity_or_origin(
+    conn, session_id, origin_message_id, acceptance_test,
+):
+    now = int(time.time())
+    base = {
+        "source_agent": "alina",
+        "target_agent": "aurora",
+        "expected_outcome": "Own one routed host decision",
+        "acceptance_test": "Aurora records the disposition",
+        "evidence_references": ["kanban:t_source"],
+        "acknowledgment_deadline": _iso(now + 60),
+        "checkpoint_at": _iso(now + 120),
+        "organization": ORG,
+        "session_id": "origin-session",
+        "coordination_origin_message_id": "origin-message",
+    }
+    created = create_handoff(conn, **base)
+
+    with pytest.raises(ValueError, match="different workforce handoff or origin"):
+        create_handoff(
+            conn,
+            **{
+                **base,
+                "session_id": session_id,
+                "coordination_origin_message_id": origin_message_id,
+                "acceptance_test": acceptance_test,
+            },
+        )
+
+    assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
+    task = kanban_db.get_task(conn, created["task_id"])
+    assert task is not None
+    assert task.session_id == "origin-session"
+
+
+def test_owned_failure_context_requires_literal_source_acceptance(conn):
+    now = int(time.time())
+    with pytest.raises(ValueError, match="require source acceptance"):
+        create_handoff(
+            conn,
+            source_agent="aurora",
+            target_agent="alina",
+            expected_outcome="Repair the owned operational failure",
+            acceptance_test="A later execution succeeds",
+            evidence_references=["execution:failure"],
+            acknowledgment_deadline=_iso(now + 60),
+            checkpoint_at=_iso(now + 120),
+            organization=ORG,
+            context={
+                "kind": "owned_operational_failure",
+                "technical_owner": "alina",
+                "director": "aurora",
+            },
+            requires_source_acceptance=False,
+        )
+
+    assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+
+
+def test_ordinary_handoff_pickup_is_one_shot_without_fabricating_request(conn):
+    now = int(time.time())
+    created = create_handoff(
+        conn,
+        source_agent="alina",
+        target_agent="aurora",
+        expected_outcome="Own the routed host decision",
+        acceptance_test="Aurora records a verified disposition",
+        evidence_references=["kanban:t_source"],
+        acknowledgment_deadline=_iso(now + 60),
+        checkpoint_at=_iso(now + 120),
+        organization=ORG,
+    )
+
+    pickup = claim_workforce_handoff_pickup(
+        conn, target_agent="aurora", organization=ORG, now=now + 1,
+    )
+    duplicate = claim_workforce_handoff_pickup(
+        conn, target_agent="aurora", organization=ORG, now=now + 2,
+    )
+
+    assert pickup == {
+        "task_id": created["task_id"],
+        "target_agent": "aurora",
+        "source_agent": "alina",
+        "request_root_id": None,
+        "claim_kind": "ordinary",
+        "claimed_at": now + 1,
+    }
+    assert duplicate is None
+    assert conn.execute(
+        "SELECT COUNT(*) FROM coordination_requests"
+    ).fetchone()[0] == 0
+    assert kanban_db.get_task(conn, created["task_id"]).status == "triage"
+
+    acknowledge_handoff(
+        conn,
+        created["task_id"],
+        actor="aurora",
+        organization=ORG,
+        now=now + 3,
+    )
+    task = kanban_db.get_task(conn, created["task_id"])
+    assert task.status == "ready"
+    assert json.loads(task.body)["state"] == "accepted"
+
+
+def test_ordinary_pickup_rejects_a_contract_changed_after_creation(conn):
+    now = int(time.time())
+    created = create_handoff(
+        conn,
+        source_agent="alina",
+        target_agent="aurora",
+        expected_outcome="Own the routed host decision",
+        acceptance_test="Aurora records a verified disposition",
+        evidence_references=["kanban:t_source"],
+        acknowledgment_deadline=_iso(now + 60),
+        checkpoint_at=_iso(now + 120),
+        organization=ORG,
+    )
+    task = kanban_db.get_task(conn, created["task_id"])
+    changed = json.loads(task.body)
+    changed["acceptance_test"] = "A silently substituted acceptance contract"
+    with kanban_db.write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET body = ? WHERE id = ?",
+            (json.dumps(changed), task.id),
+        )
+
+    assert claim_workforce_handoff_pickup(
+        conn, target_agent="aurora", organization=ORG, now=now + 1,
+    ) is None
+    with pytest.raises(ValueError, match="contract changed"):
+        acknowledge_handoff(
+            conn,
+            task.id,
+            actor="aurora",
+            organization=ORG,
+            now=now + 2,
+        )
+    assert all(
+        event.kind != "workforce_handoff_pickup_claimed"
+        for event in kanban_db.list_events(conn, task.id)
+    )
+
+
+def test_ordinary_pickup_does_not_activate_legacy_backlog_rows(conn):
+    now = int(time.time())
+    legacy_id = kanban_db.create_task(
+        conn,
+        title="Historical ordinary handoff",
+        body=json.dumps({
+            "kind": "workforce_handoff",
+            "state": "pending_acknowledgment",
+            "source_agent": "alina",
+            "target_agent": "aurora",
+            "acknowledgment_deadline": now + 60,
+            "checkpoint_at": now + 120,
+            "requires_source_acceptance": False,
+        }),
+        assignee="aurora",
+        created_by="alina",
+        triage=True,
+    )
+    forged_id = kanban_db.create_task(
+        conn,
+        title="Unprovenanced ordinary handoff",
+        body=json.dumps({
+            "kind": "workforce_handoff",
+            "delivery_contract_version": 1,
+            "creation_binding": "sha256:not-authoritative",
+            "state": "pending_acknowledgment",
+            "source_agent": "alina",
+            "target_agent": "aurora",
+            "acknowledgment_deadline": now + 60,
+            "checkpoint_at": now + 120,
+            "requires_source_acceptance": False,
+        }),
+        assignee="aurora",
+        created_by="alina",
+        triage=True,
+    )
+
+    assert claim_workforce_handoff_pickup(
+        conn, target_agent="aurora", organization=ORG, now=now + 1,
+    ) is None
+    assert all(
+        event.kind != "workforce_handoff_pickup_claimed"
+        for task_id in (legacy_id, forged_id)
+        for event in kanban_db.list_events(conn, task_id)
+    )
+    db_path = Path(conn.execute("PRAGMA database_list").fetchone()[2])
+    assert kanban_db.has_coordination_tick_work(
+        db_path,
+        notifier_agents={"aurora"},
+        notifier_profiles={"aurora"},
+    ) is False
+
+
+def test_ordinary_handoff_inherits_existing_request_from_trusted_source(
+    conn, monkeypatch,
+):
+    monkeypatch.setenv(
+        "HERMES_WORKFORCE_ORG",
+        str(Path(__file__).parents[2] / "workforce" / "organization.yaml"),
+    )
+    root_id = kanban_db.create_task(
+        conn,
+        title="Return the accepted request",
+        assignee="aurora",
+        session_id="origin-session",
+    )
+    kanban_db.add_notify_sub(
+        conn,
+        task_id=root_id,
+        platform="telegram",
+        chat_id="origin-chat",
+        notifier_profile="aurora",
+        delivery_mode="wake",
+    )
+    request = kanban_db.create_coordination_request(
+        conn,
+        root_task_id=root_id,
+        origin_session_id="origin-session",
+        origin_message_id="origin-message",
+        organization=ORG,
+    )
+    now = int(time.time())
+
+    created = create_handoff(
+        conn,
+        source_agent="aurora",
+        target_agent="alina",
+        expected_outcome="Repair one host issue",
+        acceptance_test="The repair has full-path evidence",
+        evidence_references=["kanban:t_source"],
+        acknowledgment_deadline=_iso(now + 60),
+        checkpoint_at=_iso(now + 120),
+        organization=ORG,
+        coordination_source_task_id=root_id,
+        session_id="origin-session",
+        coordination_origin_message_id="origin-message",
+    )
+
+    task = kanban_db.get_task(conn, created["task_id"])
+    assert task.request_root_id == request.id
+    assert task.session_id == "origin-session"
+    event = kanban_db.list_events(conn, task.id)[0]
+    assert event.payload["request_root_id"] == request.id
+    assert event.payload["coordination_origin_message_id"] == "origin-message"
+
+
+def test_coordinated_handoff_rejects_route_mismatch_and_inactive_pickup(
+    conn, monkeypatch,
+):
+    monkeypatch.setenv(
+        "HERMES_WORKFORCE_ORG",
+        str(Path(__file__).parents[2] / "workforce" / "organization.yaml"),
+    )
+    root_id = kanban_db.create_task(
+        conn,
+        title="Return the accepted request",
+        assignee="aurora",
+        session_id="origin-session",
+    )
+    kanban_db.add_notify_sub(
+        conn,
+        task_id=root_id,
+        platform="telegram",
+        chat_id="origin-chat",
+        notifier_profile="aurora",
+        delivery_mode="wake",
+    )
+    request = kanban_db.create_coordination_request(
+        conn,
+        root_task_id=root_id,
+        origin_session_id="origin-session",
+        origin_message_id="origin-message",
+        organization=ORG,
+    )
+    now = int(time.time())
+    kwargs = {
+        "source_agent": "aurora",
+        "target_agent": "alina",
+        "expected_outcome": "Repair one host issue",
+        "acceptance_test": "The repair has full-path evidence",
+        "evidence_references": ["kanban:t_source"],
+        "acknowledgment_deadline": _iso(now + 60),
+        "checkpoint_at": _iso(now + 120),
+        "organization": ORG,
+        "coordination_source_task_id": root_id,
+        "session_id": "origin-session",
+        "coordination_origin_message_id": "origin-message",
+    }
+
+    with pytest.raises(ValueError, match="origin must match"):
+        create_handoff(
+            conn,
+            **{**kwargs, "coordination_origin_message_id": "wrong-message"},
+        )
+    created = create_handoff(conn, **kwargs)
+    with kanban_db.write_txn(conn):
+        conn.execute(
+            "UPDATE coordination_requests SET status = 'completed' WHERE id = ?",
+            (request.id,),
+        )
+
+    assert claim_workforce_handoff_pickup(
+        conn, target_agent="alina", organization=ORG, now=now + 1,
+    ) is None
+    assert all(
+        event.kind != "workforce_handoff_pickup_claimed"
+        for event in kanban_db.list_events(conn, created["task_id"])
+    )
+    db_path = Path(conn.execute("PRAGMA database_list").fetchone()[2])
+    assert kanban_db.has_coordination_tick_work(
+        db_path,
+        notifier_agents={"alina"},
+        notifier_profiles={"alina"},
+    ) is False
+
+
 def test_receiver_must_acknowledge_and_stalled_checkpoint_notifies_aurora_chloe(conn):
     now = int(time.time())
     created = create_handoff(
@@ -99,7 +457,13 @@ def test_receiver_must_acknowledge_and_stalled_checkpoint_notifies_aurora_chloe(
         "notify": ["aurora", "chloe"],
         "decision_owner": "aurora",
     }]
-    assert kanban_db.get_task(conn, task_id).status == "blocked"
+    blocked = kanban_db.get_task(conn, task_id)
+    assert blocked.status == "blocked"
+    assert blocked.block_kind == "capability"
+    assert [event.kind for event in kanban_db.list_events(conn, task_id)][-2:] == [
+        "workforce_handoff_stalled",
+        "blocked",
+    ]
 
 
 def test_checkpoint_moves_deadline_without_changing_authority(conn):

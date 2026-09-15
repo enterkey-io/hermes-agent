@@ -222,7 +222,7 @@ class GatewayKanbanWatchersMixin:
     async def _kanban_coordination_tick(self) -> None:
         """Run deterministic checks and admit at most one turn per profile."""
         from hermes_cli import kanban_db as kb
-        from hermes_cli.workforce_handoffs import claim_owned_failure_handoff_pickup
+        from hermes_cli.workforce_handoffs import claim_workforce_handoff_pickup
 
         profiles = {self._active_profile_name()}
         profiles.update(
@@ -282,7 +282,7 @@ class GatewayKanbanWatchersMixin:
                         (idle_profiles - final_profiles) & profile_agents.keys()
                     )
                     for profile in sorted(pickup_profiles):
-                        claim = claim_owned_failure_handoff_pickup(
+                        claim = claim_workforce_handoff_pickup(
                             conn, target_agent=profile_agents[profile],
                         )
                         if claim is not None:
@@ -306,7 +306,7 @@ class GatewayKanbanWatchersMixin:
         for pickup in pickups:
             profile = pickup["execution_profile"]
             jobs[profile] = asyncio.create_task(
-                self._kanban_pickup_owned_failure(pickup),
+                self._kanban_pickup_workforce_handoff(pickup),
                 name=f"kanban-handoff-pickup:{profile}",
             )
         from gateway.operational_outcomes import operational_outcome_profiles
@@ -337,7 +337,7 @@ class GatewayKanbanWatchersMixin:
                     logger.warning("operational outcome delivery withheld for profile %s", profile)
             cursors[profile] = cursor
 
-    async def _kanban_pickup_owned_failure(self, pickup: dict) -> None:
+    async def _kanban_pickup_workforce_handoff(self, pickup: dict) -> None:
         from hermes_cli.workforce_handoff_pickup import run_workforce_handoff_pickup
 
         result = await run_workforce_handoff_pickup(
@@ -347,10 +347,11 @@ class GatewayKanbanWatchersMixin:
             execution_profile=pickup["execution_profile"],
             source_agent=pickup["source_agent"],
             database_path=pickup["database_path"],
+            claim_kind=pickup["claim_kind"],
         )
         logger.info(
             "kanban handoff pickup task=%s profile=%s acknowledged=%s timed_out=%s returncode=%s",
-            pickup["task_id"], pickup["target_agent"], result.acknowledged,
+            pickup["task_id"], pickup["execution_profile"], result.acknowledged,
             result.timed_out, result.returncode,
         )
 

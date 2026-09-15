@@ -162,14 +162,14 @@ def test_real_owned_failure_is_claimed_without_chat_subscription(board, monkeypa
         assert kb.list_notify_subs(conn) == []
     runner = Runner()
     runner._active_profile_name = lambda: "builder"
-    runner._kanban_pickup_owned_failure = AsyncMock()
+    runner._kanban_pickup_workforce_handoff = AsyncMock()
     monkeypatch.setattr("gateway.kanban_watchers._kanban_dispatch_allowed", lambda: not paused)
     asyncio.run(finish_tick(runner))
     if paused:
-        runner._kanban_pickup_owned_failure.assert_not_awaited()
+        runner._kanban_pickup_workforce_handoff.assert_not_awaited()
     else:
-        runner._kanban_pickup_owned_failure.assert_awaited_once()
-        pickup = runner._kanban_pickup_owned_failure.call_args.args[0]
+        runner._kanban_pickup_workforce_handoff.assert_awaited_once()
+        pickup = runner._kanban_pickup_workforce_handoff.call_args.args[0]
         assert pickup["task_id"] == created["task_id"]
         with kb.connect_closing(board) as conn:
             request = kb.get_coordination_request(conn, pickup["request_root_id"])
@@ -179,9 +179,50 @@ def test_real_owned_failure_is_claimed_without_chat_subscription(board, monkeypa
         # A restarted gateway cannot claim the same one-shot pickup again.
         restarted = Runner()
         restarted._active_profile_name = lambda: "builder"
-        restarted._kanban_pickup_owned_failure = AsyncMock()
+        restarted._kanban_pickup_workforce_handoff = AsyncMock()
         asyncio.run(finish_tick(restarted))
-        restarted._kanban_pickup_owned_failure.assert_not_awaited()
+        restarted._kanban_pickup_workforce_handoff.assert_not_awaited()
+
+
+def test_real_ordinary_handoff_is_claimed_by_receiving_profile(board):
+    from hermes_cli.workforce_handoffs import create_handoff
+
+    now = datetime.now(timezone.utc)
+    with kb.connect_closing(board) as conn:
+        created = create_handoff(
+            conn,
+            source_agent="builder",
+            target_agent="director",
+            expected_outcome="Make the routed decision",
+            acceptance_test="The decision is recorded with evidence",
+            evidence_references=["kanban:t_source"],
+            acknowledgment_deadline=(now + timedelta(minutes=2)).isoformat(),
+            checkpoint_at=(now + timedelta(minutes=20)).isoformat(),
+        )
+        assert kb.list_notify_subs(conn) == []
+
+    runner = Runner()
+    runner._active_profile_name = lambda: "director"
+    runner._kanban_pickup_workforce_handoff = AsyncMock()
+    asyncio.run(finish_tick(runner))
+
+    runner._kanban_pickup_workforce_handoff.assert_awaited_once()
+    pickup = runner._kanban_pickup_workforce_handoff.call_args.args[0]
+    assert pickup["task_id"] == created["task_id"]
+    assert pickup["target_agent"] == "director"
+    assert pickup["source_agent"] == "builder"
+    assert pickup["claim_kind"] == "ordinary"
+    assert pickup["request_root_id"] is None
+    with kb.connect_closing(board) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM coordination_requests"
+        ).fetchone()[0] == 0
+
+    restarted = Runner()
+    restarted._active_profile_name = lambda: "director"
+    restarted._kanban_pickup_workforce_handoff = AsyncMock()
+    asyncio.run(finish_tick(restarted))
+    restarted._kanban_pickup_workforce_handoff.assert_not_awaited()
 
 
 def test_pickup_without_adapter_or_sub_does_not_block_next_tick(board, monkeypatch):
@@ -192,9 +233,13 @@ def test_pickup_without_adapter_or_sub_does_not_block_next_tick(board, monkeypat
 
     def claim(conn, *, target_agent):
         claims.append(target_agent)
-        return dict(task_id="t_one", request_root_id="cr_one", target_agent=target_agent, source_agent="builder")
+        return dict(
+            task_id="t_one", request_root_id="cr_one",
+            target_agent=target_agent, source_agent="builder",
+            claim_kind="owned_operational_failure",
+        )
 
-    monkeypatch.setattr("hermes_cli.workforce_handoffs.claim_owned_failure_handoff_pickup", claim)
+    monkeypatch.setattr("hermes_cli.workforce_handoffs.claim_workforce_handoff_pickup", claim)
 
     async def scenario():
         started = asyncio.Event()
@@ -205,7 +250,7 @@ def test_pickup_without_adapter_or_sub_does_not_block_next_tick(board, monkeypat
             started.set()
             await release.wait()
 
-        runner._kanban_pickup_owned_failure = pickup
+        runner._kanban_pickup_workforce_handoff = pickup
         await runner._kanban_coordination_tick()
         await started.wait()
         await runner._kanban_coordination_tick()
@@ -276,10 +321,10 @@ def test_canonical_root_name_cannot_claim_through_undeclared_runtime_profile(
 
     runner = Runner()
     runner._active_profile_name = lambda: "root"
-    runner._kanban_pickup_owned_failure = AsyncMock()
+    runner._kanban_pickup_workforce_handoff = AsyncMock()
     asyncio.run(finish_tick(runner))
 
-    runner._kanban_pickup_owned_failure.assert_not_awaited()
+    runner._kanban_pickup_workforce_handoff.assert_not_awaited()
     assert runner._kanban_coordination_jobs == {}
     with kb.connect_closing(board) as conn:
         task = kb.get_task(conn, created["task_id"])
@@ -382,7 +427,7 @@ def test_root_alias_pickup_uses_main_profile_and_stays_single_flight(board, monk
             started.set()
             await release.wait()
 
-        runner._kanban_pickup_owned_failure = pickup
+        runner._kanban_pickup_workforce_handoff = pickup
         await runner._kanban_coordination_tick()
         await started.wait()
         assert set(runner._kanban_coordination_jobs) == {"main"}

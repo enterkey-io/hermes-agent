@@ -1,4 +1,4 @@
-"""CLI-process boundaries for owned workforce handoff pickup."""
+"""CLI-process boundaries for workforce handoff pickup."""
 
 from __future__ import annotations
 
@@ -78,7 +78,9 @@ def test_pickup_command_is_one_turn_tool_sourced_workforce_session(monkeypatch):
     assert "-Q" in command
     assert command[command.index("--max-turns") + 1] == "2"
     assert command[command.index("-t") + 1] == "workforce"
-    assert command[command.index("-c") + 1] == "workforce-handoff:cr_pickup_123:alina"
+    assert command[command.index("-c") + 1] == (
+        "workforce-handoff:cr_pickup_123:t_pickup_123:alina"
+    )
 
 
 def test_pickup_env_scrubs_worker_identity_and_sets_exact_scope(monkeypatch, tmp_path):
@@ -104,6 +106,35 @@ def test_pickup_env_scrubs_worker_identity_and_sets_exact_scope(monkeypatch, tmp
     assert env["HERMES_SESSION_SOURCE"] == "tool"
     assert env["HERMES_COORDINATION_REQUEST_ROOT"] == "cr_pickup_123"
     assert env["HERMES_WORKFORCE_HANDOFF_PICKUP_TARGET"] == "alina"
+    assert env["HERMES_WORKFORCE_HANDOFF_PICKUP_KIND"] == "owned_operational_failure"
+
+
+def test_ordinary_pickup_env_drops_stale_coordination_identity(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_COORDINATION_REQUEST_ROOT", "cr_stale")
+    monkeypatch.setenv("HERMES_COORDINATION_TASK_ID", "t_stale")
+    monkeypatch.setenv("HERMES_COORDINATION_PURPOSE", "final_return")
+    monkeypatch.setattr(
+        "hermes_cli.workforce_handoff_pickup.resolve_profile_env",
+        lambda _target: "/profiles/alina",
+    )
+
+    env = _pickup_env(
+        database_path=tmp_path / "kanban.db",
+        task_id="t_ordinary_123",
+        request_root_id=None,
+        target_agent="alina",
+        source_agent="aurora",
+        claim_kind="ordinary",
+    )
+
+    assert env["HERMES_WORKFORCE_HANDOFF_PICKUP_KIND"] == "ordinary"
+    assert env["HERMES_WORKFORCE_HANDOFF_PICKUP_TASK"] == "t_ordinary_123"
+    for key in (
+        "HERMES_COORDINATION_REQUEST_ROOT",
+        "HERMES_COORDINATION_TASK_ID",
+        "HERMES_COORDINATION_PURPOSE",
+    ):
+        assert key not in env
 
 
 def test_root_execution_profile_validation_rejects_wrong_or_nonoperational_profile(
@@ -317,11 +348,15 @@ def test_pickup_cancellation_kills_and_reaps_the_dedicated_process(
 
 @pytest.mark.skipif(IS_WINDOWS, reason="pickup process hardening is POSIX-only")
 @pytest.mark.parametrize(
-    ("target_agent", "execution_profile"),
-    [("alina", "alina"), ("root", "main")],
+    ("target_agent", "execution_profile", "owned_failure"),
+    [
+        ("alina", "alina", True),
+        ("root", "main", True),
+        ("alina", "alina", False),
+    ],
 )
 def test_pickup_runs_actual_cli_and_real_registry_with_loopback_provider(
-    monkeypatch, tmp_path, target_agent, execution_profile,
+    monkeypatch, tmp_path, target_agent, execution_profile, owned_failure,
 ):
     """Pickup must run the concrete profile with canonical tool authority."""
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -330,6 +365,7 @@ def test_pickup_runs_actual_cli_and_real_registry_with_loopback_provider(
     from hermes_cli.workforce_handoff_pickup import run_workforce_handoff_pickup
     from hermes_cli.workforce_handoffs import (
         claim_owned_failure_handoff_pickup,
+        claim_workforce_handoff_pickup,
         create_handoff,
     )
     from hermes_cli.workforce_org import load_organization
@@ -342,10 +378,26 @@ def test_pickup_runs_actual_cli_and_real_registry_with_loopback_provider(
             request = json.loads(self.rfile.read(length))
             seen_requests.append((self.path, request))
             task_id = self.server.task_id
-            chat_attempt = sum(
-                path.endswith("/chat/completions") for path, _ in seen_requests
+            tool_names = {
+                tool.get("function", {}).get("name")
+                for tool in request.get("tools", [])
+                if isinstance(tool, dict)
+            }
+            worker_flow = "kanban_complete" in tool_names
+            flow_attempt = sum(
+                path.endswith("/chat/completions")
+                and (
+                    "kanban_complete"
+                    in {
+                        tool.get("function", {}).get("name")
+                        for tool in prior.get("tools", [])
+                        if isinstance(tool, dict)
+                    }
+                )
+                == worker_flow
+                for path, prior in seen_requests
             )
-            if chat_attempt == 2:
+            if flow_attempt == 2:
                 final_chunk = {
                     "id": "pickup-summary",
                     "object": "chat.completion.chunk",
@@ -353,7 +405,12 @@ def test_pickup_runs_actual_cli_and_real_registry_with_loopback_provider(
                     "model": "pickup-model",
                     "choices": [{
                         "index": 0,
-                        "delta": {"role": "assistant", "content": "Acknowledged."},
+                        "delta": {
+                            "role": "assistant",
+                            "content": (
+                                "Completed." if worker_flow else "Acknowledged."
+                            ),
+                        },
                         "finish_reason": "stop",
                     }],
                 }
@@ -364,6 +421,17 @@ def test_pickup_runs_actual_cli_and_real_registry_with_loopback_provider(
                 self.end_headers()
                 self.wfile.write(body)
                 return
+            function_name = (
+                "kanban_complete" if worker_flow else "workforce_handoff"
+            )
+            function_arguments = (
+                {
+                    "task_id": task_id,
+                    "summary": "Completed by the real dispatched worker path",
+                }
+                if worker_flow
+                else {"action": "acknowledge", "task_id": task_id}
+            )
             response = {
                 "id": "pickup-call",
                 "object": "chat.completion",
@@ -379,10 +447,8 @@ def test_pickup_runs_actual_cli_and_real_registry_with_loopback_provider(
                             "id": "call_pickup",
                             "type": "function",
                             "function": {
-                                "name": "workforce_handoff",
-                                "arguments": json.dumps({
-                                    "action": "acknowledge", "task_id": task_id,
-                                }),
+                                "name": function_name,
+                                "arguments": json.dumps(function_arguments),
                             },
                         }],
                     },
@@ -466,26 +532,38 @@ def test_pickup_runs_actual_cli_and_real_registry_with_loopback_provider(
         iso = lambda offset: datetime.fromtimestamp(now + offset, timezone.utc).isoformat()
         db_path = root / "kanban.db"
         with kanban_db.connect_closing(db_path) as conn:
+            handoff_kwargs = {}
+            if owned_failure:
+                handoff_kwargs = {
+                    "context": {
+                        "kind": "owned_operational_failure",
+                        "technical_owner": target_agent,
+                        "director": "aurora",
+                        "workflow_id": "owned-failure-test",
+                        "event_id": "failure-1",
+                    },
+                    "requires_source_acceptance": True,
+                }
             created = create_handoff(
                 conn,
                 source_agent="aurora",
                 target_agent=target_agent,
-                expected_outcome="Repair the owned operational failure",
+                expected_outcome=(
+                    "Repair the owned operational failure"
+                    if owned_failure else "Complete the ordinary handoff"
+                ),
                 acceptance_test="A later probe succeeds",
                 evidence_references=["execution:failure-1"],
                 acknowledgment_deadline=iso(120),
                 checkpoint_at=iso(3600),
                 organization=organization,
-                context={
-                    "kind": "owned_operational_failure",
-                    "technical_owner": target_agent,
-                    "director": "aurora",
-                    "workflow_id": "owned-failure-test",
-                    "event_id": "failure-1",
-                },
-                requires_source_acceptance=True,
+                **handoff_kwargs,
             )
-            pickup = claim_owned_failure_handoff_pickup(
+            claim = (
+                claim_owned_failure_handoff_pickup
+                if owned_failure else claim_workforce_handoff_pickup
+            )
+            pickup = claim(
                 conn,
                 target_agent=target_agent,
                 organization=organization,
@@ -504,6 +582,9 @@ def test_pickup_runs_actual_cli_and_real_registry_with_loopback_provider(
             target_agent=target_agent,
             source_agent="aurora",
             database_path=db_path,
+            claim_kind=(
+                "owned_operational_failure" if owned_failure else "ordinary"
+            ),
         ))
 
         with kanban_db.connect_closing(db_path) as conn:
@@ -532,32 +613,98 @@ def test_pickup_runs_actual_cli_and_real_registry_with_loopback_provider(
             ]
             assert len(acknowledged) == 1
             assert acknowledged[0].payload["actor"] == target_agent
+            if not owned_failure:
+                assert task.request_root_id is None
+                assert conn.execute(
+                    "SELECT COUNT(*) FROM coordination_requests"
+                ).fetchone()[0] == 0
 
-        launched: dict[str, object] = {}
-
-        class Worker:
-            pid = 4242
-
-        def launch_worker(command, **kwargs):
-            launched["command"] = list(command)
-            launched["env"] = dict(kwargs["env"])
-            return Worker()
-
-        monkeypatch.setattr(subprocess, "Popen", launch_worker)
         monkeypatch.setattr(kanban_db, "_memory_pressure_level", lambda: "normal")
-        with kanban_db.connect_closing(db_path) as conn:
-            dispatch = kanban_db.dispatch_once(conn, max_spawn=1)
-            task = kanban_db.get_task(conn, created["task_id"])
+        if owned_failure:
+            launched: dict[str, object] = {}
 
-        assert dispatch.spawned[0][:2] == (created["task_id"], target_agent)
-        assert launched["command"][1:3] == ["-p", execution_profile]
-        assert launched["env"]["HERMES_PROFILE"] == execution_profile
-        assert launched["env"]["HERMES_HOME"] == str(profile)
-        assert organization.validate_execution_profile(
-            launched["env"]["HERMES_PROFILE"]
-        ).agent == target_agent
-        assert task.status == "running"
-        assert task.assignee == target_agent
+            class Worker:
+                pid = 4242
+
+            def launch_worker(command, **kwargs):
+                launched["command"] = list(command)
+                launched["env"] = dict(kwargs["env"])
+                return Worker()
+
+            monkeypatch.setattr(subprocess, "Popen", launch_worker)
+            with kanban_db.connect_closing(db_path) as conn:
+                dispatch = kanban_db.dispatch_once(conn, max_spawn=1)
+                task = kanban_db.get_task(conn, created["task_id"])
+
+            assert dispatch.spawned[0][:2] == (created["task_id"], target_agent)
+            assert launched["command"][1:3] == ["-p", execution_profile]
+            assert launched["env"]["HERMES_PROFILE"] == execution_profile
+            assert launched["env"]["HERMES_HOME"] == str(profile)
+            assert organization.validate_execution_profile(
+                launched["env"]["HERMES_PROFILE"]
+            ).agent == target_agent
+            assert task.status == "running"
+            assert task.assignee == target_agent
+        else:
+            monkeypatch.setattr(
+                kanban_db,
+                "_resolve_hermes_argv",
+                lambda: [sys.executable, "-m", "hermes_cli.main"],
+            )
+            with kanban_db.connect_closing(db_path) as conn:
+                dispatch = kanban_db.dispatch_once(conn, max_spawn=1)
+                running = kanban_db.get_task(conn, created["task_id"])
+            assert dispatch.spawned[0][:2] == (created["task_id"], target_agent)
+            assert running is not None
+            assert running.status == "running"
+            assert running.worker_pid is not None
+
+            deadline = time.monotonic() + 30
+            terminal = None
+            while time.monotonic() < deadline:
+                with kanban_db.connect_closing(db_path) as conn:
+                    terminal = kanban_db.get_task(conn, created["task_id"])
+                if terminal is not None and terminal.status == "done":
+                    break
+                time.sleep(0.05)
+            assert terminal is not None
+            assert terminal.status == "done", (
+                root.joinpath("kanban", "logs", f"{created['task_id']}.log")
+                .read_text(encoding="utf-8")
+            )
+            with kanban_db.connect_closing(db_path) as conn:
+                completed = [
+                    event
+                    for event in kanban_db.list_events(conn, created["task_id"])
+                    if event.kind == "completed"
+                ]
+            assert completed[-1].payload["summary"] == (
+                "Completed by the real dispatched worker path"
+            )
+            worker_requests = [
+                request
+                for path, request in seen_requests
+                if path.endswith("/chat/completions")
+                and any(
+                    tool.get("function", {}).get("name") == "kanban_complete"
+                    for tool in request.get("tools", [])
+                    if isinstance(tool, dict)
+                )
+            ]
+            process_deadline = time.monotonic() + 10
+            while len(worker_requests) < 2 and time.monotonic() < process_deadline:
+                time.sleep(0.05)
+                worker_requests = [
+                    request
+                    for path, request in seen_requests
+                    if path.endswith("/chat/completions")
+                    and any(
+                        tool.get("function", {}).get("name") == "kanban_complete"
+                        for tool in request.get("tools", [])
+                        if isinstance(tool, dict)
+                    )
+                ]
+            assert len(worker_requests) == 2
     finally:
         server.shutdown()
         server.server_close()
