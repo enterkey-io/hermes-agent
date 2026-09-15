@@ -81,6 +81,7 @@ def test_generator_reports_no_op_fallback_wrapper_contract(
         "scripts/generate.py",
         "scripts/identity_parser.py",
         "scripts/prompt_profiles.py",
+        "scripts/characters_assets.py",
     }
     assert payload["contract"] == "hermes-agent-photo/no-op-fallback/v2"
     assert set(payload["files"]) == expected_files

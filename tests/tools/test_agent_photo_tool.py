@@ -59,6 +59,9 @@ def personal_profile(monkeypatch, tmp_path, trusted_wrapper):
         shared.parent.chmod(0o755)
         shared.chmod(0o755)
         (shared / "SKILL.md").chmod(0o644)
+        (shared / "references").mkdir(mode=0o755, exist_ok=True)
+        (shared / "references" / "photo-prompting-rules.md").write_text("Use the selected references in order.\n")
+        (shared / "references" / "photo-prompting-rules.md").chmod(0o600)
         monkeypatch.setenv("HERMES_HOME", str(profile))
         monkeypatch.delenv("HERMES_WORKFORCE_ORG", raising=False)
         monkeypatch.delenv("HERMES_SHARED_SKILLS_DIR", raising=False)
@@ -173,7 +176,8 @@ def test_personal_profiles_can_discover_skill_and_use_no_spend_actions(
 
     def fake_run(command, **kwargs):
         calls.append((command, kwargs))
-        return SimpleNamespace(returncode=0, stdout="safe output\n", stderr="")
+        output = '{"photos": []}' if "--characters-status" in command else "safe output\n"
+        return SimpleNamespace(returncode=0, stdout=output, stderr="")
 
     monkeypatch.setattr(agent_photo_tool.subprocess, "run", fake_run)
 
@@ -188,7 +192,7 @@ def test_personal_profiles_can_discover_skill_and_use_no_spend_actions(
     assert instructions["skill"] == "agent-photo"
     assert "fixed wrapper" in instructions["instructions"]
     assert preview == {"success": True, "action": "preview", "output": "safe output"}
-    assert status == {"success": True, "action": "characters_status", "output": "safe output"}
+    assert status == {"success": True, "action": "characters_status", "photos": [], "total": 0, "next_offset": None}
     assert [call[0][1:] for call in calls] == [
         ["--preview-prompt", "portrait in warm window light"],
         ["--characters-status"],
@@ -221,7 +225,7 @@ def test_no_spend_actions_allow_the_cooperative_profiles_ancestor(
     monkeypatch.setattr(
         agent_photo_tool.subprocess,
         "run",
-        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="safe output\n", stderr=""),
+        lambda command, **_kwargs: SimpleNamespace(returncode=0, stdout='{"photos": []}' if "--characters-status" in command else "safe output\n", stderr=""),
     )
 
     instructions = json.loads(agent_photo_tool.agent_photo_tool({"action": "instructions"}))
@@ -235,7 +239,7 @@ def test_no_spend_actions_allow_the_cooperative_profiles_ancestor(
     assert instructions["skill"] == "agent-photo"
     assert "fixed wrapper" in instructions["instructions"]
     assert preview == {"success": True, "action": "preview", "output": "safe output"}
-    assert status == {"success": True, "action": "characters_status", "output": "safe output"}
+    assert status == {"success": True, "action": "characters_status", "photos": [], "total": 0, "next_offset": None}
 
 
 def test_rejects_world_writable_or_symlinked_profiles_ancestor(tmp_path):
@@ -416,6 +420,150 @@ def _approved_generation(args):
         args, approval_provenance=provenance, session_id="photo-session",
         tool_call_id="photo-call", turn_id="photo-turn",
     ))
+
+
+@pytest.mark.parametrize("profile_name", ["amy", "kourtnie"])
+def test_reference_catalog_and_generation_use_immutable_profile_images(monkeypatch, personal_profile, profile_name):
+    from PIL import Image
+    from tools import agent_photo_tool as photo
+
+    profile = personal_profile(profile_name)
+    source = profile / "assets" / "reference.png"
+    source.parent.mkdir(mode=0o700)
+    Image.new("RGB", (2, 2), "red").save(source)
+    source.chmod(0o600)
+    original = source.read_bytes()
+    catalog = json.loads(photo.agent_photo_tool({"action": "references"}))
+    assert catalog["images"] == ["assets/reference.png"]
+    calls = []
+
+    def execute(command, **kwargs):
+        path = Path(command[command.index("--source") + 1])
+        assert path.is_relative_to(profile)
+        assert path.read_bytes() == original
+        assert path.stat().st_mode & 0o777 == 0o600
+        calls.append(path)
+        Image.new("RGB", (2, 2), "blue").save(source)
+        return SimpleNamespace(returncode=1 if len(calls) == 1 else 0, stdout="MEDIA:result.png", stderr="")
+
+    monkeypatch.setattr(photo, "_execute_paid_command", execute)
+    result = _approved_generation({"action": "generate", "prompt": "portrait", "source_images": ["assets/reference.png"]})
+    assert result["success"]
+    assert result["providers_attempted"] == ["gemini", "grok"]
+    assert len(calls) == 2
+    assert not any(path.exists() for path in calls)
+
+
+def test_reference_content_change_invalidates_approval(monkeypatch, personal_profile):
+    from PIL import Image
+    from tools import agent_photo_tool as photo
+    from tools.approval import _issue_tool_approval_provenance
+
+    profile = personal_profile("kourtnie")
+    source = profile / "assets" / "reference.png"
+    source.parent.mkdir(mode=0o700)
+    Image.new("RGB", (2, 2), "red").save(source)
+    source.chmod(0o600)
+    args = {"action": "generate", "prompt": "portrait", "source_images": ["assets/reference.png"]}
+    provenance = _issue_tool_approval_provenance("agent_photo", args, session_id="s", tool_call_id="c", turn_id="t", subject=photo.agent_photo_approval_subject(args))
+    Image.new("RGB", (2, 2), "blue").save(source)
+    monkeypatch.setattr(photo, "_run_wrapper", lambda *a, **kw: pytest.fail("changed source must not run"))
+    result = json.loads(photo.agent_photo_tool(args, approval_provenance=provenance, session_id="s", tool_call_id="c", turn_id="t"))
+    assert "approval provenance" in result["error"]
+
+
+@pytest.mark.parametrize("name", ["/etc/passwd", "assets/../../amy/seed.png", "config.yaml", "assets/fake.png", "assets/link.png", "assets/linked/secret.png"])
+def test_reference_validation_rejects_unscoped_invalid_and_symlinked_files(personal_profile, tmp_path, name):
+    from tools import agent_photo_tool as photo
+
+    profile = personal_profile("amy")
+    assets = profile / "assets"
+    assets.mkdir(mode=0o700)
+    (assets / "fake.png").write_text("not an image")
+    (assets / "link.png").symlink_to(assets / "fake.png")
+    (assets / "linked").symlink_to(tmp_path, target_is_directory=True)
+    result = json.loads(photo.agent_photo_tool({"action": "preview", "prompt": "portrait", "source_images": [name]}))
+    assert "error" in result
+
+
+def test_large_characters_catalog_is_compacted_before_truncation(monkeypatch, personal_profile):
+    from tools import agent_photo_tool as photo
+
+    personal_profile("kourtnie")
+    photos = [{"id": str(index), "caption": "x" * 2000, "private": "not returned"} for index in range(30)]
+    monkeypatch.setattr(photo.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=0, stdout=json.dumps({"photos": photos}), stderr=""))
+    result = json.loads(photo.agent_photo_tool({"action": "characters_status", "offset": 25}))
+    assert [row["id"] for row in result["photos"]] == [str(i) for i in range(25, 30)]
+    assert result["next_offset"] is None
+    assert result["total"] == 30
+    assert len(json.dumps(result)) < 3000
+    assert "private" not in json.dumps(result)
+
+
+def test_characters_selection_reaches_wrapper_before_prompt_separator(monkeypatch, personal_profile):
+    from tools import agent_photo_tool as photo
+
+    personal_profile("amy")
+    photo_id = "e522f0e9-4bc9-4b71-95ee-39048a9b101a"
+    commands = []
+    monkeypatch.setattr(photo, "_execute_paid_command", lambda command, **kw: commands.append(command) or SimpleNamespace(returncode=0, stdout="MEDIA:result.png", stderr=""))
+    result = _approved_generation({"action": "generate", "prompt": "portrait", "characters_photo_ids": [photo_id]})
+    assert result["success"]
+    command = commands[0]
+    assert command.index("--characters-photo") < command.index("--")
+    assert command[command.index("--characters-photo") + 1] == photo_id
+
+
+def test_instructions_are_complete_without_requiring_a_file_tool(personal_profile):
+    from tools import agent_photo_tool as photo
+    from tools.tool_result_storage import maybe_persist_tool_result
+
+    profile = personal_profile("amy")
+    shared = profile.parent.parent / "shared-skills/agent-photo"
+    complete = "Full procedure.\n" * 1000 + "END OF PROCEDURE"
+    (shared / "SKILL.md").write_text(complete)
+    result = photo.agent_photo_tool({"action": "instructions"})
+    assert complete in json.loads(result)["instructions"]
+    assert "Use the selected references in order." in json.loads(result)["instructions"]
+    assert maybe_persist_tool_result(result, "agent_photo", "instruction-check") == result
+
+
+@pytest.mark.linux_only
+def test_reference_fifo_is_rejected_without_blocking(personal_profile):
+    from tools import agent_photo_tool as photo
+
+    profile = personal_profile("amy")
+    assets = profile / "assets"
+    assets.mkdir(mode=0o700)
+    os.mkfifo(assets / "not-an-image.png", mode=0o600)
+    result = json.loads(photo.agent_photo_tool({"action": "preview", "prompt": "portrait", "source_images": ["assets/not-an-image.png"]}))
+    assert "unsafe" in result["error"]
+
+
+@pytest.mark.parametrize("platform", ["cli", "telegram", "matrix", "voice"])
+def test_personal_memory_opt_in_preserves_photo_and_cron_isolation(personal_profile, platform):
+    from agent.memory_manager import MemoryManager, inject_memory_provider_tools
+    from cron.scheduler import _resolve_cron_disabled_toolsets, _resolve_cron_enabled_toolsets
+    from hermes_cli.tools_config import _get_platform_tools
+    from plugins.memory.honcho import HonchoMemoryProvider
+
+    personal_profile("kourtnie")
+    config = {"platform_toolsets": {platform: ["agent_photo", "memory", "session_search"], "cron": ["agent_photo"]}}
+    enabled = sorted(_get_platform_tools(config, platform))
+    assert {"agent_photo", "memory", "session_search"} <= set(enabled)
+    manager = MemoryManager()
+    provider = HonchoMemoryProvider()
+    manager.add_provider(provider)
+    agent = SimpleNamespace(_memory_manager=manager, enabled_toolsets=enabled, disabled_toolsets=[], tools=[], valid_tool_names=set())
+    inject_memory_provider_tools(agent)
+    assert {"honcho_profile", "honcho_search"} <= agent.valid_tool_names
+    assert not {"terminal", "read_file", "execute_code"} & agent.valid_tool_names
+    agent.tools = []
+    agent.valid_tool_names = set()
+    agent.enabled_toolsets = _resolve_cron_enabled_toolsets({}, config)
+    agent.disabled_toolsets = _resolve_cron_disabled_toolsets(config)
+    inject_memory_provider_tools(agent)
+    assert not agent.valid_tool_names
 
 
 @pytest.mark.parametrize(

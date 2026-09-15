@@ -163,6 +163,16 @@ def test_proxy_branch_general_pool_has_tight_keepalive(monkeypatch):
     assert any(inst.kwargs.get("proxy") == "http://127.0.0.1:9/" for inst in instances)
 
 
+def test_proxy_configuration_is_used_without_logging_credentials(monkeypatch, caplog):
+    proxy = "http://synthetic-user:synthetic-password@127.0.0.1:9/?token=synthetic-token"
+    with caplog.at_level("INFO"):
+        instances = _drive_connect(monkeypatch, proxy_url=proxy)
+    assert any(inst.kwargs.get("proxy") == proxy for inst in instances)
+    assert "Proxy detected" in caplog.text
+    for value in (proxy, "synthetic-user", "synthetic-password", "synthetic-token"):
+        assert value not in caplog.text
+
+
 def test_fallback_branch_forwards_tuned_limits_to_inner_transports(monkeypatch):
     monkeypatch.delenv("HERMES_TELEGRAM_HTTP_POOL_SIZE", raising=False)
     monkeypatch.delenv("HERMES_GATEWAY_HTTPX_KEEPALIVE_EXPIRY", raising=False)

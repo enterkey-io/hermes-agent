@@ -7,12 +7,15 @@ It is not a shell, skill browser, or generic file interface.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import signal
 import stat
 import subprocess
+import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -37,12 +40,16 @@ _GENERATION_TIMEOUT_SECONDS = (
 _GENERATION_CLEANUP_TIMEOUT_SECONDS = 5
 _GENERATION_POLL_SECONDS = 0.25
 _GEMINI_ATTEMPT_TIMEOUT_SECONDS = 180
+_MAX_REFERENCE_BYTES = 25 * 1024 * 1024
+_REFERENCE_ROOTS = (("assets",), ("baselines",), ("media",))
+_REFERENCE_KEYS = {"source_images", "characters_photo_ids"}
 
 _ACTION_ALLOWED_KEYS = {
     "instructions": {"action"},
-    "preview": {"action", "prompt"},
-    "characters_status": {"action"},
-    "generate": {"action", "prompt", "model", "fallback_to_grok"},
+    "references": {"action", "offset", "limit"},
+    "preview": {"action", "prompt"} | _REFERENCE_KEYS,
+    "characters_status": {"action", "offset", "limit"},
+    "generate": {"action", "prompt", "model", "fallback_to_grok"} | _REFERENCE_KEYS,
 }
 
 AGENT_PHOTO_SCHEMA = {
@@ -51,7 +58,7 @@ AGENT_PHOTO_SCHEMA = {
         "Use the active personal profile's identity-locked agent-photo procedure. "
         "It can load only the shared agent-photo instructions, preview a prompt, "
         "check the bound character status, or make one user-requested generation. "
-        "It cannot run shell commands, accept file paths, or access another profile. "
+        "It accepts only scoped image references, never commands or another profile's files. "
         "Generation requires a direct current-message request or fresh human approval, "
         "and always passes --approved to the wrapper. By default Gemini failure falls back to "
         "Grok once within the same request; no further provider attempts are made."
@@ -61,7 +68,7 @@ AGENT_PHOTO_SCHEMA = {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["instructions", "preview", "characters_status", "generate"],
+                "enum": ["instructions", "references", "preview", "characters_status", "generate"],
                 "description": "The fixed agent-photo action to perform.",
             },
             "prompt": {
@@ -78,6 +85,16 @@ AGENT_PHOTO_SCHEMA = {
                 "type": "boolean",
                 "description": "Gemini only: defaults to true. Set false when the user asks for Gemini without fallback. Never enables any other fallback provider.",
             },
+            "source_images": {
+                "type": "array", "items": {"type": "string"}, "maxItems": 4,
+                "description": "Profile-relative images under assets, baselines, or media. Four extra references total. Order: seed, Characters, local images.",
+            },
+            "characters_photo_ids": {
+                "type": "array", "items": {"type": "string"}, "maxItems": 4,
+                "description": "Ordered photo UUIDs from this profile's characters_status catalog. Combined with source_images, at most four extra references.",
+            },
+            "offset": {"type": "integer", "minimum": 0, "description": "Catalog offset only."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 5, "description": "Catalog page size, default five."},
         },
         "required": ["action"],
         "additionalProperties": False,
@@ -257,7 +274,7 @@ def _open_fixed_file(root: Path, parts: tuple[str, ...], *, resource: str) -> in
         raise ValueError(f"agent-photo {resource} path is unsafe")
     current_fd = _open_fixed_directory(root, parts[:-1], resource=resource)
     try:
-        file_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=current_fd)
+        file_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=current_fd)
     except OSError as exc:
         raise ValueError(f"agent-photo {resource} path is unsafe") from exc
     finally:
@@ -288,6 +305,11 @@ def _shared_skill_instructions(profile: Path) -> str:
         ("shared-skills", "agent-photo", "SKILL.md"),
         resource="shared procedure",
     )
+    prompting_rules = _read_fixed_file(
+        profile.parent.parent,
+        ("shared-skills", "agent-photo", "references", "photo-prompting-rules.md"),
+        resource="shared prompting rules",
+    )
     return (
         "# Native agent_photo execution\n\n"
         "Use this native tool, not terminal commands. A direct current user photo "
@@ -303,6 +325,8 @@ def _shared_skill_instructions(profile: Path) -> str:
         "once. After timeout, report the uncertain provider outcome rather than "
         "claiming no remote image could have been generated.\n\n"
         + shared
+        + "\n\n# Shared Photo Prompting Rules\n\n"
+        + prompting_rules
     )
 
 
@@ -336,7 +360,100 @@ def _clean_text(value: Any, field: str, maximum: int) -> str:
     return text
 
 
-def agent_photo_approval_subject(args: dict[str, Any]) -> dict[str, Any]:
+def _reference_selection(profile: Path, args: dict[str, Any]) -> tuple[list[tuple[str, bytes]], list[str]]:
+    sources = args.get("source_images", [])
+    ids = args.get("characters_photo_ids", [])
+    if not isinstance(sources, list) or not isinstance(ids, list) or len(sources) + len(ids) > 4:
+        raise ValueError("at most four extra image references are allowed")
+    photos = []
+    for value in ids:
+        if not isinstance(value, str):
+            raise ValueError("Characters photo IDs must be UUIDs")
+        try:
+            canonical = str(uuid.UUID(value))
+        except ValueError:
+            raise ValueError("Characters photo IDs must be UUIDs") from None
+        if canonical != value.lower():
+            raise ValueError("Characters photo IDs must be canonical UUIDs")
+        photos.append(canonical)
+    images = []
+    for value in sources:
+        if not isinstance(value, str) or "\\" in value or "\x00" in value:
+            raise ValueError("source_images must name scoped profile-relative images")
+        path = Path(value)
+        parts = path.parts
+        if path.is_absolute() or ".." in parts or not any(parts[:len(root)] == root and len(parts) > len(root) for root in _REFERENCE_ROOTS):
+            raise ValueError("source_images must name scoped profile-relative images")
+        if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
+            raise ValueError("source_images must be PNG, JPEG, or WebP images")
+        descriptor = _open_fixed_file(profile, parts, resource="reference image")
+        with os.fdopen(descriptor, "rb") as stream:
+            if os.fstat(stream.fileno()).st_size > _MAX_REFERENCE_BYTES:
+                raise ValueError("reference image exceeds 25 MiB")
+            content = stream.read(_MAX_REFERENCE_BYTES + 1)
+        if len(content) > _MAX_REFERENCE_BYTES:
+            raise ValueError("reference image exceeds 25 MiB")
+        from PIL import Image
+
+        try:
+            with Image.open(io.BytesIO(content)) as decoded:
+                if decoded.format not in {"PNG", "JPEG", "WEBP"}:
+                    raise ValueError("unsupported reference image format")
+                decoded.verify()
+        except Exception:
+            raise ValueError("reference image is invalid") from None
+        images.append((path.as_posix(), content))
+    return images, photos
+
+
+def _catalog_page(args: dict[str, Any]) -> tuple[int, int]:
+    offset, limit = args.get("offset", 0), args.get("limit", 5)
+    if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 5:
+        raise ValueError("catalog offset must be nonnegative and limit must be 1 to 5")
+    return offset, limit
+
+
+def _stage_references(profile: Path, selection):
+    images, photos = selection
+    temporary = tempfile.TemporaryDirectory(prefix=".agent-photo-references-", dir=profile)
+    try:
+        argv = []
+        for photo in photos:
+            argv.extend(("--characters-photo", photo))
+        for index, (name, content) in enumerate(images):
+            target = Path(temporary.name) / f"source-{index}{Path(name).suffix.lower()}"
+            descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(content)
+            argv.extend(("--source", str(target)))
+        return temporary, argv
+    except BaseException:
+        temporary.cleanup()
+        raise
+
+
+def _local_references(profile: Path, args: dict[str, Any]) -> str:
+    offset, limit = _catalog_page(args)
+    paths = []
+    for root in _REFERENCE_ROOTS:
+        directory = profile.joinpath(*root)
+        if directory.is_symlink():
+            continue
+        for candidate in directory.rglob("*"):
+            if candidate.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
+                continue
+            relative = candidate.relative_to(profile).as_posix()
+            try:
+                descriptor = _open_fixed_file(profile, candidate.relative_to(profile).parts, resource="reference image")
+                os.close(descriptor)
+            except (OSError, ValueError):
+                continue
+            paths.append(relative)
+    paths.sort()
+    return tool_result({"success": True, "action": "references", "images": paths[offset:offset + limit], "total": len(paths), "next_offset": offset + limit if offset + limit < len(paths) else None})
+
+
+def agent_photo_approval_subject(args: dict[str, Any], *, _selection=None) -> dict[str, Any]:
     """Bind one paid approval to this active character and fixed wrapper argv."""
     profile = _active_personal_profile()
     prompt = _clean_text(args.get("prompt"), "prompt", _MAX_PROMPT_CHARS)
@@ -344,11 +461,14 @@ def agent_photo_approval_subject(args: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(model, str) or model not in {"gemini", "grok", "seedream"}:
         raise ValueError("model must be one of: gemini, grok, seedream")
     providers = _generation_providers(args)
+    images, photos = _selection if _selection is not None else _reference_selection(profile, args)
     return {
         "profile_name": profile.name,
         "profile_path": str(profile),
         "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
         "model": model,
+        "source_images": [{"path": name, "sha256": hashlib.sha256(content).hexdigest()} for name, content in images],
+        "characters_photo_ids": photos,
         "output_options": ["--approved", "--model", model, "--"],
         "provider_sequence": providers,
         "attempts_per_provider": 1,
@@ -493,7 +613,8 @@ def _trusted_wrapper_fd() -> int:
 
 
 def _run_wrapper(
-    profile: Path, command: list[str], action: str, *, timeout: float | None = None
+    profile: Path, command: list[str], action: str, *, timeout: float | None = None,
+    catalog_page: tuple[int, int] = (0, 5),
 ) -> str:
     wrapper_fd = _trusted_wrapper_fd()
     try:
@@ -533,6 +654,19 @@ def _run_wrapper(
         os.close(wrapper_fd)
         os.close(profile_fd)
 
+    if action == "characters_status" and completed.returncode == 0:
+        try:
+            catalog = json.loads(completed.stdout)
+            photos = catalog["photos"]
+            if not isinstance(photos, list):
+                raise ValueError("invalid catalog")
+            offset, limit = catalog_page
+            compact = []
+            for photo in photos[offset:offset + limit]:
+                compact.append({key: str(photo[key])[:200] for key in ("id", "role", "roleLabel", "caption") if photo.get(key) is not None})
+            return tool_result({"success": True, "action": action, "photos": compact, "total": len(photos), "next_offset": offset + limit if offset + limit < len(photos) else None})
+        except (KeyError, TypeError, ValueError, AttributeError):
+            return tool_error("agent-photo Characters catalog is invalid")
     output = ((completed.stdout or "") + (completed.stderr or "")).strip()
     if len(output) > _MAX_OUTPUT_CHARS:
         output = output[:_MAX_OUTPUT_CHARS] + "\n[output truncated]"
@@ -559,10 +693,11 @@ def agent_photo_tool(
         return tool_error("agent-photo arguments must be an object")
     action = args.get("action")
     if not isinstance(action, str) or action not in _ACTION_ALLOWED_KEYS:
-        return tool_error("action must be one of: instructions, preview, characters_status, generate")
+        return tool_error("action must be one of: instructions, references, preview, characters_status, generate")
     unexpected = set(args) - _ACTION_ALLOWED_KEYS[action]
     if unexpected:
         return tool_error("agent-photo does not accept commands, paths, or extra options")
+    staging = None
     try:
         profile = _active_personal_profile()
         if action == "instructions":
@@ -574,13 +709,17 @@ def agent_photo_tool(
                 }
             )
         if action == "characters_status":
-            return _run_wrapper(profile, ["--characters-status"], action)
+            return _run_wrapper(profile, ["--characters-status"], action, catalog_page=_catalog_page(args))
+        if action == "references":
+            return _local_references(profile, args)
 
         prompt = _clean_text(args.get("prompt"), "prompt", _MAX_PROMPT_CHARS)
+        selection = _reference_selection(profile, args)
         if action == "preview":
             if prompt.startswith("-"):
                 return tool_error("preview prompt must not start with an option")
-            return _run_wrapper(profile, ["--preview-prompt", prompt], action)
+            staging, reference_argv = _stage_references(profile, selection)
+            return _run_wrapper(profile, [*reference_argv, "--preview-prompt", prompt], action)
 
         model = args.get("model", "gemini")
         if not isinstance(model, str):
@@ -594,9 +733,10 @@ def agent_photo_tool(
             session_id=session_id,
             tool_call_id=tool_call_id,
             turn_id=turn_id,
-            subject=agent_photo_approval_subject(args),
+            subject=agent_photo_approval_subject(args, _selection=selection),
         ):
             return tool_error("agent-photo generation requires executor approval provenance")
+        staging, reference_argv = _stage_references(profile, selection)
         providers_attempted: list[str] = []
         deadline = time.monotonic() + _GENERATION_TIMEOUT_SECONDS
         for provider in _generation_providers(args):
@@ -616,7 +756,7 @@ def agent_photo_tool(
             result = json.loads(
                 _run_wrapper(
                     profile,
-                    ["--approved", "--model", provider, "--", prompt],
+                    ["--approved", "--model", provider, *reference_argv, "--", prompt],
                     action,
                     timeout=attempt_timeout,
                 )
@@ -627,6 +767,9 @@ def agent_photo_tool(
         return tool_result(result)
     except (OSError, ValueError) as exc:
         return tool_error(str(exc))
+    finally:
+        if staging is not None:
+            staging.cleanup()
 
 
 registry.register(
@@ -636,5 +779,7 @@ registry.register(
     handler=agent_photo_tool,
     check_fn=check_personal_agent_photo_requirements,
     emoji="📷",
-    max_result_size_chars=_MAX_OUTPUT_CHARS,
+    # Instructional content must remain complete, like skill_view. Catalogs
+    # are paged and subprocess output is bounded independently above.
+    max_result_size_chars=float("inf"),
 )
