@@ -301,6 +301,60 @@ def test_request_linked_handoff_is_claimed_from_its_named_board(
         assert kb.get_task(conn, created["task_id"]) is None
 
 
+@pytest.mark.parametrize(
+    ("healthy_slug", "broken_slug"),
+    [
+        (kb.DEFAULT_BOARD, "zz-broken"),
+        ("zz-healthy", "aa-broken"),
+    ],
+)
+def test_broken_board_does_not_discard_or_delay_healthy_pickup(
+    board,
+    monkeypatch,
+    healthy_slug,
+    broken_slug,
+):
+    from hermes_cli.workforce_handoffs import create_handoff
+
+    monkeypatch.delenv("HERMES_KANBAN_DB")
+    if healthy_slug == kb.DEFAULT_BOARD:
+        healthy_board = board
+    else:
+        kb.create_board(healthy_slug)
+        healthy_board = kb.kanban_db_path(healthy_slug).resolve()
+    broken_board = kb.kanban_db_path(broken_slug).resolve()
+    broken_board.parent.mkdir(parents=True)
+    broken_board.write_bytes(b"not a sqlite database")
+
+    now = datetime.now(timezone.utc)
+    with kb.connect_closing(healthy_board) as conn:
+        created = create_handoff(
+            conn,
+            source_agent="builder",
+            target_agent="director",
+            expected_outcome="Preserve pickup across a broken board",
+            acceptance_test="The healthy-board pickup job is admitted",
+            evidence_references=["execution:per-board-isolation"],
+            acknowledgment_deadline=(now + timedelta(minutes=2)).isoformat(),
+            checkpoint_at=(now + timedelta(minutes=20)).isoformat(),
+        )
+
+    runner = Runner()
+    runner._active_profile_name = lambda: "director"
+    runner._kanban_pickup_workforce_handoff = AsyncMock()
+    asyncio.run(finish_tick(runner))
+
+    runner._kanban_pickup_workforce_handoff.assert_awaited_once()
+    pickup = runner._kanban_pickup_workforce_handoff.call_args.args[0]
+    assert pickup["task_id"] == created["task_id"]
+    assert pickup["database_path"] == healthy_board
+    with kb.connect_closing(healthy_board) as conn:
+        assert [
+            event.kind for event in kb.list_events(conn, created["task_id"])
+        ].count("workforce_handoff_pickup_claimed") == 1
+    assert broken_board.read_bytes() == b"not a sqlite database"
+
+
 def test_pickup_without_adapter_or_sub_does_not_block_next_tick(board, monkeypatch):
     runner = Runner()
     monkeypatch.setattr(kb, "has_coordination_tick_work", lambda *a, **k: True)

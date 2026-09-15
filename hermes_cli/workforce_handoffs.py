@@ -440,6 +440,42 @@ def acknowledge_handoff(
             or _body(current_task) != payload
         ):
             raise ValueError("workforce handoff changed before acknowledgment")
+        try:
+            current_assignee = org.validate_execution_profile(
+                str(current_task.assignee or "")
+            ).agent
+        except ValueError as exc:
+            raise ValueError(
+                "workforce handoff route changed before acknowledgment"
+            ) from exc
+        if current_assignee != target:
+            raise ValueError("workforce handoff route changed before acknowledgment")
+        if (
+            not owned_failure
+            and payload.get("delivery_contract_version") == 1
+        ):
+            try:
+                current_creator = org.validate_execution_profile(
+                    str(current_task.created_by or "")
+                ).agent
+            except ValueError as exc:
+                raise ValueError(
+                    "workforce handoff route changed before acknowledgment"
+                ) from exc
+            if current_creator != source:
+                raise ValueError(
+                    "workforce handoff route changed before acknowledgment"
+                )
+            if not v1_handoff_creation_is_current(
+                conn,
+                current_task,
+                payload,
+                source_agent=source,
+                target_agent=target,
+            ):
+                raise ValueError(
+                    "workforce handoff contract changed before acknowledgment"
+                )
         if not handoff_request_is_active(conn, current_task, now=accepted_at):
             raise ValueError(
                 "inherited coordination request is unsupported or no longer active"
