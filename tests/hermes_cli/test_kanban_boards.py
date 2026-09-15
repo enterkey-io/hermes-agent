@@ -16,6 +16,7 @@ Covers the pieces added when boards became a first-class concept:
 from __future__ import annotations
 
 import json
+from contextvars import Context
 import os
 import subprocess
 import sys
@@ -121,6 +122,16 @@ class TestPathResolution:
             ("default", canonical),
             ("side-project", named),
         ]
+
+        with pytest.raises(RuntimeError, match="scope exit"):
+            with kb.scoped_board_database("default", canonical):
+                assert kb.kanban_db_path() == canonical
+                assert kb.get_current_board() == "default"
+                assert Context().run(kb.kanban_db_path) == named
+                assert os.environ["HERMES_KANBAN_DB"] == str(named)
+                raise RuntimeError("scope exit")
+        assert kb.kanban_db_path() == named
+        assert kb.get_current_board() == "side-project"
 
 
 # ---------------------------------------------------------------------------
@@ -358,5 +369,4 @@ class TestCLI:
         assert titlesA == ["Task A"]
         assert titlesB == ["Task B"]
         assert titlesD == []
-
 

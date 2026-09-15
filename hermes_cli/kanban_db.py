@@ -718,6 +718,21 @@ _CURRENT_BOARD_OVERRIDE: ContextVar[str | None] = ContextVar(
     "hermes_kanban_current_board_override",
     default=None,
 )
+_BOARD_DATABASE_OVERRIDE: ContextVar[tuple[str, Path] | None] = ContextVar(
+    "hermes_kanban_board_database_override", default=None,
+)
+
+
+@contextlib.contextmanager
+def scoped_board_database(slug: str, database_path: Path):
+    """Bind a global scanner's board through locks, helpers, and worker launch."""
+    normalized = _normalize_board_slug(slug) or DEFAULT_BOARD
+    token = _BOARD_DATABASE_OVERRIDE.set((normalized, database_path))
+    try:
+        with scoped_current_board(normalized):
+            yield
+    finally:
+        _BOARD_DATABASE_OVERRIDE.reset(token)
 
 
 @contextlib.contextmanager
@@ -904,6 +919,8 @@ def kanban_db_path(board: Optional[str] = None) -> Path:
 
     Resolution (highest precedence first):
 
+    0. :func:`scoped_board_database` binds a global scan's exact database
+       for the current context, including downstream worker launch.
     1. ``HERMES_KANBAN_DB`` env var — pins the path directly. Honoured for
        back-compat and for the dispatcher→worker handoff (defense in
        depth: dispatcher injects this into worker env so workers are
@@ -913,6 +930,9 @@ def kanban_db_path(board: Optional[str] = None) -> Path:
     3. Board ``default`` → ``<root>/kanban.db`` (back-compat path).
        Other boards → ``<root>/kanban/boards/<slug>/kanban.db``.
     """
+    scoped = _BOARD_DATABASE_OVERRIDE.get()
+    if scoped is not None:
+        return scoped[1]
     override = os.environ.get("HERMES_KANBAN_DB", "").strip()
     if override:
         return Path(override).expanduser()
@@ -959,6 +979,14 @@ def workspaces_root(board: Optional[str] = None) -> Path:
     preserved. Other boards use ``<root>/kanban/boards/<slug>/workspaces/``.
     """
     override = os.environ.get("HERMES_KANBAN_WORKSPACES_ROOT", "").strip()
+    scoped = _BOARD_DATABASE_OVERRIDE.get()
+    if scoped is not None:
+        # A named worker's workspace pin belongs to that board, not every
+        # board visited by a global dispatcher sharing this process.
+        pinned = os.environ.get("HERMES_KANBAN_BOARD", "").strip() or DEFAULT_BOARD
+        if pinned != scoped[0]:
+            override = ""
+        board = scoped[0]
     if override:
         return Path(override).expanduser()
     slug = _normalize_board_slug(board)

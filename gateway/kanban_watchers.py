@@ -1785,8 +1785,7 @@ class GatewayKanbanWatchersMixin:
             str, tuple[tuple[str, int | None, int | None], float]
         ] = {}
 
-        def _board_db_fingerprint(slug: str) -> tuple[str, int | None, int | None]:
-            path = _kb.kanban_db_path(slug)
+        def _board_db_fingerprint(path: Path) -> tuple[str, int | None, int | None]:
             try:
                 resolved = str(path.expanduser().resolve())
             except Exception:
@@ -1809,7 +1808,7 @@ class GatewayKanbanWatchersMixin:
                 or "database disk image is malformed" in msg
             )
 
-        def _tick_once_for_board(slug: str) -> "Optional[object]":
+        def _tick_once_for_board(slug: str, database_path: Path) -> "Optional[object]":
             """Run one dispatch_once for a specific board.
 
             Runs in a worker thread via `asyncio.to_thread`. `board=slug`
@@ -1819,7 +1818,7 @@ class GatewayKanbanWatchersMixin:
             connection handle or accidentally claim across each other.
             """
             conn = None
-            fingerprint = _board_db_fingerprint(slug)
+            fingerprint = _board_db_fingerprint(database_path)
             disabled_entry = disabled_corrupt_boards.get(slug)
             if disabled_entry is not None:
                 disabled_fingerprint, disabled_at = disabled_entry
@@ -1843,24 +1842,25 @@ class GatewayKanbanWatchersMixin:
                     )
                 disabled_corrupt_boards.pop(slug, None)
             try:
-                conn = _kb.connect(board=slug)
+                conn = _kb.connect(database_path)
                 # `connect()` runs the schema + idempotent migration on
                 # first open per process; the previous explicit
                 # `init_db()` call here busted the per-process cache and
                 # re-ran the migration on a second connection, racing
                 # the first. See the matching comment in
                 # `_kanban_notifier_watcher` and issue #21378.
-                return _kb.dispatch_once(
-                    conn,
-                    board=slug,
-                    max_spawn=max_spawn,
-                    max_in_progress=max_in_progress,
-                    failure_limit=failure_limit,
-                    stale_timeout_seconds=stale_timeout_seconds,
-                    default_assignee=default_assignee,
-                    max_in_progress_per_profile=max_in_progress_per_profile,
-                    reconcile_orphans=reconcile_orphans,
-                )
+                with _kb.scoped_board_database(slug, database_path):
+                    return _kb.dispatch_once(
+                        conn,
+                        board=slug,
+                        max_spawn=max_spawn,
+                        max_in_progress=max_in_progress,
+                        failure_limit=failure_limit,
+                        stale_timeout_seconds=stale_timeout_seconds,
+                        default_assignee=default_assignee,
+                        max_in_progress_per_profile=max_in_progress_per_profile,
+                        reconcile_orphans=reconcile_orphans,
+                    )
             except sqlite3.DatabaseError as exc:
                 if _is_corrupt_board_db_error(exc):
                     disabled_corrupt_boards[slug] = (fingerprint, time.monotonic())
@@ -1905,14 +1905,11 @@ class GatewayKanbanWatchersMixin:
             when users create a new board mid-run: no restart required,
             the next tick picks it up automatically.
             """
-            try:
-                boards = _kb.list_boards(include_archived=False)
-            except Exception:
-                boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
             out: list[tuple[str, "Optional[object]"]] = []
-            for b in boards:
-                slug = b.get("slug") or _kb.DEFAULT_BOARD
-                out.append((slug, _tick_once_for_board(slug)))
+            for slug, database_path in _kb.list_physical_board_db_paths(
+                include_archived=False,
+            ):
+                out.append((slug, _tick_once_for_board(slug, database_path)))
             return out
 
         def _ready_nonempty() -> bool:
@@ -1934,15 +1931,12 @@ class GatewayKanbanWatchersMixin:
             # fire a false "dispatcher stuck" warning that never clears. Shares
             # the exact gate the dispatcher uses so the two can't drift.
             _review_probe = _kb.review_dispatch_enabled()
-            try:
-                boards = _kb.list_boards(include_archived=False)
-            except Exception:
-                boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
-            for b in boards:
-                slug = b.get("slug") or _kb.DEFAULT_BOARD
+            for _slug, database_path in _kb.list_physical_board_db_paths(
+                include_archived=False,
+            ):
                 conn = None
                 try:
-                    conn = _kb.connect(board=slug)
+                    conn = _kb.connect(database_path)
                     if _kb.has_spawnable_ready(conn):
                         return True
                     if _review_probe and _kb.has_spawnable_review(conn):
@@ -1988,23 +1982,14 @@ class GatewayKanbanWatchersMixin:
                     "kanban auto-decompose: import failed (%s); skipping", exc,
                 )
                 return 0
-            try:
-                boards = _kb.list_boards(include_archived=False)
-            except Exception:
-                boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
             attempted = 0
             successes = 0
-            for b in boards:
-                slug = b.get("slug") or _kb.DEFAULT_BOARD
+            for slug, database_path in _kb.list_physical_board_db_paths(
+                include_archived=False,
+            ):
                 if attempted >= auto_decompose_per_tick:
                     break
-                # Pin this board for the duration of the call — same
-                # pattern as the dashboard specify endpoint. The
-                # decomposer module connects with no board kwarg and
-                # relies on the env var.
-                prev_env = os.environ.get("HERMES_KANBAN_BOARD")
-                try:
-                    os.environ["HERMES_KANBAN_BOARD"] = slug
+                with _kb.scoped_board_database(slug, database_path):
                     try:
                         triage_ids = _decomp.list_triage_ids()
                     except Exception as exc:
@@ -2046,11 +2031,6 @@ class GatewayKanbanWatchersMixin:
                                 "kanban auto-decompose [%s]: %s skipped: %s",
                                 slug, tid, outcome.reason,
                             )
-                finally:
-                    if prev_env is None:
-                        os.environ.pop("HERMES_KANBAN_BOARD", None)
-                    else:
-                        os.environ["HERMES_KANBAN_BOARD"] = prev_env
             return successes
 
         logger.info(

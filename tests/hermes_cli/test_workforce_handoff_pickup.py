@@ -650,18 +650,52 @@ def test_pickup_runs_actual_cli_and_real_registry_with_loopback_provider(
             assert task.status == "running"
             assert task.assignee == target_agent
         else:
+            from gateway.kanban_watchers import GatewayKanbanWatchersMixin
+
             monkeypatch.setattr(
                 kanban_db,
                 "_resolve_hermes_argv",
                 lambda: [sys.executable, "-m", "hermes_cli.main"],
             )
+            named = root / "kanban/boards/side-project/kanban.db"
+            kanban_db.init_db(named)
+            monkeypatch.setenv("HERMES_KANBAN_BOARD", "side-project")
+            monkeypatch.setenv("HERMES_KANBAN_DB", str(named))
+            monkeypatch.setenv(
+                "HERMES_KANBAN_WORKSPACES_ROOT", str(named.parent / "workspaces")
+            )
+            monkeypatch.setattr("hermes_cli.config.load_config", lambda: {
+                "kanban": {
+                    "dispatch_in_gateway": True,
+                    "auto_decompose": False,
+                    "max_spawn": 1,
+                    "max_in_progress": 2,
+                    "reconcile_orphans": False,
+                },
+            })
+            runner = GatewayKanbanWatchersMixin()
+            runner._running = True
+            real_sleep = asyncio.sleep
+
+            async def stop_after_tick(delay):
+                if delay != 5:
+                    runner._running = False
+                await real_sleep(0)
+
+            monkeypatch.setattr(asyncio, "sleep", stop_after_tick)
+            try:
+                asyncio.run(runner._kanban_dispatcher_watcher())
+            finally:
+                runner._release_kanban_dispatcher_lock()
             with kanban_db.connect_closing(db_path) as conn:
-                dispatch = kanban_db.dispatch_once(conn, max_spawn=1)
                 running = kanban_db.get_task(conn, created["task_id"])
-            assert dispatch.spawned[0][:2] == (created["task_id"], target_agent)
             assert running is not None
             assert running.status == "running"
             assert running.worker_pid is not None
+            assert Path(running.workspace_path).parent == root / "kanban/workspaces"
+            assert kanban_db.kanban_db_path() == named
+            with kanban_db.connect_closing(named) as conn:
+                assert kanban_db.get_task(conn, created["task_id"]) is None
 
             deadline = time.monotonic() + 30
             terminal = None
