@@ -245,27 +245,28 @@ class GatewayKanbanWatchersMixin:
 
         def collect():
             # Accepted requests stay on their originating board. Scan every
-            # live board once while keeping the one-turn-per-profile limit
-            # global across the tick.
+            # live board while keeping the one-turn-per-profile limit global
+            # across the tick. The canonical entry is explicit because a
+            # worker's board pin redirects list_boards() metadata paths.
             try:
                 boards = kb.list_boards(include_archived=False)
             except Exception:
-                boards = [{
-                    "slug": kb.DEFAULT_BOARD,
-                    "db_path": str(kb.canonical_coordination_db_path()),
-                }]
+                boards = []
+            boards = [{"slug": kb.DEFAULT_BOARD}, *boards]
             deliveries = []
             pickups = []
             available_profiles = set(idle_profiles)
             seen_db_paths: set[Path] = set()
+            scan_boards: list[tuple[str, Path]] = []
             for board in boards:
                 slug = kb.DEFAULT_BOARD
                 path = None
                 try:
-                    raw_path = board.get("db_path")
                     slug = board.get("slug") or kb.DEFAULT_BOARD
-                    path = Path(
-                        raw_path or kb.kanban_db_path(str(slug))
+                    path = (
+                        kb.canonical_coordination_db_path()
+                        if slug == kb.DEFAULT_BOARD
+                        else kb.board_dir(str(slug)) / "kanban.db"
                     ).expanduser().resolve()
                     if path in seen_db_paths:
                         continue
@@ -277,6 +278,19 @@ class GatewayKanbanWatchersMixin:
                         include_unowned=include_unowned,
                     ):
                         continue
+                    scan_boards.append((str(slug), path))
+                except Exception as exc:
+                    logger.warning(
+                        "kanban coordination: board %s (%s) probe failed: %s",
+                        slug,
+                        path or "unresolved",
+                        exc,
+                    )
+
+            # Final returns close an accepted user request, so allocate every
+            # board's return work before new handoff pickups consume a profile.
+            for slug, path in scan_boards:
+                try:
                     conn = kb.connect(path)
                     try:
                         available_deliveries = (
@@ -300,7 +314,23 @@ class GatewayKanbanWatchersMixin:
                                 "execution_profile": execution_profile,
                             })
                             available_profiles.remove(execution_profile)
-                        if pickup_allowed:
+                    finally:
+                        conn.close()
+                except Exception as exc:
+                    logger.warning(
+                        "kanban coordination: board %s (%s) return scan failed: %s",
+                        slug,
+                        path,
+                        exc,
+                    )
+
+            if pickup_allowed:
+                for slug, path in scan_boards:
+                    if not available_profiles:
+                        break
+                    try:
+                        conn = kb.connect(path)
+                        try:
                             pickup_profiles = (
                                 available_profiles & profile_agents.keys()
                             )
@@ -315,15 +345,15 @@ class GatewayKanbanWatchersMixin:
                                         "database_path": path,
                                     })
                                     available_profiles.remove(profile)
-                    finally:
-                        conn.close()
-                except Exception as exc:
-                    logger.warning(
-                        "kanban coordination: board %s (%s) failed: %s",
-                        slug,
-                        path or "unresolved",
-                        exc,
-                    )
+                        finally:
+                            conn.close()
+                    except Exception as exc:
+                        logger.warning(
+                            "kanban coordination: board %s (%s) pickup scan failed: %s",
+                            slug,
+                            path,
+                            exc,
+                        )
             return deliveries, pickups
 
         deliveries, pickups = await asyncio.to_thread(collect)

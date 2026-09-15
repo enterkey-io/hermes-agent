@@ -355,6 +355,86 @@ def test_broken_board_does_not_discard_or_delay_healthy_pickup(
     assert broken_board.read_bytes() == b"not a sqlite database"
 
 
+def test_final_return_on_later_board_has_priority_over_default_pickup(
+    board,
+    monkeypatch,
+):
+    from hermes_cli.workforce_handoffs import create_handoff
+
+    monkeypatch.delenv("HERMES_KANBAN_DB")
+    kb.create_board("zz-final-return")
+    final_board = kb.kanban_db_path("zz-final-return").resolve()
+    _, request = ready_request(final_board)
+    now = datetime.now(timezone.utc)
+    with kb.connect_closing(board) as conn:
+        created = create_handoff(
+            conn,
+            source_agent="director",
+            target_agent="aurora",
+            expected_outcome="Run only after the final return",
+            acceptance_test="The user-facing return receives profile capacity first",
+            evidence_references=["execution:final-return-priority"],
+            acknowledgment_deadline=(now + timedelta(minutes=2)).isoformat(),
+            checkpoint_at=(now + timedelta(minutes=20)).isoformat(),
+        )
+
+    runner = Runner()
+    runner._kanban_deliver_coordination_return = AsyncMock()
+    runner._kanban_pickup_workforce_handoff = AsyncMock()
+    asyncio.run(finish_tick(runner))
+
+    runner._kanban_deliver_coordination_return.assert_awaited_once()
+    runner._kanban_pickup_workforce_handoff.assert_not_awaited()
+    delivery = runner._kanban_deliver_coordination_return.call_args.args[0]
+    assert delivery["request_root_id"] == request.id
+    assert Path(delivery["db_path"]) == final_board
+    with kb.connect_closing(board) as conn:
+        assert all(
+            event.kind != "workforce_handoff_pickup_claimed"
+            for event in kb.list_events(conn, created["task_id"])
+        )
+
+
+def test_canonical_pickup_survives_named_board_environment_redirect(
+    board,
+    monkeypatch,
+):
+    from hermes_cli.workforce_handoffs import create_handoff
+
+    monkeypatch.delenv("HERMES_KANBAN_DB")
+    kb.create_board("side-project")
+    named_board = kb.kanban_db_path("side-project").resolve()
+    monkeypatch.setenv("HERMES_KANBAN_BOARD", "side-project")
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(named_board))
+    assert {
+        entry["db_path"]
+        for entry in kb.list_boards(include_archived=False)
+    } == {str(named_board)}
+
+    now = datetime.now(timezone.utc)
+    with kb.connect_closing(board) as conn:
+        created = create_handoff(
+            conn,
+            source_agent="builder",
+            target_agent="director",
+            expected_outcome="Claim the canonical handoff despite the board pin",
+            acceptance_test="The canonical pickup job starts exactly once",
+            evidence_references=["execution:canonical-scan"],
+            acknowledgment_deadline=(now + timedelta(minutes=2)).isoformat(),
+            checkpoint_at=(now + timedelta(minutes=20)).isoformat(),
+        )
+
+    runner = Runner()
+    runner._active_profile_name = lambda: "director"
+    runner._kanban_pickup_workforce_handoff = AsyncMock()
+    asyncio.run(finish_tick(runner))
+
+    runner._kanban_pickup_workforce_handoff.assert_awaited_once()
+    pickup = runner._kanban_pickup_workforce_handoff.call_args.args[0]
+    assert pickup["task_id"] == created["task_id"]
+    assert pickup["database_path"] == board
+
+
 def test_pickup_without_adapter_or_sub_does_not_block_next_tick(board, monkeypatch):
     runner = Runner()
     monkeypatch.setattr(kb, "has_coordination_tick_work", lambda *a, **k: True)
