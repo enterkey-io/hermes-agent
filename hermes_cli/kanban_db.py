@@ -160,6 +160,10 @@ DEFAULT_COORDINATION_MAX_MODEL_CALLS = 40
 DEFAULT_COORDINATION_FINAL_CALL_RESERVE = 2
 DEFAULT_COORDINATION_CHECKPOINT_SECONDS = 20 * 60
 DEFAULT_COORDINATION_MAX_TRANSIENT_RETRIES = 1
+WORKFORCE_HANDOFF_INHERITABLE_REQUEST_KINDS = frozenset({
+    "origin_request",
+    "owned_operational_failure",
+})
 INTERNAL_FAILURE_MAX_LEAF_LAUNCHES = 2
 INTERNAL_FAILURE_MAX_CONCURRENT_LEAF = 1
 INTERNAL_FAILURE_MAX_MODEL_CALLS = 20
@@ -5789,13 +5793,14 @@ def has_coordination_tick_work(
                             "coordination_requests WHERE id = ?",
                             (request_root_id,),
                         ).fetchone()
-                        expected_kind = (
-                            "owned_operational_failure"
-                            if owned_failure else "origin_request"
+                        allowed_request_kinds = (
+                            {"owned_operational_failure"}
+                            if owned_failure
+                            else WORKFORCE_HANDOFF_INHERITABLE_REQUEST_KINDS
                         )
                         if (
                             request is None
-                            or request["kind"] != expected_kind
+                            or request["kind"] not in allowed_request_kinds
                             or request["status"] != "active"
                             or now >= int(request["checkpoint_at"])
                         ):

@@ -193,10 +193,14 @@ def create_handoff(
             if request is None:
                 raise ValueError(f"unknown coordination request root: {request_root_id}")
             if (
-                request.status != "active"
+                request.kind
+                not in kanban_db.WORKFORCE_HANDOFF_INHERITABLE_REQUEST_KINDS
+                or request.status != "active"
                 or int(time.time()) >= request.checkpoint_at
             ):
-                raise ValueError("inherited coordination request is no longer active")
+                raise ValueError(
+                    "inherited coordination request is unsupported or no longer active"
+                )
             if (
                 origin_session_id != request.origin_session_id
                 or origin_message_id != request.origin_message_id
@@ -267,12 +271,16 @@ def create_handoff(
                 current_source is None
                 or current_source.request_root_id != request_root_id
                 or current_request is None
+                or current_request.kind
+                not in kanban_db.WORKFORCE_HANDOFF_INHERITABLE_REQUEST_KINDS
                 or current_request.status != "active"
                 or int(time.time()) >= current_request.checkpoint_at
                 or origin_session_id != current_request.origin_session_id
                 or origin_message_id != current_request.origin_message_id
             ):
-                raise ValueError("inherited coordination request is no longer active")
+                raise ValueError(
+                    "inherited coordination request is unsupported or no longer active"
+                )
         existing = conn.execute(
             "SELECT id FROM tasks WHERE idempotency_key = ? "
             "AND status != 'archived' ORDER BY created_at DESC LIMIT 1",
@@ -529,7 +537,8 @@ def _claim_workforce_handoff_pickup(
                 )
                 if (
                     request is None
-                    or request.kind != "origin_request"
+                    or request.kind
+                    not in kanban_db.WORKFORCE_HANDOFF_INHERITABLE_REQUEST_KINDS
                     or request.status != "active"
                     or claimed_at >= request.checkpoint_at
                 ):

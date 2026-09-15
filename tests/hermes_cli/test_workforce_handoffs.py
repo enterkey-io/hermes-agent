@@ -356,6 +356,144 @@ def test_ordinary_handoff_inherits_existing_request_from_trusted_source(
     assert event.payload["coordination_origin_message_id"] == "origin-message"
 
 
+def test_ordinary_handoff_inside_owned_failure_request_is_visible_and_claimed(
+    conn, monkeypatch,
+):
+    monkeypatch.setenv(
+        "HERMES_WORKFORCE_ORG",
+        str(Path(__file__).parents[2] / "workforce" / "organization.yaml"),
+    )
+    now = int(time.time())
+    owned_root = create_handoff(
+        conn,
+        source_agent="aurora",
+        target_agent="alina",
+        expected_outcome="Repair the owned operational failure",
+        acceptance_test="Two later executions succeed",
+        evidence_references=["execution:failure-1"],
+        acknowledgment_deadline=_iso(now + 60),
+        checkpoint_at=_iso(now + 3600),
+        organization=ORG,
+        context={
+            "kind": "owned_operational_failure",
+            "technical_owner": "alina",
+            "director": "aurora",
+            "workflow_id": "scheduled-integration",
+            "event_id": "failure-1",
+        },
+        requires_source_acceptance=True,
+    )
+    root_pickup = claim_workforce_handoff_pickup(
+        conn,
+        target_agent="alina",
+        organization=ORG,
+        now=now + 1,
+    )
+    assert root_pickup is not None
+    request = kanban_db.get_coordination_request(
+        conn, root_pickup["request_root_id"]
+    )
+    assert request is not None
+    assert request.kind == "owned_operational_failure"
+
+    child = create_handoff(
+        conn,
+        source_agent="alina",
+        target_agent="aurora",
+        expected_outcome="Decide the bounded host repair",
+        acceptance_test="The decision is recorded with evidence",
+        evidence_references=[f"kanban:{owned_root['task_id']}"],
+        acknowledgment_deadline=_iso(now + 120),
+        checkpoint_at=_iso(now + 1800),
+        organization=ORG,
+        coordination_source_task_id=owned_root["task_id"],
+        session_id=request.origin_session_id,
+        coordination_origin_message_id=request.origin_message_id,
+    )
+    child_task = kanban_db.get_task(conn, child["task_id"])
+    assert child_task is not None
+    assert child_task.request_root_id == request.id
+    db_path = Path(conn.execute("PRAGMA database_list").fetchone()[2])
+    assert kanban_db.has_coordination_tick_work(
+        db_path,
+        notifier_agents={"aurora"},
+        notifier_profiles={"aurora"},
+    )
+
+    child_pickup = claim_workforce_handoff_pickup(
+        conn,
+        target_agent="aurora",
+        organization=ORG,
+        now=now + 2,
+    )
+
+    assert child_pickup == {
+        "task_id": child["task_id"],
+        "target_agent": "aurora",
+        "source_agent": "alina",
+        "request_root_id": request.id,
+        "claim_kind": "ordinary",
+        "claimed_at": now + 2,
+    }
+    assert claim_workforce_handoff_pickup(
+        conn,
+        target_agent="aurora",
+        organization=ORG,
+        now=now + 3,
+    ) is None
+
+
+def test_ordinary_handoff_rejects_unknown_inherited_request_kind(conn):
+    now = int(time.time())
+    root_id = kanban_db.create_task(
+        conn,
+        title="Unsupported coordination root",
+        assignee="alina",
+        session_id="unsupported-session",
+    )
+    kanban_db.add_notify_sub(
+        conn,
+        task_id=root_id,
+        platform="telegram",
+        chat_id="unsupported-chat",
+        notifier_profile="alina",
+        delivery_mode="wake",
+    )
+    request = kanban_db.create_coordination_request(
+        conn,
+        root_task_id=root_id,
+        origin_session_id="unsupported-session",
+        origin_message_id="unsupported-message",
+        organization=ORG,
+    )
+    with kanban_db.write_txn(conn):
+        conn.execute(
+            "UPDATE coordination_requests SET kind = 'future_unknown' WHERE id = ?",
+            (request.id,),
+        )
+
+    with pytest.raises(ValueError, match="unsupported"):
+        create_handoff(
+            conn,
+            source_agent="alina",
+            target_agent="aurora",
+            expected_outcome="Handle unsupported nested work",
+            acceptance_test="The work is never stranded",
+            evidence_references=[f"kanban:{root_id}"],
+            acknowledgment_deadline=_iso(now + 60),
+            checkpoint_at=_iso(now + 120),
+            organization=ORG,
+            coordination_source_task_id=root_id,
+            session_id="unsupported-session",
+            coordination_origin_message_id="unsupported-message",
+        )
+
+    assert conn.execute(
+        "SELECT COUNT(*) FROM tasks WHERE id != ?",
+        (root_id,),
+    ).fetchone()[0] == 0
+
+
 def test_coordinated_handoff_rejects_route_mismatch_and_inactive_pickup(
     conn, monkeypatch,
 ):
