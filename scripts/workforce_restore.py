@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import stat
 import tarfile
 import tempfile
 from typing import Any
@@ -42,20 +43,57 @@ def verify_backup(backup: Path) -> None:
 
 
 def _atomic_write(path: Path, content: bytes, mode: int) -> None:
+    """Replace a regular file with its existing owner and recover sync failures."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(temp_name, mode)
-        os.replace(temp_name, path)
-    finally:
+        before_stat = path.lstat()
+    except FileNotFoundError:
+        before_stat = None
+    if before_stat is not None and not stat.S_ISREG(before_stat.st_mode):
+        raise ValueError(f"atomic write requires a regular file: {path}")
+    before = path.read_bytes() if before_stat is not None else None
+    replaced = False
+
+    def sync_directory() -> None:
+        if os.name == "nt":
+            return
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
-            os.unlink(temp_name)
-        except FileNotFoundError:
-            pass
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+    def replace_bytes(value: bytes, permissions: int) -> None:
+        nonlocal replaced
+        fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(value)
+                handle.flush()
+                if before_stat is not None and hasattr(os, "fchown"):
+                    os.fchown(handle.fileno(), before_stat.st_uid, before_stat.st_gid)
+                os.chmod(temp_name, permissions)
+                os.fsync(handle.fileno())
+            os.replace(temp_name, path)
+            replaced = True
+            sync_directory()
+        finally:
+            try:
+                os.unlink(temp_name)
+            except FileNotFoundError:
+                pass
+
+    try:
+        replace_bytes(content, mode)
+    except Exception:
+        if replaced:
+            if before is not None:
+                assert before_stat is not None
+                replace_bytes(before, stat.S_IMODE(before_stat.st_mode))
+            else:
+                path.unlink()
+                sync_directory()
+        raise
 
 
 def restore(
