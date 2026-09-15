@@ -51,6 +51,7 @@ WRAPPER_CONTRACT_FILES = (
     "SKILL.md",
     "requirements.txt",
     "references/photo-prompting-rules.md",
+    "scripts/characters_assets.py",
     "scripts/generate.py",
     "scripts/identity_parser.py",
     "scripts/prompt_profiles.py",
@@ -177,17 +178,11 @@ def media_lines(paths: list[Path]) -> list[str]:
 
 def image_bytes_and_mime(path: Path, max_size_mb: float) -> tuple[bytes, str]:
     """Prepare an image and report the MIME type matching the returned bytes."""
-    was_compressed = path.stat().st_size > max_size_mb * 1024 * 1024
     raw = compress_image_if_needed(path, max_size_mb=max_size_mb)
-    if was_compressed:
-        mime = "image/jpeg"
-    else:
-        mime = {
-            ".jpg": "image/jpeg",
-            ".jpeg": "image/jpeg",
-            ".png": "image/png",
-            ".webp": "image/webp",
-        }[path.suffix.lower()]
+    with Image.open(BytesIO(raw)) as image:
+        mime = {"JPEG": "image/jpeg", "PNG": "image/png", "WEBP": "image/webp"}.get(image.format)
+    if mime is None:
+        raise ValueError("Reference must contain JPEG, PNG, or WebP image bytes")
     return raw, mime
 
 
@@ -447,21 +442,31 @@ def generate_photo_gemini(prompt: str, seed_image: Path, output_path: Path, sour
     """
     Generate photo via Gemini REST API with identity seed image.
     Model: gemini-3-pro-image-preview
-    Auth injected automatically by OneCLI proxy.
-    Note: sources ignored (Gemini only supports single input image).
+    Auth injected automatically by the trusted wrapper.
+    Gemini accepts multiple input images in one generateContent request; the
+    primary seed and every validated source are submitted as separate image
+    parts in their documented order.
     Note: `n` and `aspect_ratio` are accepted for signature compatibility;
           Gemini steers aspect via pixel dimensions in `size` and returns 1 image.
     Returns a list of saved Paths (empty list on failure).
     """
     print("Generating with Gemini REST API (gemini-3-pro-image-preview)...")
 
-    identity_prefix = (
-        "Identity lock to the woman in the photo. "
-        "IDENTITY REFERENCE: The input image shows the exact person to render. "
-        "Preserve their facial features, bone structure, eye shape, nose, lips exactly as shown. "
-        "Same person, same face. "
-    )
-    identity_suffix = " The face must match the reference image exactly. Do not alter facial features."
+    if sources:
+        identity_prefix = (
+            "IDENTITY REFERENCES: Each input image depicts a separate person unless the prompt says otherwise. "
+            "Preserve every referenced face independently and exactly, in input order. "
+            "Do not blend, average, swap, duplicate, feminize, or masculinize identities. "
+        )
+        identity_suffix = " Match every referenced face exactly and keep all identities distinct."
+    else:
+        identity_prefix = (
+            "Identity lock to the woman in the photo. "
+            "IDENTITY REFERENCE: The input image shows the exact person to render. "
+            "Preserve their facial features, bone structure, eye shape, nose, lips exactly as shown. "
+            "Same person, same face. "
+        )
+        identity_suffix = " The face must match the reference image exactly. Do not alter facial features."
     # Parse size to add aspect ratio guidance
     w, h = size.split("x")
     if w != h:
@@ -476,16 +481,33 @@ def generate_photo_gemini(prompt: str, seed_image: Path, output_path: Path, sour
     print(gemini_prompt)
     print("="*60 + "\n")
 
-    print(f"Loading seed image: {seed_image}")
-    image_bytes, mime_type = image_bytes_and_mime(seed_image, max_size_mb=3.0)
-    image_data = base64.b64encode(image_bytes).decode("utf-8")
+    image_paths = [seed_image, *validate_sources(sources)]
+    # Keep the request bounded while allowing Gemini's documented multi-image
+    # composition workflow. The only visually accepted group run used one
+    # complete identity-mapping prompt first, followed immediately by the
+    # ordered image parts. Preserve that structure exactly: generic labels
+    # interleaved with the images weakened identity conditioning.
+    image_paths = image_paths[:14]
+    reference_parts = []
+    for index, image_path in enumerate(image_paths, start=1):
+        image_bytes, mime_type = image_bytes_and_mime(image_path, max_size_mb=3.0)
+        image_data = base64.b64encode(image_bytes).decode("utf-8")
+        reference_parts.append(
+            {"inlineData": {"mimeType": mime_type, "data": image_data}}
+        )
+        label = "primary seed" if index == 1 else f"source {index}"
+        digest = hashlib.sha256(image_bytes).hexdigest()
+        print(
+            f"Loading {label}: {image_path} "
+            f"[index={index} mime={mime_type} bytes={len(image_bytes)} sha256={digest}]"
+        )
 
     try:
         payload = {
             "contents": [{
                 "parts": [
                     {"text": gemini_prompt},
-                    {"inline_data": {"mime_type": mime_type, "data": image_data}},
+                    *reference_parts,
                 ]
             }],
             "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},

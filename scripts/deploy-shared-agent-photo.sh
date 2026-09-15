@@ -200,6 +200,7 @@ file_modes = {
     "scripts/generate.py": 0o755,
     "scripts/identity_parser.py": 0o755,
     "scripts/prompt_profiles.py": 0o644,
+    "scripts/characters_assets.py": 0o755,
 }
 
 def digest(path):
@@ -404,6 +405,7 @@ main() {
   chmod 0600 "$snapshot_stage/references/photo-prompting-rules.md"
   chmod 0755 \
     "$snapshot_stage/scripts/generate.py" \
+    "$snapshot_stage/scripts/characters_assets.py" \
     "$snapshot_stage/scripts/identity_parser.py"
 
   verify_snapshot_tree "$snapshot_stage"

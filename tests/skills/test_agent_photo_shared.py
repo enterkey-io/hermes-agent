@@ -81,6 +81,7 @@ def test_generator_reports_no_op_fallback_wrapper_contract(
         "scripts/generate.py",
         "scripts/identity_parser.py",
         "scripts/prompt_profiles.py",
+        "scripts/characters_assets.py",
     }
     assert payload["contract"] == "hermes-agent-photo/no-op-fallback/v2"
     assert set(payload["files"]) == expected_files
@@ -316,10 +317,12 @@ def test_prompt_builder_accepts_resolved_path_sources(prompt_profiles, tmp_path)
     assert str(source) in line
 
 
-def test_data_url_uses_the_bytes_actual_mime(monkeypatch, generate, tmp_path):
-    source = tmp_path / "seed.png"
-    source.write_bytes(b"png")
-    monkeypatch.setattr(generate, "compress_image_if_needed", lambda *_args, **_kwargs: b"encoded")
+@pytest.mark.parametrize("suffix", [".png", ".jpg", ".webp"])
+def test_data_url_uses_the_bytes_actual_mime(generate, tmp_path, suffix):
+    from PIL import Image
+
+    source = tmp_path / ("seed" + suffix)
+    Image.new("RGB", (3, 3), "red").save(source, format="PNG")
 
     uncompressed = generate.image_data_url(source, max_size_mb=1)
     compressed = generate.image_data_url(source, max_size_mb=0)
