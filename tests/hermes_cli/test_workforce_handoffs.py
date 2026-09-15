@@ -164,6 +164,60 @@ def test_owned_failure_context_requires_literal_source_acceptance(conn):
     assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
 
 
+def test_owned_failure_handoff_rejects_inherited_request_atomically(conn):
+    root_id = kanban_db.create_task(
+        conn,
+        title="Accepted user request",
+        assignee="aurora",
+        session_id="origin-session",
+    )
+    kanban_db.add_notify_sub(
+        conn,
+        task_id=root_id,
+        platform="telegram",
+        chat_id="origin-chat",
+        notifier_profile="aurora",
+        delivery_mode="wake",
+    )
+    request = kanban_db.create_coordination_request(
+        conn,
+        root_task_id=root_id,
+        origin_session_id="origin-session",
+        origin_message_id="origin-message",
+        organization=ORG,
+    )
+    now = int(time.time())
+
+    with pytest.raises(ValueError, match="cannot inherit"):
+        create_handoff(
+            conn,
+            source_agent="aurora",
+            target_agent="alina",
+            expected_outcome="Repair a separate operational failure",
+            acceptance_test="Two later executions succeed",
+            evidence_references=["execution:failure-1"],
+            acknowledgment_deadline=_iso(now + 60),
+            checkpoint_at=_iso(now + 120),
+            organization=ORG,
+            context={
+                "kind": "owned_operational_failure",
+                "technical_owner": "alina",
+                "director": "aurora",
+                "workflow_id": "separate-integration",
+                "event_id": "failure-1",
+            },
+            requires_source_acceptance=True,
+            coordination_source_task_id=root_id,
+            session_id=request.origin_session_id,
+            coordination_origin_message_id=request.origin_message_id,
+        )
+
+    assert conn.execute(
+        "SELECT COUNT(*) FROM tasks WHERE id != ?",
+        (root_id,),
+    ).fetchone()[0] == 0
+
+
 def test_ordinary_handoff_pickup_is_one_shot_without_fabricating_request(conn):
     now = int(time.time())
     created = create_handoff(

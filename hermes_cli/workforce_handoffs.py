@@ -234,13 +234,16 @@ def create_handoff(
         if not isinstance(context, dict):
             raise ValueError("context must be an object")
         payload["context"] = context
-        if (
-            context.get("kind") == "owned_operational_failure"
-            and not requires_source_acceptance
-        ):
-            raise ValueError(
-                "owned operational failure handoffs require source acceptance"
-            )
+        if context.get("kind") == "owned_operational_failure":
+            if not requires_source_acceptance:
+                raise ValueError(
+                    "owned operational failure handoffs require source acceptance"
+                )
+            if request_root_id:
+                raise ValueError(
+                    "owned operational failure handoffs cannot inherit a "
+                    "coordination request"
+                )
     if not payload["expected_outcome"] or not payload["acceptance_test"]:
         raise ValueError("expected_outcome and acceptance_test are required")
     handoff_key = idempotency_key or (
