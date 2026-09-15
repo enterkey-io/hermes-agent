@@ -71,9 +71,7 @@ def _bounded_identifier(value: str, *, prefix: str) -> str:
 
 
 def _open_pickup_log(database_path: Path, task_id: str) -> tuple[Path, BinaryIO]:
-    """Atomically create one owner-only, no-follow log for the one-shot pickup."""
-    if IS_WINDOWS:
-        raise OSError("workforce handoff pickup requires POSIX descriptor permissions")
+    """Atomically create one private, exclusive log for a one-shot pickup."""
     log_dir = database_path.resolve().parent / "workforce-handoff-pickups"
     log_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     path = log_dir / f"{task_id}.log"
@@ -102,7 +100,8 @@ def _open_pickup_log(database_path: Path, task_id: str) -> tuple[Path, BinaryIO]
         file_stat = os.fstat(fd)
         if not stat.S_ISREG(file_stat.st_mode):
             raise ValueError("pickup log path is not a regular file")
-        os.fchmod(fd, 0o600)
+        if not IS_WINDOWS:
+            os.fchmod(fd, 0o600)
         return path, os.fdopen(fd, "ab", buffering=0)
     except BaseException:
         os.close(fd)

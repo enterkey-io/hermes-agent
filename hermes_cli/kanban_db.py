@@ -924,6 +924,24 @@ def kanban_db_path(board: Optional[str] = None) -> Path:
     return board_dir(slug) / "kanban.db"
 
 
+def canonical_coordination_db_path() -> Path:
+    """Return the default board used by cross-profile coordination.
+
+    A dispatched worker receives both ``HERMES_KANBAN_BOARD`` and
+    ``HERMES_KANBAN_DB`` for its project board. Those pins must not redirect
+    workforce handoffs away from the machine-wide coordination board. A
+    standalone database override remains supported when no non-default worker
+    board is pinned.
+    """
+    override = os.environ.get("HERMES_KANBAN_DB", "").strip()
+    pinned = _normalize_board_slug(
+        os.environ.get("HERMES_KANBAN_BOARD", "").strip()
+    )
+    if override and pinned in {None, DEFAULT_BOARD}:
+        return Path(override).expanduser()
+    return kanban_home() / "kanban.db"
+
+
 def workspaces_root(board: Optional[str] = None) -> Path:
     """Return the directory under which ``scratch`` workspaces are created.
 

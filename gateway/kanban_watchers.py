@@ -246,7 +246,7 @@ class GatewayKanbanWatchersMixin:
         def collect():
             # Coordination roots are canonical-board contracts, independent
             # of the currently selected dashboard board or chat adapters.
-            path = kb.kanban_db_path(kb.DEFAULT_BOARD).resolve()
+            path = kb.canonical_coordination_db_path().resolve()
             if not kb.has_coordination_tick_work(
                 path,
                 notifier_profiles=routable_profiles,

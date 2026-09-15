@@ -69,7 +69,9 @@ def _handle(args: dict[str, Any], **_kwargs: Any) -> str:
                     )
                     or get_session_env("HERMES_SESSION_KEY", "")
                 )
-                with kanban_db.connect_closing() as conn:
+                with kanban_db.connect_closing(
+                    kanban_db.canonical_coordination_db_path()
+                ) as conn:
                     if coordination_context is not None:
                         assert source_task_id is not None
                         request = kanban_db.get_coordination_request(
@@ -148,7 +150,9 @@ def _handle(args: dict[str, Any], **_kwargs: Any) -> str:
                         ),
                     })
         else:
-            with kanban_db.connect_closing() as conn:
+            with kanban_db.connect_closing(
+                kanban_db.canonical_coordination_db_path()
+            ) as conn:
                 if action == "acknowledge":
                     result = acknowledge_handoff(
                         conn, str(args.get("task_id") or ""), actor=actor

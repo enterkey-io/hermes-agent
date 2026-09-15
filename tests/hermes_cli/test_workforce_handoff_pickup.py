@@ -214,14 +214,18 @@ def test_pickup_log_is_exclusive_owner_only_and_never_reopens(monkeypatch, tmp_p
         _open_pickup_log(database_path, "t_pickup_123")
 
 
-def test_pickup_log_fails_closed_without_posix_descriptor_permissions(monkeypatch, tmp_path):
+@pytest.mark.windows_only
+def test_pickup_log_is_exclusive_on_windows(tmp_path):
     from hermes_cli.workforce_handoff_pickup import _open_pickup_log
 
     database_path = tmp_path / "kanban.db"
     database_path.touch()
-    monkeypatch.setattr("hermes_cli.workforce_handoff_pickup.IS_WINDOWS", True)
+    log_path, log_file = _open_pickup_log(database_path, "t_pickup_123")
+    with log_file:
+        log_file.write(b"bounded diagnostic\n")
 
-    with pytest.raises(OSError, match="requires POSIX descriptor permissions"):
+    assert log_path.is_file()
+    with pytest.raises(FileExistsError):
         _open_pickup_log(database_path, "t_pickup_123")
 
 

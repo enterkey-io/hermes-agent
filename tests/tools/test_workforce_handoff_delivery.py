@@ -84,6 +84,36 @@ def test_gateway_handoff_binds_wake_only_return_to_real_origin(board):
         )
 
 
+def test_named_board_worker_persists_handoff_on_canonical_board(
+    board, monkeypatch,
+):
+    named_board = board.parent / "kanban" / "boards" / "side-project" / "kanban.db"
+    kanban_db.init_db(named_board)
+    monkeypatch.setenv("HERMES_KANBAN_BOARD", "side-project")
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(named_board))
+    tokens = set_session_vars(
+        platform="telegram",
+        chat_id="origin-chat",
+        chat_type="dm",
+        session_id="origin-session",
+        message_id="origin-message",
+        profile="alina",
+    )
+    try:
+        with scoped_coordination_budget(session_id="origin-session"):
+            response = json.loads(_handle(_create_args()))
+    finally:
+        clear_session_vars(tokens)
+
+    assert response["success"] is True
+    task_id = response["result"]["task_id"]
+    assert kanban_db.canonical_coordination_db_path() == board
+    with kanban_db.connect_closing(board) as conn:
+        assert kanban_db.get_task(conn, task_id) is not None
+    with kanban_db.connect_closing(named_board) as conn:
+        assert kanban_db.get_task(conn, task_id) is None
+
+
 def test_gateway_create_rolls_back_when_its_return_route_cannot_persist(
     board, monkeypatch,
 ):
