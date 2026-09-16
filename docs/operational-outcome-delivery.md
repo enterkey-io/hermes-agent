@@ -21,6 +21,30 @@ emits neither a dependency failure nor a recovery event. Recovery still requires
 successful observed calls to every configured dependency. Ordinary model tools
 and the jobs API cannot set this mode. Runbook schedule metadata can declare it;
 refreshing a runbook that omits it preserves the existing operator setting.
+
+For workflows with both mandatory reads and conditional enrichment, operator-owned
+`required_tool_dependency_modes` maps exact declared tool names to overrides:
+
+```yaml
+required_tool_dependencies:
+  - mcp__evernote__get_note
+  - mcp__nirvana__get_tasks
+required_tool_dependency_mode: when_invoked
+required_tool_dependency_modes:
+  mcp__evernote__get_note: always
+```
+
+This rejects a no-tool success while permitting a verified note-preservation
+branch without unnecessary Nirvana calls. Unspecified tools inherit the global
+mode; absent overrides preserve existing behavior. An invoked failure still
+fails the run, including for conditional dependencies, and a skipped dependency
+still cannot prove recovery. Overrides must refer to declared dependencies;
+update the dependency list and overrides together when removing a mapped tool.
+An empty map clears overrides. Runbook synchronization preserves omitted
+operator metadata, and neither ordinary model tools nor the jobs API can change
+the overrides. Tool success proves the observed call, not semantic correctness
+of every document field; workflow-specific content acceptance remains required.
+
 With `terminal` and `when_invoked`, a workflow may legitimately make no terminal
 call, but any observed backend error or unexplained nonzero exit fails the run.
 An attempted required call rejected by argument parsing, a deferred-tool bridge,

@@ -412,6 +412,7 @@ class TestAgentCannotSetModelPin:
         assert "provider" not in props
         assert "base_url" not in props
         assert "required_tool_dependency_mode" not in props
+        assert "required_tool_dependency_modes" not in props
         assert "required_tool_dependencies" not in props
 
     def test_handler_cannot_change_operator_dependency_mode(self):
@@ -423,16 +424,19 @@ class TestAgentCannotSetModelPin:
             model="test-model", provider="test-provider",
             required_tool_dependencies=["mcp__nirvana__get_tasks"],
             required_tool_dependency_mode="always",
+            required_tool_dependency_modes={"mcp__nirvana__get_tasks": "always"},
         )
         result = json.loads(registry.dispatch("cronjob", {
             "action": "update", "job_id": job["id"], "name": "renamed",
             "required_tool_dependency_mode": "when_invoked",
+            "required_tool_dependency_modes": {"mcp__nirvana__get_tasks": "when_invoked"},
             "required_tool_dependencies": [],
         }))
         assert result["success"] is True
         stored = get_job(job["id"])
         assert stored["name"] == "renamed"
         assert stored["required_tool_dependency_mode"] == "always"
+        assert stored["required_tool_dependency_modes"] == {"mcp__nirvana__get_tasks": "always"}
         assert stored["required_tool_dependencies"] == ["mcp__nirvana__get_tasks"]
 
 

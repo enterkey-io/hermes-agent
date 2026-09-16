@@ -233,6 +233,7 @@ class TestUpdateJob:
                         "evil_field": "malicious",
                         "__proto__": "hack",
                         "required_tool_dependency_mode": "when_invoked",
+                        "required_tool_dependency_modes": {"mcp__nirvana__get_tasks": "when_invoked"},
                         "required_tool_dependencies": ["mcp__nirvana__get_tasks"],
                     },
                 )
@@ -243,6 +244,7 @@ class TestUpdateJob:
                 assert "evil_field" not in sanitized
                 assert "__proto__" not in sanitized
                 assert "required_tool_dependency_mode" not in sanitized
+                assert "required_tool_dependency_modes" not in sanitized
                 assert "required_tool_dependencies" not in sanitized
 
 

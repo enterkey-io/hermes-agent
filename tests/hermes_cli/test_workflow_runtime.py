@@ -195,6 +195,7 @@ def test_sync_runbook_cron_jobs_projects_trusted_dependency_ownership() -> None:
         "terminal",
     ]
     schedule["required_tool_dependency_mode"] = "when_invoked"
+    schedule["required_tool_dependency_modes"] = {"terminal": "always"}
     schedule["failure_ownership"] = {
         "technical_owner": "root",
         "director": "aurora",
@@ -213,6 +214,7 @@ def test_sync_runbook_cron_jobs_projects_trusted_dependency_ownership() -> None:
         "terminal",
     ]
     assert job["required_tool_dependency_mode"] == "when_invoked"
+    assert job["required_tool_dependency_modes"] == {"terminal": "always"}
     assert job["failure_ownership"] == schedule["failure_ownership"]
 
 
@@ -220,6 +222,8 @@ def test_omitted_runbook_ownership_does_not_clear_existing_metadata() -> None:
     _save_runbook()
     first_metadata = _metadata()
     first_metadata["schedules"][0]["required_tool_dependency_mode"] = "when_invoked"
+    first_metadata["schedules"][0]["required_tool_dependencies"] = ["terminal"]
+    first_metadata["schedules"][0]["required_tool_dependency_modes"] = {"terminal": "always"}
     first_metadata["schedules"][0]["failure_ownership"] = {
         "technical_owner": "root",
         "director": "aurora",
@@ -242,6 +246,35 @@ def test_omitted_runbook_ownership_does_not_clear_existing_metadata() -> None:
     assert second["id"] == first["id"]
     assert second["failure_ownership"] == first["failure_ownership"]
     assert second["required_tool_dependency_mode"] == "when_invoked"
+    assert second["required_tool_dependency_modes"] == {"terminal": "always"}
+
+
+@pytest.mark.parametrize("remaining", [
+    ["terminal", "mcp__evernote__get_note"], ["mcp__evernote__get_note"],
+])
+def test_projection_explicitly_clears_modes_and_can_remove_dependency(remaining) -> None:
+    _save_runbook()
+    metadata = _metadata()
+    schedule = metadata["schedules"][0]
+    schedule["required_tool_dependencies"] = ["terminal", "mcp__evernote__get_note"]
+    schedule["required_tool_dependency_mode"] = "when_invoked"
+    schedule["required_tool_dependency_modes"] = {"terminal": "always"}
+    runbook_store.save_runbook(metadata, "# Daily Brief\n", approved_by="dashboard")
+    first = sync_runbook_cron_jobs("daily-brief")[0]
+
+    schedule["required_tool_dependencies"] = remaining
+    schedule["required_tool_dependency_modes"] = {}
+    runbook_store.save_runbook(metadata, "# Daily Brief\n", approved_by="dashboard")
+    second = sync_runbook_cron_jobs("daily-brief")[0]
+
+    from cron.jobs import list_jobs
+
+    persisted = next(job for job in list_jobs(include_disabled=True) if job["id"] == first["id"])
+    for job in (second, persisted):
+        assert job["id"] == first["id"]
+        assert job["required_tool_dependency_modes"] == {}
+        assert job["required_tool_dependencies"] == remaining
+        assert job["required_tool_dependency_mode"] == "when_invoked"
 
 
 def test_link_existing_cron_job_only_adds_registry_identity() -> None:

@@ -217,6 +217,111 @@ def test_conditional_partial_observation_cannot_emit_recovery(
     assert marked[0][3]["dependency_outcome"]["successful"] == [REQUIRED]
 
 
+def test_mixed_dependencies_reject_a_no_tool_success(monkeypatch, tmp_path):
+    note = "mcp__evernote__get_note"
+    delivered, marked, events = _run_cron(
+        monkeypatch, tmp_path,
+        lambda _job, **_kwargs: (True, "out", "[SILENT]", None),
+        _job(required_tool_dependencies=[REQUIRED, note],
+             required_tool_dependency_mode="when_invoked",
+             required_tool_dependency_modes={note: "always"}),
+    )
+    assert marked[0][1] is False
+    assert marked[0][2] == f"Required tool dependency degraded: not called: {note}"
+    assert delivered == []
+    assert events[0]["status"] == "failure"
+    assert events[0]["dependency_outcome"]["missing"] == [REQUIRED, note]
+
+
+@pytest.mark.parametrize("default,overrides", [
+    ("when_invoked", {"mcp__evernote__get_note": "always"}),
+    ("always", {REQUIRED: "when_invoked"}),
+])
+def test_mixed_dependencies_allow_verified_no_enrichment_without_recovery(
+    monkeypatch, tmp_path, mcp_runtime, default, overrides,
+):
+    note_name = "mcp__evernote__get_note"
+    note = mcp_runtime("evernote", _result("Existing note"), tool_name="get_note")
+
+    def run_job(_job, **_kwargs):
+        note({"noteId": "current"})
+        return True, "out", "Verified unchanged", None
+
+    delivered, marked, events = _run_cron(
+        monkeypatch, tmp_path, run_job,
+        _job(required_tool_dependencies=[REQUIRED, note_name],
+             required_tool_dependency_mode=default,
+             required_tool_dependency_modes=overrides),
+    )
+    assert marked[0][1] is True
+    assert marked[0][3]["dependency_status"] == "not_observed"
+    assert delivered == ["Verified unchanged"]
+    assert events == []
+
+
+def test_mixed_conditional_dependency_failure_still_fails_run(
+    monkeypatch, tmp_path, mcp_runtime,
+):
+    note_name = "mcp__evernote__get_note"
+    note = mcp_runtime("evernote", _result("Existing note"), tool_name="get_note")
+    tasks = mcp_runtime("nirvana", _result("Unauthorized", error=True))
+
+    def run_job(_job, **_kwargs):
+        note({"noteId": "current"})
+        tasks({})
+        return True, "out", "Apparently complete", None
+
+    delivered, marked, events = _run_cron(
+        monkeypatch, tmp_path, run_job,
+        _job(required_tool_dependencies=[REQUIRED, note_name],
+             required_tool_dependency_mode="always",
+             required_tool_dependency_modes={REQUIRED: "when_invoked"}),
+    )
+    assert marked[0][1] is False
+    assert "unsuccessful: mcp__nirvana__get_tasks" in marked[0][2]
+    assert delivered == [] and events[0]["status"] == "failure"
+
+
+def test_mixed_recovery_requires_both_dependencies_after_failure(
+    monkeypatch, tmp_path, mcp_runtime,
+):
+    note_name = "mcp__evernote__get_note"
+    note = mcp_runtime(
+        "evernote", *[_result("Existing note") for _ in range(3)], tool_name="get_note",
+    )
+    tasks = mcp_runtime("nirvana", _result("Unauthorized", error=True), _result("tasks"))
+    job = _job(
+        required_tool_dependencies=[REQUIRED, note_name],
+        required_tool_dependency_mode="when_invoked",
+        required_tool_dependency_modes={note_name: "always"},
+    )
+
+    def observed_run(_job, **_kwargs):
+        note({"noteId": "current"})
+        tasks({})
+        return True, "out", "Complete", None
+
+    _, marked, events = _run_cron(monkeypatch, tmp_path, observed_run, job)
+    assert marked[0][1] is False
+    assert [event["status"] for event in events] == ["failure"]
+
+    def no_enrichment_run(_job, **_kwargs):
+        note({"noteId": "current"})
+        return True, "out", "Preserved", None
+
+    _, marked, events = _run_cron(monkeypatch, tmp_path, no_enrichment_run, job)
+    assert marked[0][1] is True
+    assert marked[0][3]["dependency_status"] == "not_observed"
+    assert [event["status"] for event in events] == ["failure"]
+
+    delivered, marked, events = _run_cron(monkeypatch, tmp_path, observed_run, job)
+    assert marked[0][1] is True
+    assert delivered == ["Complete"]
+    assert [event["status"] for event in events] == ["failure", "recovered"]
+    assert marked[0][3]["dependency_outcome"]["missing"] == []
+    assert set(marked[0][3]["dependency_outcome"]["successful"]) == {REQUIRED, note_name}
+
+
 def test_silent_model_response_cannot_hide_missing_dependency(
     monkeypatch, tmp_path,
 ):

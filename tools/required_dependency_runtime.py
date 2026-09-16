@@ -113,6 +113,16 @@ def reset(token: Token) -> None:
     _ACTIVE.reset(token)
 
 
+def blocking_missing_dependencies(
+    missing: Iterable[str], *, mode: str | None = None,
+    modes: dict[str, str] | None = None,
+) -> list[str]:
+    """Apply exact per-tool overrides without treating skipped tools as recovery."""
+    if modes is not None and not isinstance(modes, dict):
+        return list(missing)
+    return [name for name in missing if (modes or {}).get(name, mode) != "when_invoked"]
+
+
 def _invocation_identity(args: Any) -> str:
     # MCP arguments originate as JSON. The canonical form can contain private
     # values, so it must remain only in the turn-local state above.
