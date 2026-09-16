@@ -81,6 +81,36 @@ def test_timeout_tool_result_does_not_invite_approval_of_closed_request(scope):
     assert "no pending" in result["error"].lower()
 
 
+@pytest.mark.parametrize("guard", ["terminal", "execute_code", "plugin"])
+def test_timeout_guidance_preserves_parallel_pending_request(scope, guard):
+    newer = approval._ApprovalEntry({"command": "newer", "request_id": "newer"})
+    newer.expires_at = approval.time.monotonic() + 60
+
+    def notify(data):
+        scope.notifications.append(data)
+        with approval._lock:
+            approval._gateway_queues[scope.key].append(newer)
+
+    approval.register_gateway_notify(scope.key, notify)
+    if guard == "terminal":
+        path, result = _run_marker(scope)
+        assert not path.exists()
+        message = result["error"]
+    elif guard == "execute_code":
+        result = approval.check_execute_code_guard("print('fixture')", "local")
+        assert not result["approved"]
+        message = result["message"]
+    else:
+        result = approval.request_tool_approval("fixture", "fixture requires consent")
+        assert not result["approved"]
+        message = result["message"]
+
+    assert approval.get_pending_gateway_approval(scope.key)["request_id"] == "newer"
+    assert "approved" in _approve(scope).lower()
+    assert newer.result == "once"
+    assert "no pending command for this request" in message.lower()
+
+
 def test_real_terminal_live_once_executes_and_is_not_expired(scope, monkeypatch):
     monkeypatch.setattr(approval, "_get_approval_timeout", lambda: 60)
     replies = []

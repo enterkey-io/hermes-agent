@@ -2804,7 +2804,8 @@ _GATEWAY_EXPIRED_TTL = 3600.0
 _GATEWAY_EXPIRED_LIMIT = 1024
 _GATEWAY_EXPIRED_GUIDANCE = (
     " This approval request has expired and is closed; there is no pending "
-    "command for /approve. Do not ask the user to approve the expired request."
+    "command for this request. /approve cannot approve it. "
+    "Do not ask the user to approve the expired request."
 )
 
 
