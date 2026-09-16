@@ -1483,7 +1483,10 @@ def _(rid, params: dict) -> dict:
     if err:
         return err
     request_id = params.get("request_id")
-    if not params.get("all", False) and (not isinstance(request_id, str) or not request_id):
+    resolve_all = params.get("all", False)
+    if not isinstance(resolve_all, bool):
+        return _err(rid, 4006, "all must be a boolean")
+    if not resolve_all and (not isinstance(request_id, str) or not request_id):
         return _ok(rid, {"resolved": 0})
     try:
         from tools.approval import resolve_gateway_approval
@@ -1494,7 +1497,7 @@ def _(rid, params: dict) -> dict:
                 "resolved": resolve_gateway_approval(
                     session["session_key"],
                     params.get("choice", "deny"),
-                    resolve_all=params.get("all", False),
+                    resolve_all=resolve_all,
                     request_id=request_id,
                 )
             },

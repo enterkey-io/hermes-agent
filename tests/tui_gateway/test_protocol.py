@@ -432,6 +432,36 @@ def test_approval_response_never_falls_through_to_another_request(server, monkey
     assert newer.result == ("once" if binding == "newer" else None)
 
 
+@pytest.mark.parametrize("bulk", ["false", "true", 1, 0, None, [], {}, [True]])
+@pytest.mark.parametrize("request_id", ["newer-request", None])
+def test_approval_bulk_requires_boolean(server, monkeypatch, bulk, request_id):
+    from tests.gateway._approval_binding import pending_pair
+
+    server._sessions["ui-1"] = {"session_key": "agent-1", "history": []}
+    older, newer = pending_pair(monkeypatch, "agent-1")
+    response = server.handle_request({
+        "id": "bulk", "method": "approval.respond",
+        "params": {"session_id": "ui-1", "choice": "once", "request_id": request_id, "all": bulk},
+    })
+    assert response["error"]["code"] == 4006
+    assert older.result is None
+    assert newer.result is None
+
+
+def test_approval_bulk_false_resolves_only_bound_request(server, monkeypatch):
+    from tests.gateway._approval_binding import pending_pair
+
+    server._sessions["ui-1"] = {"session_key": "agent-1", "history": []}
+    older, newer = pending_pair(monkeypatch, "agent-1")
+    response = server.handle_request({
+        "id": "bulk", "method": "approval.respond",
+        "params": {"session_id": "ui-1", "choice": "once", "request_id": "newer-request", "all": False},
+    })
+    assert response["result"] == {"resolved": 1}
+    assert older.result is None
+    assert newer.result == "once"
+
+
 def test_approval_bulk_precedes_retained_request_id(server, monkeypatch):
     from tests.gateway._approval_binding import pending_pair
     from tools import approval
