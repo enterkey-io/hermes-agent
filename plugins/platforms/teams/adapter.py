@@ -1064,7 +1064,7 @@ class TeamsAdapter(BasePlatformAdapter):
         self, ctx: "ActivityContext[AdaptiveCardInvokeActivity]"
     ) -> "InvokeResponse[AdaptiveCardActionMessageResponse]":
         """Handle an Adaptive Card Action.Execute button click."""
-        from tools.approval import resolve_gateway_approval, has_blocking_approval
+        from tools.approval import resolve_gateway_approval
 
         action = ctx.activity.value.action
         data = action.data or {}
@@ -1120,7 +1120,9 @@ class TeamsAdapter(BasePlatformAdapter):
                 body=AdaptiveCardActionMessageResponse(value="Unknown action."),
             )
 
-        if not has_blocking_approval(session_key):
+        request_id = data.get("request_id")
+        count = resolve_gateway_approval(session_key, choice, request_id=request_id) if request_id else 0
+        if not count:
             return InvokeResponse(
                 status=200,
                 body=AdaptiveCardActionCardResponse(
@@ -1129,8 +1131,6 @@ class TeamsAdapter(BasePlatformAdapter):
                     .with_body([TextBlock(text="⚠️ Approval already resolved or expired.", wrap=True)])
                 ),
             )
-
-        resolve_gateway_approval(session_key, choice)
 
         label_map = {
             "once": "✅ Allowed (once)",
@@ -1165,6 +1165,7 @@ class TeamsAdapter(BasePlatformAdapter):
         allow_permanent: bool = True,
         allow_session: bool = True,
         smart_denied: bool = False,
+        request_id: Optional[str] = None,
     ) -> SendResult:
         """Send an Adaptive Card approval prompt with Allow/Deny buttons."""
         if not self._app:
@@ -1174,6 +1175,7 @@ class TeamsAdapter(BasePlatformAdapter):
         # Truncated for button data payload — just enough to reconstruct the card body.
         btn_data_base = {
             "session_key": session_key,
+            "request_id": request_id,
             "cmd": command[:200] + "..." if len(command) > 200 else command,
             "desc": description,
         }

@@ -336,16 +336,16 @@ class WhatsAppCloudAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         # the dispatch table. Entries are popped when the user taps a
         # button; ignored prompts would otherwise accumulate forever, so
         # each dict is FIFO-capped via _bounded_put (oldest pending prompt
-        # evicted first — an evicted button tap degrades to the plain-text
-        # fallback path, same as after a gateway restart).
+        # evicted first). Unknown exec-approval taps are consumed without a
+        # plain-text fallback, including after a gateway restart.
         #   _clarify_state:        clarify_id → session_key (resolves via
         #                          tools.clarify_gateway.resolve_gateway_clarify)
-        #   _exec_approval_state:  approval_id → session_key (resolves via
+        #   _exec_approval_state:  approval_id → session_key + request_id (resolves via
         #                          tools.approval.resolve_gateway_approval)
         #   _slash_confirm_state:  confirm_id → session_key (resolves via
         #                          tools.slash_confirm.resolve)
         self._clarify_state: "OrderedDict[str, str]" = OrderedDict()
-        self._exec_approval_state: "OrderedDict[str, str]" = OrderedDict()
+        self._exec_approval_state: "OrderedDict[str, dict]" = OrderedDict()
         self._slash_confirm_state: "OrderedDict[str, str]" = OrderedDict()
 
         # Runtime
@@ -852,6 +852,7 @@ class WhatsAppCloudAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         allow_permanent: bool = True,
         allow_session: bool = True,
         smart_denied: bool = False,
+        request_id: Optional[str] = None,
     ) -> SendResult:
         """Render a dangerous-command approval prompt with native buttons.
 
@@ -897,7 +898,9 @@ class WhatsAppCloudAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
 
         result = await self._post_interactive(chat_id, interactive, reply_to=reply_to)
         if result.success:
-            self._bounded_put(self._exec_approval_state, approval_id, session_key)
+            self._bounded_put(self._exec_approval_state, approval_id, {
+                "session_key": session_key, "request_id": request_id,
+            })
         return result
 
     async def send_slash_confirm(
@@ -1799,25 +1802,29 @@ class WhatsAppCloudAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
             if len(parts) != 3:
                 return False
             _, approval_id, choice = parts
-            session_key = self._exec_approval_state.pop(approval_id, None)
-            if not session_key:
+            state = self._exec_approval_state.pop(approval_id, None)
+            if not isinstance(state, dict):
                 logger.info(
                     "[whatsapp_cloud] approval tap with no matching state "
-                    "(approval_id=%s) — likely stale; falling back to text",
+                    "(approval_id=%s) — consuming stale control without text fallback",
                     approval_id,
                 )
-                return False
+                return True
+            session_key = state["session_key"]
+            request_id = state.get("request_id")
             if choice not in ("approve", "deny"):
-                self._exec_approval_state[approval_id] = session_key
-                return False
+                self._exec_approval_state[approval_id] = state
+                return True
             try:
                 from tools.approval import resolve_gateway_approval
             except ImportError:
                 logger.warning(
                     "[whatsapp_cloud] approval resolver unavailable"
                 )
-                return False
-            count = resolve_gateway_approval(session_key, choice)
+                return True
+            count = resolve_gateway_approval(
+                session_key, "once" if choice == "approve" else "deny", request_id=request_id,
+            ) if request_id else 0
             if not count:
                 logger.info(
                     "[whatsapp_cloud] approval resolver reported no waiter "

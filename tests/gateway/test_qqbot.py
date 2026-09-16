@@ -856,8 +856,8 @@ class TestDefaultInteractionDispatch:
 
         resolve_calls = []
 
-        def fake_resolve(session_key, choice, resolve_all=False):
-            resolve_calls.append((session_key, choice, resolve_all))
+        def fake_resolve(session_key, choice, resolve_all=False, request_id=None):
+            resolve_calls.append((session_key, choice, resolve_all, request_id))
             return 1
 
         # Patch the *module-level* function that _default_interaction_dispatch
@@ -866,18 +866,20 @@ class TestDefaultInteractionDispatch:
         orig = tools.approval.resolve_gateway_approval
         tools.approval.resolve_gateway_approval = fake_resolve
         try:
-            from gateway.platforms.qqbot.keyboards import parse_interaction_event
+            from gateway.platforms.qqbot.keyboards import parse_interaction_event, build_approval_keyboard
+            keyboard = build_approval_keyboard("agent:main:qqbot:c2c:u-42", request_id="req-1")
+            button_data = keyboard.to_dict()["content"]["rows"][0]["buttons"][0]["action"]["data"]
             event = parse_interaction_event({
                 "id": "i",
                 "chat_type": 2,
                 "user_openid": "u-42",
-                "data": {"resolved": {"button_data": "approve:agent:main:qqbot:c2c:u-42:allow-once"}},
+                "data": {"resolved": {"button_data": button_data}},
             })
             await adapter._default_interaction_dispatch(event)
         finally:
             tools.approval.resolve_gateway_approval = orig
 
-        assert resolve_calls == [("agent:main:qqbot:c2c:u-42", "once", False)]
+        assert resolve_calls == [("agent:main:qqbot:c2c:u-42", "once", False, "req-1")]
 
 
     @pytest.mark.asyncio
@@ -935,6 +937,51 @@ class TestSendExecApproval:
     def _make_adapter(self):
         from gateway.platforms.qqbot.adapter import QQAdapter
         return QQAdapter(_make_config(app_id="a", client_secret="b"))
+
+    @pytest.mark.asyncio
+    async def test_secondary_sender_preserves_request_binding_and_scope(self):
+        import json
+        from unittest.mock import AsyncMock
+        from gateway.platforms.qqbot.keyboards import ApprovalRequest, ApprovalSender, parse_approval_button_data
+
+        post = AsyncMock(return_value={})
+        sender = ApprovalSender(post, post)
+        req = ApprovalRequest("fixture-session", "Approval", allow_permanent=False, request_id="req-1")
+        assert await sender.send("c2c", "u-42", req)
+        keyboard = post.call_args.args[3].to_dict()
+        buttons = [button for row in keyboard["content"]["rows"] for button in row["buttons"]]
+        assert len(buttons) == 2
+        for button in buttons:
+            route, _ = parse_approval_button_data(button["action"]["data"])
+            assert json.loads(route) == {"session_key": "fixture-session", "request_id": "req-1"}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("binding", ["expired", "missing", "newer"])
+    async def test_sent_keyboard_resolves_only_its_request(self, monkeypatch, binding):
+        from tests.gateway._approval_binding import pending_pair
+        from gateway.platforms.base import SendResult
+        from gateway.platforms.qqbot.keyboards import parse_interaction_event
+        from unittest.mock import AsyncMock
+
+        monkeypatch.setenv("QQBOT_ALLOWED_USERS", "u-42")
+        adapter = self._make_adapter()
+        adapter.send_with_keyboard = AsyncMock(return_value=SendResult(success=True, message_id="m-1"))
+        session_key = "agent:main:qqbot:c2c:u-42"
+        older, newer = pending_pair(monkeypatch, session_key)
+        request_id = {"expired": "older-request", "missing": None, "newer": "newer-request"}[binding]
+        result = await adapter.send_exec_approval("u-42", "fixture", session_key, request_id=request_id)
+        assert result.success
+        keyboard = adapter.send_with_keyboard.call_args.args[2].to_dict()
+        data = keyboard["content"]["rows"][0]["buttons"][0]["action"]["data"]
+        event = parse_interaction_event({
+            "id": "i", "chat_type": 2, "user_openid": "u-42",
+            "data": {"resolved": {"button_data": data}},
+        })
+        if binding == "expired":
+            older.expires_at = 0
+        await adapter._default_interaction_dispatch(event)
+        assert older.result is None
+        assert newer.result == ("once" if binding == "newer" else None)
 
     @pytest.mark.asyncio
     async def test_delegates_to_send_approval_request(self):
@@ -1221,4 +1268,3 @@ class TestReadEventsClosedWsGuard:
         adapter._ws = SimpleNamespace(closed=True)
         with pytest.raises(RuntimeError):
             asyncio.run(adapter._read_events())
-

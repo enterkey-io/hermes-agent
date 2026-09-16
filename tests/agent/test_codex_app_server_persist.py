@@ -23,7 +23,9 @@ duplicate the user turn (#860 / #42039). This test locks in:
 3. The gateway resolution expression preserves standard-runtime behaviour.
 """
 
+import sqlite3
 import tempfile
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -111,6 +113,7 @@ def test_codex_turn_persists_each_message_exactly_once():
     real AIAgent._flush_messages_to_session_db to prove no #860/#42039
     duplicate-write regression on the codex path."""
     tmp = tempfile.mkdtemp(prefix="codex_persist_")
+    db = None
     try:
         db = SessionDB(Path(tmp) / "state.db")
         sid = "sess-codex-once"
@@ -160,9 +163,17 @@ def test_codex_turn_persists_each_message_exactly_once():
         # session_search can now see the codex conversation.
         hits = {r["session_id"] for r in db.search_messages("CODEX_ASSISTANT")}
         assert sid in hits
+        # Codex usage is queued asynchronously; close must drain it before teardown.
+        db.close()
+        with closing(sqlite3.connect(Path(tmp) / "state.db")) as persisted:
+            assert persisted.execute(
+                "SELECT api_call_count FROM sessions WHERE id = ?", (sid,)
+            ).fetchone() == (1,)
     finally:
         import shutil
 
+        if db is not None:
+            db.close()
         shutil.rmtree(tmp)
 
 

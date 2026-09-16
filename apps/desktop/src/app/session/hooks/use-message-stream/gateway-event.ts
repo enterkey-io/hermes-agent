@@ -1277,10 +1277,19 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
         }
 
         dispatchNativeNotification({
-          actions: [
-            { id: 'approve', text: translateNow('notifications.native.approveAction') },
-            { id: 'reject', text: translateNow('notifications.native.rejectAction') }
-          ],
+          actions:
+            typeof payload?.request_id === 'string' && payload.request_id
+              ? [
+                  {
+                    id: JSON.stringify({ choice: 'once', request_id: payload.request_id }),
+                    text: translateNow('notifications.native.approveAction')
+                  },
+                  {
+                    id: JSON.stringify({ choice: 'deny', request_id: payload.request_id }),
+                    text: translateNow('notifications.native.rejectAction')
+                  }
+                ]
+              : undefined,
           body: command || description,
           kind: 'approval',
           sessionId,

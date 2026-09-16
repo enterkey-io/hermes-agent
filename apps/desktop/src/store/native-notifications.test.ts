@@ -239,17 +239,42 @@ describe('respondToApprovalAction', () => {
 
   it('approves via approval.respond {choice: "once"} and clears the prompt', async () => {
     setActiveSessionId('bg')
-    setApprovalRequest({ command: 'rm -rf /', description: 'dangerous', sessionId: 'bg' })
+    setApprovalRequest({ command: 'rm -rf /', description: 'dangerous', sessionId: 'bg', requestId: 'req-1' })
 
-    await respondToApprovalAction('bg', 'approve')
+    await respondToApprovalAction('bg', JSON.stringify({ choice: 'once', request_id: 'req-1' }))
 
-    expect(request).toHaveBeenCalledWith('approval.respond', { choice: 'once', session_id: 'bg' })
+    expect(request).toHaveBeenCalledWith('approval.respond', { choice: 'once', session_id: 'bg', request_id: 'req-1' })
     expect($approvalRequest.get()).toBeNull()
   })
 
   it('rejects via approval.respond {choice: "deny"}', async () => {
-    await respondToApprovalAction('bg', 'reject')
-    expect(request).toHaveBeenCalledWith('approval.respond', { choice: 'deny', session_id: 'bg' })
+    await respondToApprovalAction('bg', JSON.stringify({ choice: 'deny', request_id: 'req-1' }))
+    expect(request).toHaveBeenCalledWith('approval.respond', { choice: 'deny', session_id: 'bg', request_id: 'req-1' })
+  })
+
+  it.each(['approve', 'reject', '{}', '{"choice":"once"}', '{"choice":"once","request_id":""}', 'null'])(
+    'ignores unbound notification action %s',
+    async action => {
+      await respondToApprovalAction('bg', action)
+      expect(request).not.toHaveBeenCalled()
+    }
+  )
+
+  it('keeps a newer prompt when an old notification response arrives', async () => {
+    setActiveSessionId('bg')
+    let finish!: (value: { resolved: number }) => void
+    request.mockImplementationOnce(
+      () =>
+        new Promise(resolve => {
+          finish = resolve
+        })
+    )
+    const response = respondToApprovalAction('bg', JSON.stringify({ choice: 'once', request_id: 'old' }))
+    setApprovalRequest({ command: 'new command', description: 'new', sessionId: 'bg', requestId: 'new' })
+    finish({ resolved: 0 })
+    await response
+    expect(request).toHaveBeenCalledWith('approval.respond', { choice: 'once', session_id: 'bg', request_id: 'old' })
+    expect($approvalRequest.get()?.requestId).toBe('new')
   })
 
   it('ignores unknown action ids', async () => {

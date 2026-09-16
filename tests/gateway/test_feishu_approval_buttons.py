@@ -40,6 +40,40 @@ _ensure_feishu_mocks()
 from gateway.config import PlatformConfig
 import plugins.platforms.feishu.adapter as feishu_module
 from plugins.platforms.feishu.adapter import FeishuAdapter
+from tests.gateway._approval_binding import pending_pair
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("binding", ["expired", "missing", "newer"])
+async def test_card_action_is_bound_to_its_request(monkeypatch, binding, _patch_callback_card_types):
+    import asyncio
+    adapter = _make_adapter()
+    adapter._allowed_group_users = {"ou_user1"}
+    adapter.send = AsyncMock()
+    adapter._feishu_send_with_retry = AsyncMock(return_value=SimpleNamespace(
+        success=lambda: True, data=SimpleNamespace(message_id="msg-binding"),
+    ))
+    older, newer = pending_pair(monkeypatch, "sess-binding")
+    request_id = {"expired": "older-request", "missing": None, "newer": "newer-request"}[binding]
+    await adapter.send_exec_approval("oc_12345", "fixture", "sess-binding", request_id=request_id)
+    card = json.loads(adapter._feishu_send_with_retry.call_args.kwargs["payload"])
+    action = card["elements"][1]["actions"][0]["value"]
+    if binding == "expired":
+        older.expires_at = 0
+    adapter._loop = asyncio.get_running_loop()
+    tasks = []
+
+    def submit(coro, loop):
+        task = loop.create_task(coro)
+        tasks.append(task)
+        return task
+
+    with patch("asyncio.run_coroutine_threadsafe", side_effect=submit):
+        adapter._on_card_action_trigger(_make_card_action_data(action))
+    assert tasks
+    await asyncio.gather(*tasks)
+    assert older.result is None
+    assert newer.result == ("once" if binding == "newer" else None)
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +243,7 @@ class TestResolveApproval:
         adapter = _make_adapter()
         adapter._approval_state[1] = {
             "session_key": "agent:main:feishu:group:oc_12345",
+            "request_id": "req-1",
             "message_id": "msg_001",
             "chat_id": "oc_12345",
         }
@@ -216,7 +251,7 @@ class TestResolveApproval:
         with patch("tools.approval.resolve_gateway_approval", return_value=1) as mock_resolve:
             await adapter._resolve_approval(1, "once", "Norbert", open_id="ou_user1", chat_id="oc_12345")
 
-        mock_resolve.assert_called_once_with("agent:main:feishu:group:oc_12345", "once")
+        mock_resolve.assert_called_once_with("agent:main:feishu:group:oc_12345", "once", request_id="req-1")
         assert 1 not in adapter._approval_state
 
 
@@ -445,5 +480,3 @@ class TestResolveUpdatePrompt:
 
         assert (tmp_path / ".hermes" / ".update_response").read_text() == "y"
         assert 1 not in adapter._update_prompt_state
-
-

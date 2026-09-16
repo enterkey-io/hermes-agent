@@ -2061,6 +2061,7 @@ class FeishuAdapter(BasePlatformAdapter):
         allow_permanent: bool = True,
         allow_session: bool = True,
         smart_denied: bool = False,
+        request_id: Optional[str] = None,
     ) -> SendResult:
         """Send an interactive card with approval buttons.
 
@@ -2119,6 +2120,7 @@ class FeishuAdapter(BasePlatformAdapter):
             if result.success:
                 self._approval_state[approval_id] = {
                     "session_key": session_key,
+                    "request_id": request_id,
                     "message_id": result.message_id or "",
                     "chat_id": chat_id,
                 }
@@ -2921,7 +2923,8 @@ class FeishuAdapter(BasePlatformAdapter):
             return
         try:
             from tools.approval import resolve_gateway_approval
-            count = resolve_gateway_approval(state["session_key"], choice)
+            request_id = state.get("request_id")
+            count = resolve_gateway_approval(state["session_key"], choice, request_id=request_id) if request_id else 0
             logger.info(
                 "Feishu button resolved %d approval(s) for session %s (choice=%s, user=%s)",
                 count, state["session_key"], choice, user_name,

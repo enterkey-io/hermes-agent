@@ -220,9 +220,18 @@ export function dispatchPluginNativeNotification(pluginId: string, input: Plugin
 // Resolve a pending approval from a notification button, mirroring the in-app
 // Run/Reject bar. Keyed by session id — a background approval has no local guard.
 export async function respondToApprovalAction(sessionId: null | string, actionId: string): Promise<void> {
-  const choice = actionId === 'approve' ? 'once' : actionId === 'reject' ? 'deny' : null
+  let binding: unknown
 
-  if (!choice) {
+  try {
+    binding = JSON.parse(actionId)
+  } catch {
+    return
+  }
+
+  if (!binding || typeof binding !== 'object') {return}
+  const { choice, request_id: requestId } = binding as { choice?: unknown; request_id?: unknown }
+
+  if ((choice !== 'once' && choice !== 'deny') || typeof requestId !== 'string' || !requestId) {
     return
   }
 
@@ -233,8 +242,8 @@ export async function respondToApprovalAction(sessionId: null | string, actionId
   }
 
   try {
-    await gateway.request('approval.respond', { choice, session_id: sessionId ?? undefined })
-    clearApprovalRequest(sessionId)
+    await gateway.request('approval.respond', { choice, request_id: requestId, session_id: sessionId ?? undefined })
+    clearApprovalRequest(sessionId, requestId)
   } catch {
     // Leave the prompt parked so the user can still resolve it in-app.
   }

@@ -284,7 +284,7 @@ def _ensure_discord_mock() -> None:
     discord_mod.Color = SimpleNamespace(
         orange=lambda: 1, green=lambda: 2, blue=lambda: 3,
         red=lambda: 4, purple=lambda: 5, greyple=lambda: 6,
-        gold=lambda: 7,
+        gold=lambda: 7, dark_grey=lambda: 8,
     )
 
     # app_commands — needed by _register_slash_commands auto-registration
@@ -551,4 +551,3 @@ def pytest_configure(config):
             raise pytest.UsageError(msg)
         else:
             cache_file.write_text("clean", encoding="utf-8")
-

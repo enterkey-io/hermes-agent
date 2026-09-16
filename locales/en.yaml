@@ -31,7 +31,7 @@ approval:
 
 gateway:
   # Messenger replies to slash commands and implicit state changes.
-  approval_expired: "⚠️ Approval expired (agent is no longer waiting). Ask the agent to try again."
+  approval_expired: "Approval expired; the agent is no longer waiting. This request cannot be resumed with /approve. Ask the agent for a new request if you still want the action."
   draining:         "⏳ Draining {count} active agent(s) before restart..."
   goal_cleared:     "✓ Goal cleared."
   no_active_goal:   "No active goal."

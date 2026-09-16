@@ -405,6 +405,18 @@ running.
 
 Resolve a pending approval for a run that is waiting on a human decision (for example, a tool call gated behind an approval policy). The body carries the approval decision; the run resumes once the decision is recorded. This endpoint is advertised in `/v1/capabilities` as the `run_approval` feature so external UIs can detect support before surfacing an approval prompt.
 
+Send the exact `request_id` from the `approval.request` event alongside `choice`
+(`once`, `session`, `always`, or `deny`):
+
+```json
+{"choice": "once", "request_id": "the-id-from-the-event"}
+```
+
+Missing or invalid request IDs return `400`; an expired or already resolved
+request returns `409` without approving another request. Explicit bulk actions
+may use `{"choice": "deny", "all": true}` to resolve all current requests for
+that run. Do not use bulk mode as a fallback for a stale individual prompt.
+
 ## Jobs API (background scheduled work)
 
 The server exposes a lightweight jobs CRUD surface for managing scheduled / background agent runs from a remote client. All endpoints are gated behind the same bearer auth.
