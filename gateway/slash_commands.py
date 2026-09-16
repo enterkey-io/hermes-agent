@@ -5682,12 +5682,14 @@ class GatewaySlashCommandsMixin:
         session_key = self._session_key_for_source(source)
 
         from tools.approval import (
-            resolve_gateway_approval, has_blocking_approval,
+            resolve_gateway_approval, has_blocking_approval, gateway_approval_expired,
         )
 
         if not has_blocking_approval(session_key):
             if session_key in self._pending_approvals:
                 self._pending_approvals.pop(session_key)
+                return t("gateway.approval_expired")
+            if gateway_approval_expired(session_key):
                 return t("gateway.approval_expired")
             return t("gateway.approve.no_pending")
 
@@ -5705,6 +5707,8 @@ class GatewaySlashCommandsMixin:
 
         count = resolve_gateway_approval(session_key, choice, resolve_all=resolve_all)
         if not count:
+            if gateway_approval_expired(session_key):
+                return t("gateway.approval_expired")
             return t("gateway.approve.no_pending")
 
         # Resume typing indicator — agent is about to continue processing.
@@ -5731,13 +5735,15 @@ class GatewaySlashCommandsMixin:
         session_key = self._session_key_for_source(source)
 
         from tools.approval import (
-            resolve_gateway_approval, has_blocking_approval,
+            resolve_gateway_approval, has_blocking_approval, gateway_approval_expired,
         )
 
         if not has_blocking_approval(session_key):
             if session_key in self._pending_approvals:
                 self._pending_approvals.pop(session_key)
                 return t("gateway.deny.stale")
+            if gateway_approval_expired(session_key):
+                return t("gateway.approval_expired")
             return t("gateway.deny.no_pending")
 
         # Parse args: a leading "all" token denies every pending command;
@@ -5759,6 +5765,8 @@ class GatewaySlashCommandsMixin:
             reason=reason or None,
         )
         if not count:
+            if gateway_approval_expired(session_key):
+                return t("gateway.approval_expired")
             return t("gateway.deny.no_pending")
 
         # Resume typing indicator — agent continues (with BLOCKED result).

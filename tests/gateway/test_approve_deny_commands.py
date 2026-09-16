@@ -328,7 +328,6 @@ class TestBlockingApprovalE2E:
             check_all_command_guards,
             register_gateway_notify,
             reset_current_session_key,
-            resolve_gateway_approval,
             set_current_session_key,
             unregister_gateway_notify,
         )
@@ -336,39 +335,32 @@ class TestBlockingApprovalE2E:
         monkeypatch.setattr(approval_module, "_YOLO_MODE_FROZEN", False)
         session_key = "e2e-timeout"
         register_gateway_notify(session_key, lambda d: None)
+        entry_type = approval_module._ApprovalEntry
 
-        result_holder = [None]
+        def make_entry(data):
+            entry = entry_type(data)
 
-        def agent_thread():
-            token = set_current_session_key(session_key)
-            os.environ["HERMES_GATEWAY_SESSION"] = "1"
-            os.environ["HERMES_EXEC_ASK"] = "1"
-            os.environ["HERMES_SESSION_KEY"] = session_key
-            try:
-                with patch(
-                    "tools.approval._get_approval_config",
-                    return_value=approval_config,
-                ):
-                    result_holder[0] = check_all_command_guards(
-                        "rm -rf /important", "local"
-                    )
-            finally:
-                os.environ.pop("HERMES_GATEWAY_SESSION", None)
-                os.environ.pop("HERMES_EXEC_ASK", None)
-                os.environ.pop("HERMES_SESSION_KEY", None)
-                reset_current_session_key(token)
+            def unexpected_wait(*args, **kwargs):
+                pytest.fail("zero-timeout approval must not wait for a response")
 
-        t = threading.Thread(target=agent_thread)
-        t.start()
-        t.join(timeout=1)
-        if t.is_alive():
-            resolve_gateway_approval(session_key, "deny")
-            t.join(timeout=5)
+            monkeypatch.setattr(entry.event, "wait", unexpected_wait)
+            return entry
 
-        assert result_holder[0]["approved"] is False
-        assert result_holder[0]["outcome"] == "timeout"
-        assert "timed out" in result_holder[0]["message"]
-        unregister_gateway_notify(session_key)
+        monkeypatch.setattr(approval_module, "_ApprovalEntry", make_entry)
+        token = set_current_session_key(session_key)
+        try:
+            with patch.dict(os.environ, {
+                "HERMES_GATEWAY_SESSION": "1",
+                "HERMES_EXEC_ASK": "1",
+                "HERMES_SESSION_KEY": session_key,
+            }), patch("tools.approval._get_approval_config", return_value=approval_config):
+                result = check_all_command_guards("rm -rf /important", "local")
+            assert result["approved"] is False
+            assert result["outcome"] == "timeout"
+            assert "timed out" in result["message"]
+        finally:
+            unregister_gateway_notify(session_key)
+            reset_current_session_key(token)
 
     def test_parallel_subagent_approvals(self):
         """Multiple threads can block concurrently and be resolved independently."""

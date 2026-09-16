@@ -2779,13 +2779,15 @@ def _denial_breaker_addendum(session_key: str) -> str:
 
 class _ApprovalEntry:
     """One pending dangerous-command approval inside a gateway session."""
-    __slots__ = ("event", "data", "result", "reason", "acknowledged")
+    __slots__ = ("event", "data", "result", "reason", "acknowledged", "expires_at", "expired")
 
     def __init__(self, data: dict):
         self.event = threading.Event()
         self.data = dict(data)
         self.data.setdefault("request_id", uuid.uuid4().hex)
         self.acknowledged = False
+        self.expires_at: Optional[float] = None
+        self.expired = False
         self.result: Optional[str] = None  # "once"|"session"|"always"|"deny"
         # Optional free-text reason supplied with an explicit deny
         # (``/deny <reason>``) so the agent can adapt instead of only
@@ -2795,6 +2797,54 @@ class _ApprovalEntry:
 
 _gateway_queues: dict[str, list] = {}        # session_key → [_ApprovalEntry, …]
 _gateway_notify_cbs: dict[str, object] = {}  # session_key → callable(approval_data)
+# Diagnostic tombstones only: never commands, consent, or replayable requests.
+# Survive turn cleanup, but not process restart; bound both age and cardinality.
+_gateway_expired: dict[str, float] = {}
+_GATEWAY_EXPIRED_TTL = 3600.0
+_GATEWAY_EXPIRED_LIMIT = 1024
+_GATEWAY_EXPIRED_GUIDANCE = (
+    " This approval request has expired and is closed; there is no pending "
+    "command for /approve. Do not ask the user to approve the expired request."
+)
+
+
+def _record_gateway_expiry(session_key: str) -> None:
+    """Record expiry while holding _lock; retain no command or authorization."""
+    now = time.monotonic()
+    for key, timestamp in list(_gateway_expired.items()):
+        if now - timestamp >= _GATEWAY_EXPIRED_TTL:
+            _gateway_expired.pop(key, None)
+    _gateway_expired.pop(session_key, None)
+    _gateway_expired[session_key] = now
+    while len(_gateway_expired) > _GATEWAY_EXPIRED_LIMIT:
+        _gateway_expired.pop(next(iter(_gateway_expired)))
+
+
+def _expire_gateway_entries(session_key: str) -> None:
+    """Retire elapsed requests under _lock, including a delayed worker's wait."""
+    queue = _gateway_queues.get(session_key, [])
+    now = time.monotonic()
+    for entry in list(queue):
+        if entry.expires_at is not None and now >= entry.expires_at:
+            queue.remove(entry)
+            entry.expired = True
+            entry.event.set()
+            _record_gateway_expiry(session_key)
+    if not queue:
+        _gateway_queues.pop(session_key, None)
+
+
+def gateway_approval_expired(session_key: str) -> bool:
+    """Whether this session recently lost its pending approval to timeout."""
+    with _lock:
+        _expire_gateway_entries(session_key)
+        timestamp = _gateway_expired.get(session_key)
+        if timestamp is None:
+            return False
+        if time.monotonic() - timestamp >= _GATEWAY_EXPIRED_TTL:
+            _gateway_expired.pop(session_key, None)
+            return False
+        return not _gateway_queues.get(session_key)
 
 
 def register_gateway_notify(session_key: str, cb) -> None:
@@ -2840,6 +2890,7 @@ def resolve_gateway_approval(session_key: str, choice: str,
     Returns the number of approvals resolved (0 means nothing was pending).
     """
     with _lock:
+        _expire_gateway_entries(session_key)
         queue = _gateway_queues.get(session_key)
         if not queue:
             return 0
@@ -2855,24 +2906,28 @@ def resolve_gateway_approval(session_key: str, choice: str,
             targets = [queue.pop(0)]
         if not queue:
             _gateway_queues.pop(session_key, None)
-
-    for entry in targets:
-        entry.result = choice
-        if reason:
-            entry.reason = reason
-        entry.event.set()
+        _gateway_expired.pop(session_key, None)
+        # Publish the decision atomically with removal. Otherwise the waiter
+        # can observe removal without consent and falsely report a timeout.
+        for entry in targets:
+            entry.result = choice
+            if reason:
+                entry.reason = reason
+            entry.event.set()
     return len(targets)
 
 
 def list_gateway_approvals(session_key: str) -> list[dict]:
     """Return replay-safe snapshots of unresolved approvals for one session."""
     with _lock:
+        _expire_gateway_entries(session_key)
         return [dict(entry.data) for entry in _gateway_queues.get(session_key, [])]
 
 
 def ack_gateway_approval(session_key: str, request_id: str) -> bool:
     """Record that a client received a particular pending approval request."""
     with _lock:
+        _expire_gateway_entries(session_key)
         for entry in _gateway_queues.get(session_key, []):
             if entry.data.get("request_id") == request_id:
                 entry.acknowledged = True
@@ -2883,6 +2938,7 @@ def ack_gateway_approval(session_key: str, request_id: str) -> bool:
 def has_blocking_approval(session_key: str) -> bool:
     """Check if a session has one or more blocking gateway approvals waiting."""
     with _lock:
+        _expire_gateway_entries(session_key)
         return bool(_gateway_queues.get(session_key))
 
 
@@ -2896,6 +2952,7 @@ def get_pending_gateway_approval(session_key: str) -> dict | None:
     if not session_key:
         return None
     with _lock:
+        _expire_gateway_entries(session_key)
         queue = _gateway_queues.get(session_key)
         if not queue:
             return None
@@ -3895,7 +3952,7 @@ def _run_approval_gate(
             if not resolved or choice is None or choice == "deny":
                 if not resolved:
                     reason = "timed out without user response"
-                    timeout_addendum = " Silence is not consent."
+                    timeout_addendum = " Silence is not consent." + _GATEWAY_EXPIRED_GUIDANCE
                 else:
                     reason = "denied by user"
                     timeout_addendum = ""
@@ -4607,6 +4664,7 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
 
     entry = _ApprovalEntry(approval_data)
     with _lock:
+        _gateway_expired.pop(session_key, None)
         _gateway_queues.setdefault(session_key, []).append(entry)
 
     def _drop_entry() -> None:
@@ -4661,6 +4719,8 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
 
     _now = time.monotonic()
     _deadline = _now + max(timeout, 0)
+    with _lock:
+        entry.expires_at = _deadline
     _activity_state = {"last_touch": _now, "start": _now}
     resolved = False
     # The poll loop below is verifiably blocked on a human answer (the user
@@ -4682,9 +4742,11 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
                     "returning deny for session %s",
                     session_key,
                 )
-                entry.result = "deny"
-                entry.event.set()
-                resolved = True
+                with _lock:
+                    if not entry.expired and entry.result is None:
+                        entry.result = "deny"
+                        entry.event.set()
+                    resolved = entry.result is not None
                 break
             _remaining = _deadline - time.monotonic()
             if _remaining <= 0:
@@ -4695,7 +4757,20 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
             if touch_activity_if_due is not None:
                 touch_activity_if_due(_activity_state, "waiting for user approval")
 
-    _drop_entry()
+    with _lock:
+        queue = _gateway_queues.get(session_key, [])
+        if entry.result is not None:
+            resolved = True
+        elif entry.expired or not resolved:
+            entry.expired = True
+            entry.event.set()
+            resolved = False
+            if entry in queue:
+                _record_gateway_expiry(session_key)
+        if entry in queue:
+            queue.remove(entry)
+        if not queue:
+            _gateway_queues.pop(session_key, None)
 
     choice = entry.result
     # Normalize outcome for the post hook. Unresolved (timeout) and None both
@@ -5185,7 +5260,7 @@ def check_all_command_guards(command: str, env_type: str,
                 # See issue #24912 for the original incident.
                 if not resolved:
                     reason = "timed out without user response"
-                    timeout_addendum = " Silence is not consent."
+                    timeout_addendum = " Silence is not consent." + _GATEWAY_EXPIRED_GUIDANCE
                     outcome = "timeout"
                 else:
                     reason = "denied by user"
@@ -5636,7 +5711,7 @@ def check_execute_code_guard(code: str, env_type: str,
 
     if not resolved or choice is None or choice == "deny":
         reason = "timed out without user response" if not resolved else "denied by user"
-        addendum = " Silence is not consent." if not resolved else ""
+        addendum = (" Silence is not consent." + _GATEWAY_EXPIRED_GUIDANCE) if not resolved else ""
         reason_addendum = ""
         if resolved and choice == "deny" and deny_reason:
             reason_addendum = f' Reason given by the user: "{deny_reason}".'
