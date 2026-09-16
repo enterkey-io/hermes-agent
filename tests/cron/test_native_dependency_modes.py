@@ -23,8 +23,9 @@ NOTE = "mcp__fixture_notes__get_note"
 TASKS = "mcp__fixture_tasks__get_tasks"
 
 
-def _response(tool=None):
-    message = {"role": "assistant", "content": "[SILENT]"}
+def _response(tool=None, *, tracked=False):
+    final = "[SILENT]\n[WORKFLOW_STATUS:completed]" if tracked else "[SILENT]"
+    message = {"role": "assistant", "content": final}
     if tool:
         message = {
             "role": "assistant", "content": None,
@@ -46,7 +47,8 @@ def _response(tool=None):
     ("failed_enrichment", "error"),
     ("failed_note", "error"),
 ])
-def test_native_agent_dependency_modes(monkeypatch, branch, expected_status):
+@pytest.mark.parametrize("tracked", [False, True])
+def test_native_agent_dependency_modes(monkeypatch, branch, expected_status, tracked):
     home = get_hermes_home()
     home.mkdir(parents=True, exist_ok=True)
     (home / "config.yaml").write_text(
@@ -122,7 +124,7 @@ def test_native_agent_dependency_modes(monkeypatch, branch, expected_status):
     calls = [] if branch == "no_tools" else [NOTE]
     if branch in {"enrich", "failed_enrichment"}:
         calls.append(TASKS)
-    responses = iter([*map(_response, calls), _response()])
+    responses = iter([*map(_response, calls), _response(tracked=tracked)])
     model_requests = []
 
     def respond(self, api_kwargs):
@@ -142,10 +144,15 @@ def test_native_agent_dependency_modes(monkeypatch, branch, expected_status):
             required_tool_dependencies=[NOTE, TASKS],
             required_tool_dependency_mode="when_invoked",
             required_tool_dependency_modes={NOTE: "always"},
+            track_workflow_status=tracked,
         )
         assert scheduler.run_one_job(job) is True
         saved = next(item for item in jobs.list_jobs(include_disabled=True) if item["id"] == job["id"])
         assert saved["last_status"] == expected_status
+        if tracked:
+            assert saved["last_workflow_status"] == (
+                "completed" if expected_status == "ok" else "failed"
+            )
         assert len(model_requests) == len(calls) + 1
         assert not network_attempts
         for name in (NOTE, TASKS):
