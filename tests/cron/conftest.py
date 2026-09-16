@@ -17,6 +17,13 @@ import os
 import pytest
 
 
+def pytest_addoption(parser):
+    parser.addoption('--plaud-fixture-runner', default=None,
+                     help='Offline knowledge-library Plaud SDK fixture script')
+    parser.addoption('--plaud-pipeline-source', default=None,
+                     help='Installed Plaud scripts for offline native integration')
+
+
 @pytest.fixture()
 def make_cron_provider():
     """Factory for minimal CronScheduler test doubles.
