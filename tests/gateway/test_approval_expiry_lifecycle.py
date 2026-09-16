@@ -112,6 +112,18 @@ def test_expired_scope_does_not_leak_to_another_thread(scope):
     assert "no pending" in result.lower()
 
 
+def test_conversation_boundary_clears_expiry_but_not_another_session(scope):
+    _run_marker(scope)
+    other_key = scope.key + ":other"
+    with approval._lock:
+        approval._record_gateway_expiry(other_key)
+    approval.unregister_gateway_notify(scope.key)
+    assert "expired" in _approve(scope).lower()
+    scope.runner._clear_session_boundary_security_state(scope.key)
+    assert "no pending" in _approve(scope).lower()
+    assert approval.gateway_approval_expired(other_key)
+
+
 def test_expired_request_cannot_be_resolved_before_worker_wakes(scope, monkeypatch):
     clock = SimpleNamespace(now=100.0)
     monkeypatch.setattr(approval.time, "monotonic", lambda: clock.now)
