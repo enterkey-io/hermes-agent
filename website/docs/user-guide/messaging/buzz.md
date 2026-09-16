@@ -110,6 +110,18 @@ By default the allow-list is empty, which means every community member who menti
 
 Cron jobs and notifications (`deliver=buzz`) are delivered to the **home channel** — `BUZZ_HOME_CHANNEL` if set, otherwise the first watched channel — and work even when cron runs outside the gateway process.
 
+## Send notifications
+
+An explicit `buzz:CHANNEL_UUID` target works without a channel-directory entry:
+
+```bash
+hermes send --to buzz:ccc2bc1a-7a82-5a8f-8c4e-57a070cbe7cd "Job finished"
+```
+
+Append `:EVENT_ID` to reply in a thread, using the root event's 64-character
+hex ID. Channel names still resolve through the channel directory. These target
+forms also apply to the `send_message` tool and explicit cron delivery targets.
+
 ## Run the gateway
 
 ```bash
