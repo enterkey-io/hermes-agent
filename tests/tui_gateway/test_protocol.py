@@ -432,6 +432,23 @@ def test_approval_response_never_falls_through_to_another_request(server, monkey
     assert newer.result == ("once" if binding == "newer" else None)
 
 
+def test_approval_bulk_precedes_retained_request_id(server, monkeypatch):
+    from tests.gateway._approval_binding import pending_pair
+    from tools import approval
+
+    server._sessions["ui-1"] = {"session_key": "agent-1", "history": []}
+    older, newer = pending_pair(monkeypatch, "agent-1")
+    other = approval._ApprovalEntry({"command": "other session"})
+    approval._gateway_queues["agent-2"] = [other]
+    response = server.handle_request({
+        "id": "bulk", "method": "approval.respond",
+        "params": {"session_id": "ui-1", "choice": "once", "request_id": "newer-request", "all": True},
+    })
+    assert response["result"] == {"resolved": 2}
+    assert older.result == newer.result == "once"
+    assert other.result is None
+
+
 def test_clear_pending(server):
     ev = threading.Event()
     # _pending values are (sid, Event) tuples

@@ -2880,8 +2880,9 @@ def resolve_gateway_approval(session_key: str, choice: str,
     waiting agent thread(s).
 
     When *resolve_all* is True every pending approval in the session is
-    resolved at once (``/approve all``).  Otherwise only the oldest one
-    is resolved (FIFO).
+    resolved at once (``/approve all``), even if *request_id* is supplied.
+    Otherwise resolve the exact *request_id*, or the oldest one (FIFO)
+    when no request identity is supplied.
 
     *reason* is an optional free-text explanation attached to an explicit
     deny (``/deny <reason>``).  It is relayed back to the agent in the
@@ -2894,14 +2895,14 @@ def resolve_gateway_approval(session_key: str, choice: str,
         queue = _gateway_queues.get(session_key)
         if not queue:
             return 0
-        if request_id:
+        if resolve_all:
+            targets = list(queue)
+            queue.clear()
+        elif request_id:
             targets = [entry for entry in queue if entry.data.get("request_id") == request_id]
             if not targets:
                 return 0
             queue[:] = [entry for entry in queue if entry not in targets]
-        elif resolve_all:
-            targets = list(queue)
-            queue.clear()
         else:
             targets = [queue.pop(0)]
         if not queue:
