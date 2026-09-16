@@ -2088,6 +2088,27 @@ def _normalize_required_tool_dependency_mode(value: Any) -> Optional[str]:
     return value
 
 
+def _normalize_required_tool_dependency_modes(
+    value: Any, required: Optional[List[str]],
+) -> Optional[Dict[str, str]]:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("required_tool_dependency_modes must be a mapping")
+    normalized = {}
+    for name, mode in value.items():
+        if not isinstance(name, str) or name not in (required or []):
+            raise ValueError(
+                "required_tool_dependency_modes keys must name declared dependencies"
+            )
+        if not isinstance(mode, str) or mode not in {"always", "when_invoked"}:
+            raise ValueError(
+                "required_tool_dependency_modes values must be 'always' or 'when_invoked'"
+            )
+        normalized[name] = mode
+    return normalized
+
+
 def _normalize_failure_ownership(value: Any) -> Optional[Dict[str, Any]]:
     if value is None:
         return None
@@ -2173,6 +2194,7 @@ def create_job(
     runbook_slug: Optional[str] = None,
     track_workflow_status: bool = False,
     required_tool_dependency_mode: Optional[str] = None,
+    required_tool_dependency_modes: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -2268,6 +2290,9 @@ def create_job(
     )
     normalized_required_tool_dependency_mode = _normalize_required_tool_dependency_mode(
         required_tool_dependency_mode
+    )
+    normalized_required_tool_dependency_modes = _normalize_required_tool_dependency_modes(
+        required_tool_dependency_modes, normalized_required_tool_dependencies
     )
     normalized_failure_ownership = _normalize_failure_ownership(failure_ownership)
     normalized_workdir = _normalize_workdir(workdir)
@@ -2384,6 +2409,8 @@ def create_job(
         job["required_tool_dependencies"] = normalized_required_tool_dependencies
     if normalized_required_tool_dependency_mode is not None:
         job["required_tool_dependency_mode"] = normalized_required_tool_dependency_mode
+    if normalized_required_tool_dependency_modes is not None:
+        job["required_tool_dependency_modes"] = normalized_required_tool_dependency_modes
     if normalized_failure_ownership is not None:
         job["failure_ownership"] = normalized_failure_ownership
     if normalized_workflow_id:
@@ -2544,6 +2571,13 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
                     _mv = str(_mv).strip() if isinstance(_mv, str) else None
                     updates[_mon_field] = _mv or None
             updated = _apply_skill_fields({**job, **updates})
+
+            if {"required_tool_dependencies", "required_tool_dependency_mode",
+                "required_tool_dependency_modes"}.intersection(updates):
+                updated["required_tool_dependency_modes"] = _normalize_required_tool_dependency_modes(
+                    updated.get("required_tool_dependency_modes"),
+                    updated.get("required_tool_dependencies"),
+                )
 
             # Re-check execution-mode invariants on the MERGED record when
             # any participating field changes, so create-time invariants

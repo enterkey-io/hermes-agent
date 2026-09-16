@@ -6951,6 +6951,7 @@ def _run_one_job_body(
         from tools.workforce_signal_runtime import activate as activate_required_signal
         from tools.workforce_signal_runtime import reset as reset_required_signal
         from tools.required_dependency_runtime import activate as activate_dependencies
+        from tools.required_dependency_runtime import blocking_missing_dependencies
         from tools.required_dependency_runtime import reset as reset_dependencies
         _required_signal_token, _required_signal_state = activate_required_signal(
             bool(job.get("required_workforce_signal")),
@@ -6984,15 +6985,14 @@ def _run_one_job_body(
         dependency_outcome = (
             _dependency_state.finalize() if _dependency_state is not None else None
         )
+        blocking_missing = blocking_missing_dependencies(
+            dependency_outcome["missing"] if dependency_outcome is not None else (),
+            mode=job.get("required_tool_dependency_mode"),
+            modes=job.get("required_tool_dependency_modes"),
+        )
         dependency_degraded = bool(
             dependency_outcome is not None
-            and (
-                dependency_outcome["failed"]
-                or (
-                    dependency_outcome["missing"]
-                    and job.get("required_tool_dependency_mode") != "when_invoked"
-                )
-            )
+            and (dependency_outcome["failed"] or blocking_missing)
         )
         # Conditional no-call branches are not failures, but they cannot prove
         # that a previously unhealthy dependency has recovered.
@@ -7002,11 +7002,10 @@ def _run_one_job_body(
         )
         dependency_error = None
         if dependency_degraded and dependency_outcome is not None:
-            missing = dependency_outcome["missing"]
             failed = dependency_outcome["failed"]
             parts = []
-            if missing and job.get("required_tool_dependency_mode") != "when_invoked":
-                parts.append("not called: " + ", ".join(missing))
+            if blocking_missing:
+                parts.append("not called: " + ", ".join(blocking_missing))
             if failed:
                 parts.append(
                     "unsuccessful: "
