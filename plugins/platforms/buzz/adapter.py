@@ -52,6 +52,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit, urlunsplit
+from uuid import UUID
 
 from agent.secret_scope import UnscopedSecretError as _UnscopedSecretError
 from agent.secret_scope import get_secret as _scoped_get_secret
@@ -1655,6 +1656,20 @@ def _env_enablement() -> Optional[dict]:
     return seed
 
 
+def _parse_target_ref(target_ref: str) -> Optional[Tuple[str, Optional[str]]]:
+    """Recognize channel UUIDs with an optional Nostr reply event ID."""
+    channel, separator, thread = target_ref.strip().partition(":")
+    try:
+        parsed = UUID(channel)
+    except ValueError:
+        return None
+    if str(parsed) != channel.lower():
+        return None
+    if separator and not re.fullmatch(r"[0-9a-fA-F]{64}", thread):
+        return None
+    return str(parsed), thread.lower() if separator else None
+
+
 async def _standalone_send(
     pconfig,
     chat_id: str,
@@ -1809,6 +1824,7 @@ def register(ctx):
         # cron jobs fail with "No live adapter" when cron runs separately
         # from the gateway.
         standalone_sender_fn=_standalone_send,
+        parse_target_ref_fn=_parse_target_ref,
         # Auth env vars for _is_user_authorized() integration
         allowed_users_env="BUZZ_ALLOWED_USERS",
         allow_all_env="BUZZ_ALLOW_ALL_USERS",

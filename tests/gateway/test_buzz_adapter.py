@@ -3,6 +3,7 @@
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock
@@ -82,6 +83,100 @@ def _make_adapter(extra=None):
     adapter._display_name = "Chip"
     adapter._private_key = "nsec1test"
     return adapter
+
+
+@pytest.fixture
+def registered_buzz_target():
+    # Complete gateway plugin discovery before installing this fixture adapter.
+    import gateway.run  # noqa: F401
+    import model_tools  # noqa: F401
+    from gateway.platform_registry import PlatformEntry, platform_registry
+
+    scope = platform_registry.current_scope_key()
+    previous = platform_registry.snapshot_registration("buzz", scope=scope)
+    context = SimpleNamespace(register_platform=lambda **kwargs: platform_registry.register(
+        PlatformEntry(source="plugin", **kwargs), scope=scope
+    ))
+    register(context)
+    current = platform_registry.snapshot_registration("buzz", scope=scope)
+    try:
+        yield
+    finally:
+        platform_registry.restore_registration("buzz", current, previous, scope=scope)
+
+
+@pytest.mark.parametrize("thread", [None, "a" * 64])
+def test_explicit_channel_cli_reaches_standalone_sender(
+    monkeypatch, capsys, registered_buzz_target, thread
+):
+    from gateway.config import Platform, PlatformConfig
+    from hermes_cli import send_cmd
+
+    config = SimpleNamespace(
+        platforms={Platform("buzz"): PlatformConfig(enabled=True, extra={"relay_url": "https://fixture.invalid"})},
+        get_home_channel=lambda _: pytest.fail("explicit target must not use home channel"),
+    )
+    monkeypatch.setattr(send_cmd, "_load_hermes_env", lambda: None)
+    monkeypatch.setattr("gateway.config.load_gateway_config", lambda: config)
+    monkeypatch.setattr("tools.send_message_tool.prepare_send_message_platforms", lambda: None)
+    monkeypatch.setattr("gateway.channel_directory.resolve_channel_name", lambda *_: None)
+    monkeypatch.setattr("gateway.run._gateway_runner_ref", lambda: None)
+    monkeypatch.setattr("gateway.mirror.mirror_to_session", lambda **_: True)
+    monkeypatch.setattr("tools.interrupt.is_interrupted", lambda: False)
+    monkeypatch.setattr("model_tools._run_async", asyncio.run)
+    monkeypatch.setattr(_buzz_mod, "_resolve_private_key", lambda *_: "fixture-key")
+    monkeypatch.setattr(_buzz_mod, "_resolve_cli_path", lambda *_: "fixture-buzz")
+    transport = AsyncMock(return_value=(0, '{"event_id":"fixture-event"}', ""))
+    monkeypatch.setattr(_buzz_mod, "_exec_buzz", transport)
+    target = f"buzz:{CHANNEL}" + (f":{thread}" if thread else "")
+    with pytest.raises(SystemExit) as stopped:
+        send_cmd.cmd_send(SimpleNamespace(
+            to=target, message="fixture notification", subject="Fixture subject",
+            file=None, json=True, quiet=False, list_targets=False,
+        ))
+    assert stopped.value.code == 0, capsys.readouterr()
+    transport.assert_awaited_once()
+    argv = transport.call_args.args[1]
+    assert argv == ["messages", "send", "--channel", CHANNEL, "--content", "-"] + (
+        ["--reply-to", thread] if thread else []
+    )
+    assert transport.call_args.kwargs["input_text"] == "Fixture subject\n\nfixture notification"
+
+
+@pytest.mark.parametrize("target", [
+    "", "finance", "--channel other", CHANNEL.replace("-", ""),
+    "{" + CHANNEL + "}", CHANNEL + ":", CHANNEL + ":bad-event",
+    CHANNEL + ":" + "g" * 64, CHANNEL + ":" + "a" * 64 + ":extra",
+])
+def test_buzz_target_parser_rejects_non_native_targets(target):
+    assert _buzz_mod._parse_target_ref(target) is None
+
+
+def test_buzz_target_parser_normalizes_uuid_and_event():
+    assert _buzz_mod._parse_target_ref(" " + CHANNEL.upper() + ":" + "A" * 64 + " ") == (
+        CHANNEL, "a" * 64
+    )
+
+
+def test_buzz_named_target_still_uses_directory(monkeypatch, registered_buzz_target):
+    from tools.send_message_tool import resolve_send_target
+
+    monkeypatch.setattr("gateway.channel_directory.resolve_channel_name", lambda *_: CHANNEL)
+    assert resolve_send_target("buzz", "Finance") == (CHANNEL, None, None)
+
+
+@pytest.mark.parametrize("thread", [None, "b" * 64, "invalid"])
+def test_buzz_cron_target_uses_native_parser(monkeypatch, registered_buzz_target, thread):
+    from cron.scheduler import _resolve_single_delivery_target
+
+    monkeypatch.setattr("tools.send_message_tool.prepare_send_message_platforms", lambda: None)
+    monkeypatch.setattr("gateway.channel_directory.resolve_channel_name", lambda *_: None)
+    target = f"buzz:{CHANNEL}" + (f":{thread}" if thread else "")
+    result = _resolve_single_delivery_target({}, target)
+    if thread == "invalid":
+        assert result is None
+    else:
+        assert result == {"platform": "buzz", "chat_id": CHANNEL, "thread_id": thread}
 
 
 class _ScriptedCli:
