@@ -1482,6 +1482,9 @@ def _(rid, params: dict) -> dict:
     session, err = _sess(params, rid)
     if err:
         return err
+    request_id = params.get("request_id")
+    if not params.get("all", False) and (not isinstance(request_id, str) or not request_id):
+        return _ok(rid, {"resolved": 0})
     try:
         from tools.approval import resolve_gateway_approval
 
@@ -1492,7 +1495,7 @@ def _(rid, params: dict) -> dict:
                     session["session_key"],
                     params.get("choice", "deny"),
                     resolve_all=params.get("all", False),
-                    request_id=params.get("request_id"),
+                    request_id=request_id,
                 )
             },
         )

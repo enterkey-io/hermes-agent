@@ -6070,6 +6070,7 @@ class TurnRunner:
                             chat_id=ctx._status_chat_id,
                             command=cmd,
                             session_key=_approval_session_key,
+                            request_id=approval_data.get("request_id"),
                             description=desc,
                             metadata=ctx._status_thread_metadata,
                             allow_permanent=approval_data.get("allow_permanent", True),

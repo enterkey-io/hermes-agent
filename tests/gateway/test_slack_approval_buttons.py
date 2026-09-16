@@ -1,11 +1,13 @@
 """Tests for Slack Block Kit approval buttons and thread context fetching."""
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from tests.gateway._approval_binding import pending_pair
 
 # ---------------------------------------------------------------------------
 # Ensure the repo root is importable
@@ -85,6 +87,37 @@ class TestSlackExecApproval:
     """Test the send_exec_approval method sends Block Kit buttons."""
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("missing_id", [False, True])
+    async def test_stale_button_cannot_approve_newer_request(self, monkeypatch, missing_id):
+        adapter = _make_adapter()
+        client = adapter._team_clients["T1"]
+        client.chat_postMessage = AsyncMock(side_effect=[{"ts": "old"}, {"ts": "new"}])
+        adapter._is_interactive_user_authorized = lambda *args, **kwargs: True
+        key = "agent:main:slack:group:C1:1111"
+        older, newer = pending_pair(monkeypatch, key)
+        for entry in (older, newer):
+            await adapter.send_exec_approval(
+                "C1", entry.data["command"], key,
+                request_id=None if missing_id and entry is older else entry.data["request_id"],
+            )
+        actions = [call.kwargs["blocks"][1]["elements"][0] for call in client.chat_postMessage.call_args_list]
+        older.expires_at = 0
+
+        async def click(index):
+            await adapter._handle_approval_action(
+                AsyncMock(),
+                {"team": {"id": "T1"}, "message": {"ts": ("old", "new")[index]},
+                 "channel": {"id": "C1"}, "user": {"id": "U1", "name": "Owner"}},
+                actions[index],
+            )
+
+        await click(0)
+        assert older.result is None
+        assert newer.result is None
+        await click(1)
+        assert newer.result == "once"
+
+    @pytest.mark.asyncio
     async def test_sends_blocks_with_buttons(self):
         adapter = _make_adapter()
         mock_client = adapter._team_clients["T1"]
@@ -95,6 +128,7 @@ class TestSlackExecApproval:
             command="rm -rf /important",
             session_key="agent:main:slack:group:C1:1111",
             description="dangerous deletion",
+            request_id="req-1",
         )
 
         assert result.success is True
@@ -117,9 +151,9 @@ class TestSlackExecApproval:
         assert "hermes_approve_session" in action_ids
         assert "hermes_approve_always" in action_ids
         assert "hermes_deny" in action_ids
-        # Each button carries the session key as value
+        # Each button identifies the exact request, not only the session.
         for e in elements:
-            assert e["value"] == "agent:main:slack:group:C1:1111"
+            assert json.loads(e["value"]) == {"session_key": "agent:main:slack:group:C1:1111", "request_id": "req-1"}
 
     @pytest.mark.asyncio
     async def test_smart_deny_owner_override_hides_persistent_buttons(self):
@@ -840,4 +874,3 @@ class TestSlackReactionAuthorizationGate:
         assert "U_RANDO" in runner.auth_checked
         assert runner.handled == []
         adapter.handle_message.assert_not_called()
-

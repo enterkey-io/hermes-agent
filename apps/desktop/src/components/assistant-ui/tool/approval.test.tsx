@@ -33,10 +33,17 @@ function part(toolName: string): ToolPart {
 function setRequest(
   command = 'rm -rf /tmp/x',
   allowPermanent?: boolean,
-  extra: { choices?: string[]; smartDenied?: boolean } = {}
+  extra: { choices?: string[]; smartDenied?: boolean; requestId?: string } = {}
 ) {
   $activeSessionId.set('sess-1')
-  setApprovalRequest({ allowPermanent, command, description: 'dangerous command', sessionId: 'sess-1', ...extra })
+  setApprovalRequest({
+    allowPermanent,
+    command,
+    description: 'dangerous command',
+    sessionId: 'sess-1',
+    requestId: 'req-1',
+    ...extra
+  })
 }
 
 function mockGateway() {
@@ -83,7 +90,11 @@ describe('PendingToolApproval', () => {
     fireEvent.click(screen.getByRole('button', { name: /Run/ }))
 
     await waitFor(() => {
-      expect(request).toHaveBeenCalledWith('approval.respond', { choice: 'once', session_id: 'sess-1' })
+      expect(request).toHaveBeenCalledWith('approval.respond', {
+        choice: 'once',
+        session_id: 'sess-1',
+        request_id: 'req-1'
+      })
     })
     expect($approvalRequest.get()).toBeNull()
   })
@@ -109,8 +120,21 @@ describe('PendingToolApproval', () => {
     fireEvent.click(screen.getByRole('button', { name: /Reject/ }))
 
     await waitFor(() => {
-      expect(request).toHaveBeenCalledWith('approval.respond', { choice: 'deny', session_id: 'sess-1' })
+      expect(request).toHaveBeenCalledWith('approval.respond', {
+        choice: 'deny',
+        session_id: 'sess-1',
+        request_id: 'req-1'
+      })
     })
+  })
+
+  it('does not submit a legacy prompt without a request ID', () => {
+    const request = mockGateway()
+    setRequest('fixture', true, { requestId: undefined })
+    render(<PendingToolApproval part={part('terminal')} />)
+    fireEvent.click(screen.getByRole('button', { name: /Run/ }))
+    expect(request).not.toHaveBeenCalled()
+    expect($approvalRequest.get()).not.toBeNull()
   })
 
   it('offers "Always allow" in the options menu by default', async () => {

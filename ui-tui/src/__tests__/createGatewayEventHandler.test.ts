@@ -1178,6 +1178,15 @@ describe('createGatewayEventHandler', () => {
     ])
   })
 
+  it('preserves the exact approval request identity on the overlay', () => {
+    const onEvent = createGatewayEventHandler(buildCtx([]))
+    onEvent({
+      payload: { command: 'fixture', description: 'approval', request_id: 'req-1' },
+      type: 'approval.request'
+    })
+    expect(getOverlayState().approval?.requestId).toBe('req-1')
+  })
+
   it('defaults approval overlays to allowPermanent when the backend omits the field', () => {
     const onEvent = createGatewayEventHandler(buildCtx([]))
 

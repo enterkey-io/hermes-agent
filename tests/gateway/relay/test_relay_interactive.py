@@ -30,6 +30,24 @@ from gateway.relay.descriptor import CONTRACT_VERSION, CapabilityDescriptor
 from gateway.session import SessionSource
 
 from tests.gateway.relay.stub_connector import StubConnector
+from tests.gateway._approval_binding import pending_pair
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("binding", ["expired", "missing", "newer"])
+async def test_exec_prompt_resolves_only_its_request(monkeypatch, binding):
+    adapter, stub = _adapter()
+    older, newer = pending_pair(monkeypatch, "sess-binding")
+    request_id = {"expired": "older-request", "missing": None, "newer": "newer-request"}[binding]
+    result = await adapter.send_exec_approval("c1", "fixture", "sess-binding", request_id=request_id)
+    assert result.success
+    prompt_id = stub.sent[-1]["prompt_id"]
+    if binding == "expired":
+        older.expires_at = 0
+    event = _event({"prompt_id": prompt_id, "option_id": "once"})
+    assert await adapter._consume_prompt_response(event) is True
+    assert older.result is None
+    assert newer.result == ("once" if binding == "newer" else None)
 
 FULL_OPS = (
     "send",

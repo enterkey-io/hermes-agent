@@ -414,6 +414,24 @@ def test_approval_response_correlates_request_id(server, monkeypatch):
     assert calls == [("agent-1", "once", {"resolve_all": False, "request_id": "req-1"})]
 
 
+@pytest.mark.parametrize("binding", ["expired", "missing", "newer"])
+def test_approval_response_never_falls_through_to_another_request(server, monkeypatch, binding):
+    from tests.gateway._approval_binding import pending_pair
+
+    server._sessions["ui-1"] = {"session_key": "agent-1", "history": []}
+    older, newer = pending_pair(monkeypatch, "agent-1")
+    request_id = {"expired": "older-request", "missing": None, "newer": "newer-request"}[binding]
+    if binding == "expired":
+        older.expires_at = 0
+    response = server.handle_request({
+        "id": "binding", "method": "approval.respond",
+        "params": {"session_id": "ui-1", "choice": "once", "request_id": request_id},
+    })
+    assert response["result"] == {"resolved": 1 if binding == "newer" else 0}
+    assert older.result is None
+    assert newer.result == ("once" if binding == "newer" else None)
+
+
 def test_clear_pending(server):
     ev = threading.Event()
     # _pending values are (sid, Event) tuples

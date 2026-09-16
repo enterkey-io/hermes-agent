@@ -77,6 +77,31 @@ def _create_runs_app(adapter: APIServerAdapter) -> web.Application:
     return app
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("binding", ["expired", "missing", "empty", "invalid", "newer"])
+async def test_http_approval_is_bound_to_its_request(monkeypatch, binding):
+    from tests.gateway._approval_binding import pending_pair
+
+    adapter = _make_adapter(api_key="fixture-key")
+    adapter._set_run_status("fixture-run", "waiting_for_approval")
+    adapter._run_approval_sessions["fixture-run"] = "fixture-run"
+    older, newer = pending_pair(monkeypatch, "fixture-run")
+    request_id = {"expired": "older-request", "missing": None, "empty": "", "invalid": 7, "newer": "newer-request"}[binding]
+    body = {"choice": "once"}
+    if binding != "missing":
+        body["request_id"] = request_id
+    if binding == "expired":
+        older.expires_at = 0
+    async with TestClient(TestServer(_create_runs_app(adapter))) as client:
+        response = await client.post(
+            "/v1/runs/fixture-run/approval", json=body,
+            headers={"Authorization": "Bearer fixture-key"},
+        )
+        assert response.status == (200 if binding == "newer" else 409 if binding == "expired" else 400)
+    assert older.result is None
+    assert newer.result == ("once" if binding == "newer" else None)
+
+
 def _make_slow_agent(**kwargs):
     """Create a mock agent that blocks in run_conversation until interrupted.
 
@@ -624,7 +649,7 @@ class TestRunLifecycleSweep:
 
                 approval_resp = await cli.post(
                     f"/v1/runs/{run_id}/approval",
-                    json={"choice": "once"},
+                    json={"choice": "once", "request_id": pending.data["request_id"]},
                 )
                 assert approval_resp.status == 200
                 assert pending.event.is_set()

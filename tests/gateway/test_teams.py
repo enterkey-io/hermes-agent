@@ -119,6 +119,7 @@ def _ensure_teams_mock():
             return self
 
         def with_actions(self, actions):
+            self.actions = actions
             return self
 
     microsoft_teams_cards.AdaptiveCard = MockAdaptiveCard
@@ -167,6 +168,32 @@ _ensure_teams_mock()
 # Load plugins/platforms/teams/adapter.py under a unique module name
 # (plugin_adapter_teams) so it cannot collide with sibling plugin adapters.
 _teams_mod = load_plugin_adapter("teams")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("binding", ["expired", "missing", "newer"])
+async def test_sent_approval_card_resolves_only_its_request(monkeypatch, binding):
+    from tests.gateway._approval_binding import pending_pair
+
+    monkeypatch.setenv("TEAMS_ALLOWED_USERS", "owner")
+    adapter = _teams_mod.TeamsAdapter(PlatformConfig(enabled=True))
+    adapter._app = MagicMock()
+    adapter._send_card = AsyncMock(return_value=SimpleNamespace(id="card-1"))
+    older, newer = pending_pair(monkeypatch, "sess-binding")
+    request_id = {"expired": "older-request", "missing": None, "newer": "newer-request"}[binding]
+    result = await adapter.send_exec_approval("chat-1", "fixture", "sess-binding", request_id=request_id)
+    assert result.success
+    card = adapter._send_card.call_args.args[1]
+    action = card.actions[0]
+    ctx = SimpleNamespace(activity=SimpleNamespace(
+        value=SimpleNamespace(action=action), from_=SimpleNamespace(id="owner"),
+    ))
+    if binding == "expired":
+        older.expires_at = 0
+    response = await adapter._on_card_action(ctx)
+    assert response.status == 200
+    assert older.result is None
+    assert newer.result == ("once" if binding == "newer" else None)
 
 _teams_mod.AIOHTTP_AVAILABLE = True
 # SDK import is deferred (#62935); bind mocked symbols the same way connect() does.
@@ -747,5 +774,4 @@ class TestTeamsMediaAttachments:
         result = await adapter.send_document("19:abc@thread.v2", str(doc))
         assert result.success
         adapter._app.send.assert_awaited_once()
-
 

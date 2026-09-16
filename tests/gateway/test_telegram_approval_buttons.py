@@ -48,6 +48,7 @@ _ensure_telegram_mock()
 
 from plugins.platforms.telegram.adapter import TelegramAdapter
 from gateway.config import Platform, PlatformConfig
+from tests.gateway._approval_binding import pending_pair
 
 
 def _make_adapter(extra=None):
@@ -205,6 +206,55 @@ class TestTelegramExecApproval:
 class TestTelegramApprovalCallback:
     """Test the approval callback handling in _handle_callback_query."""
 
+    @pytest.mark.asyncio
+    async def test_legacy_button_does_not_resolve_successor(self, monkeypatch):
+        adapter = _make_adapter()
+        monkeypatch.setenv("TELEGRAM_ALLOWED_USERS", "*")
+        adapter._bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=42))
+        key = "agent:main:telegram:group:12345:99"
+        older, newer = pending_pair(monkeypatch, key)
+        # The old protocol has no request identity; it must never choose a successor.
+        await adapter.send_exec_approval("12345", older.data["command"], key)
+        older.expires_at = 0
+        query = AsyncMock()
+        query.data = "ea:once:1"
+        query.message = MagicMock(chat_id=12345)
+        query.from_user = SimpleNamespace(id=12345, first_name="Owner")
+        await adapter._handle_callback_query(SimpleNamespace(callback_query=query), MagicMock())
+        assert older.result is None
+        assert newer.result is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("missing_id", [False, True])
+    async def test_stale_prompt_cannot_approve_newer_request(self, monkeypatch, missing_id):
+        adapter = _make_adapter()
+        monkeypatch.setenv("TELEGRAM_ALLOWED_USERS", "*")
+        adapter._bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=42))
+        key = "agent:main:telegram:group:12345:99"
+        older, newer = pending_pair(monkeypatch, key)
+        for entry in (older, newer):
+            await adapter.send_exec_approval(
+                "12345", entry.data["command"], key,
+                request_id=None if missing_id and entry is older else entry.data["request_id"],
+            )
+        older.expires_at = 0
+
+        async def click(approval_id):
+            query = AsyncMock()
+            query.data = f"ea:once:{approval_id}"
+            query.message = MagicMock(chat_id=12345)
+            query.from_user = SimpleNamespace(id=12345, first_name="Owner")
+            await adapter._handle_callback_query(SimpleNamespace(callback_query=query), MagicMock())
+            return query
+
+        stale = await click(1)
+        assert older.result is None
+        assert newer.result is None
+        assert "expired" in stale.answer.call_args.kwargs["text"].lower()
+        fresh = await click(2)
+        assert newer.result == "once"
+        assert "approved" in fresh.answer.call_args.kwargs["text"].lower()
+
 
     @pytest.mark.asyncio
     async def test_resume_typing_after_inline_approval(self):
@@ -215,7 +265,7 @@ class TestTelegramApprovalCallback:
         rest of a long-running turn after a button click.
         """
         adapter = _make_adapter()
-        adapter._approval_state[5] = "agent:main:telegram:group:12345:99"
+        adapter._approval_state[5] = {"session_key": "agent:main:telegram:group:12345:99", "request_id": "req-5"}
         adapter.pause_typing_for_chat("12345")
         assert "12345" in adapter._typing_paused
 
@@ -243,7 +293,7 @@ class TestTelegramApprovalCallback:
     @pytest.mark.asyncio
     async def test_approval_callback_escapes_dynamic_user_name(self):
         adapter = _make_adapter()
-        adapter._approval_state[3] = "agent:main:telegram:group:12345:99"
+        adapter._approval_state[3] = {"session_key": "agent:main:telegram:group:12345:99", "request_id": "req-3"}
 
         query = AsyncMock()
         query.data = "ea:once:3"
@@ -359,4 +409,3 @@ class TestTelegramApprovalCallback:
         assert runner.last_source is not None
         assert runner.last_source.platform == Platform.TELEGRAM
         assert runner.last_source.user_id == "222"
-

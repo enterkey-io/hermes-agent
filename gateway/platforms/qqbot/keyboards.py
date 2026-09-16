@@ -20,7 +20,7 @@ This module provides:
 
 ``button_data`` formats::
 
-    approve:<session_key>:<decision>      # decision = allow-once|allow-always|deny
+    approve:<binding_json>:<decision>    # decision = allow-once|allow-always|deny
     update_prompt:<answer>                # answer = y|n
 
 Ported from WideLee's qqbot-agent-sdk v1.2.2 (``approval.py`` + ``dto.py``
@@ -29,6 +29,7 @@ keyboard types). Authorship preserved via Co-authored-by.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -41,9 +42,8 @@ logger = logging.getLogger(__name__)
 APPROVAL_BUTTON_PREFIX = "approve:"
 UPDATE_PROMPT_PREFIX = "update_prompt:"
 
-# Pattern: approve:<session_key>:<decision>
-# session_key may itself contain colons (e.g. agent:main:qqbot:c2c:OPENID),
-# so the session_key group is greedy but trails the decision.
+# The routing payload can contain colons, including legacy session-only values.
+# Parsing retains those values; the adapter rejects unbound legacy callbacks.
 _APPROVAL_DATA_RE = re.compile(
     r"^approve:(.+):(allow-once|allow-always|deny)$"
 )
@@ -201,7 +201,10 @@ def _make_callback_button(
     )
 
 
-def build_approval_keyboard(session_key: str, *, allow_permanent: bool = True) -> InlineKeyboard:
+def build_approval_keyboard(
+    session_key: str, *, allow_permanent: bool = True,
+    request_id: Optional[str] = None,
+) -> InlineKeyboard:
     """Build the approval keyboard, hiding persistent scope when unavailable.
 
     Layout: ``[✅ 允许一次] [⭐ 始终允许] [❌ 拒绝]`` — all three share
@@ -209,7 +212,10 @@ def build_approval_keyboard(session_key: str, *, allow_permanent: bool = True) -
 
     :param session_key: Embedded into ``button_data`` so the decision
         routes back to the right pending approval.
+    :param request_id: Exact pending request identity; unbound controls fail closed.
     """
+    if request_id:
+        session_key = json.dumps({"session_key": session_key, "request_id": request_id})
     buttons = [
         _make_callback_button(
             btn_id="allow", label="✅ 允许一次", visited_label="已允许",
@@ -283,6 +289,7 @@ class ApprovalRequest:
     severity: str = ""
     timeout_sec: int = 120
     allow_permanent: bool = True
+    request_id: Optional[str] = None
 
 
 def build_approval_text(req: ApprovalRequest) -> str:
@@ -368,7 +375,10 @@ class ApprovalSender:
         :returns: ``True`` on success, ``False`` on failure.
         """
         text = build_approval_text(req)
-        keyboard = build_approval_keyboard(req.session_key)
+        keyboard = build_approval_keyboard(
+            req.session_key, allow_permanent=req.allow_permanent,
+            request_id=req.request_id,
+        )
 
         logger.info(
             "[%s] Sending approval request to %s:%s (session=%.20s…)",

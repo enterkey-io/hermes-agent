@@ -130,7 +130,7 @@ const ApprovalBar: FC<{ request: ApprovalRequest; surface: 'floating' | 'inline'
       // Another bar (or the keyboard path) may have already resolved this
       // approval; the map is the single source of truth, so bail if this
       // session's request is gone.
-      if (busy || !sessionApprovalRequest(request.sessionId).get()) {
+      if (busy || !request.requestId || !sessionApprovalRequest(request.sessionId).get()) {
         return
       }
 

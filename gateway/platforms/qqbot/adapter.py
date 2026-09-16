@@ -1166,7 +1166,17 @@ class QQAdapter(BasePlatformAdapter):
 
         approval = parse_approval_button_data(button_data)
         if approval is not None:
-            session_key, decision = approval
+            binding_text, decision = approval
+            try:
+                binding = json.loads(binding_text)
+            except (TypeError, ValueError):
+                return
+            if not isinstance(binding, dict):
+                return
+            session_key = binding.get("session_key")
+            request_id = binding.get("request_id")
+            if not isinstance(session_key, str) or not isinstance(request_id, str) or not request_id:
+                return
             choice = self._APPROVAL_BUTTON_TO_CHOICE.get(decision)
             if choice is None:
                 logger.warning(
@@ -1185,7 +1195,7 @@ class QQAdapter(BasePlatformAdapter):
                 # Import lazily to keep the adapter importable in tests that
                 # don't exercise the approval subsystem.
                 from tools.approval import resolve_gateway_approval
-                count = resolve_gateway_approval(session_key, choice)
+                count = resolve_gateway_approval(session_key, choice, request_id=request_id)
                 logger.info(
                     "[%s] Button resolved %d approval(s) for session %s "
                     "(choice=%s, operator=%s)",
@@ -2685,6 +2695,7 @@ class QQAdapter(BasePlatformAdapter):
             build_approval_keyboard(
                 req.session_key,
                 allow_permanent=getattr(req, "allow_permanent", True),
+                request_id=req.request_id,
             ),
             reply_to=reply_to,
         )
@@ -2708,6 +2719,7 @@ class QQAdapter(BasePlatformAdapter):
         allow_permanent: bool = True,
         allow_session: bool = True,
         smart_denied: bool = False,
+        request_id: Optional[str] = None,
     ) -> SendResult:
         """Send a button-based exec-approval prompt for a dangerous command.
 
@@ -2728,6 +2740,7 @@ class QQAdapter(BasePlatformAdapter):
 
         req = ApprovalRequest(
             session_key=session_key,
+            request_id=request_id,
             title="Execute this command?",
             description=description,
             command_preview=command,

@@ -7616,6 +7616,20 @@ class APIServerAdapter(BasePlatformAdapter):
             _coerce_request_bool(body.get("all"), default=False)
             or _coerce_request_bool(body.get("resolve_all"), default=False)
         )
+        request_id = body.get("request_id")
+        if request_id is not None and (not isinstance(request_id, str) or not request_id):
+            return web.json_response(
+                _openai_error("Invalid approval request_id", code="invalid_approval_request_id"),
+                status=400,
+            )
+        if not request_id and not resolve_all:
+            return web.json_response(
+                _openai_error(
+                    "request_id from the approval.request event is required",
+                    code="approval_request_id_required",
+                ),
+                status=400,
+            )
         try:
             from tools.approval import resolve_gateway_approval
 
@@ -7623,6 +7637,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 approval_session_key,
                 choice,
                 resolve_all=resolve_all,
+                request_id=request_id,
             )
         except Exception as exc:
             logger.exception("[api_server] approval resolution failed for run %s", run_id)
