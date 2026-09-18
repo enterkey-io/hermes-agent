@@ -1653,6 +1653,104 @@ class TestDeliverResultTimeoutCancelsFuture:
         assert result is None
         standalone_send.assert_not_awaited()
 
+    def test_started_bluebubbles_chunked_send_timeout_never_falls_back(self, tmp_path):
+        """A long BlueBubbles send may begin before its outer Future cancels.
+
+        ``Future.cancel()`` can report success for the scheduler-facing future
+        even after the gateway task has begun its provider work.  Drive the real
+        BlueBubbles adapter through DeliveryRouter, suspend its first chunk at
+        the API boundary, then make the outer future time out and accept
+        cancellation.  A standalone fallback here would send the first iMessage
+        chunk twice.
+        """
+        import asyncio
+        import contextlib
+
+        from gateway.config import Platform, PlatformConfig
+        from gateway.platforms.bluebubbles import BlueBubblesAdapter
+
+        chat_id = "iMessage;+;recipient"
+        adapter = BlueBubblesAdapter(
+            PlatformConfig(
+                enabled=True,
+                extra={"server_url": "http://example.invalid", "password": "test"},
+            ),
+            persist_runtime_status=False,
+        )
+        # Avoid network chat discovery so the real adapter reaches its text API
+        # send loop immediately.
+        adapter._guid_cache[chat_id] = chat_id
+        content = "x" * (adapter.MAX_MESSAGE_LENGTH + 1)
+        expected_chunks = adapter.truncate_message(content)
+        assert len(expected_chunks) == 2
+        assert all(len(chunk) <= adapter.MAX_MESSAGE_LENGTH for chunk in expected_chunks)
+        assert "".join(expected_chunks) == content
+
+        sent_chunks = []
+
+        async def first_chunk_in_flight(_path, payload):
+            sent_chunks.append(payload["message"])
+            # Model the live HTTP request after the first iMessage chunk has
+            # been handed to BlueBubbles but before it acknowledges the send.
+            await asyncio.Event().wait()
+
+        adapter._api_post = first_chunk_in_flight
+
+        async def start_real_send_then_cancel(coro):
+            task = asyncio.create_task(coro)
+            for _ in range(10):
+                await asyncio.sleep(0)
+                if sent_chunks:
+                    break
+            assert sent_chunks == [expected_chunks[0]]
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        cancel_calls = []
+
+        class StartedSendTimeoutFuture:
+            def result(self, timeout=None):
+                assert timeout == 60
+                raise TimeoutError("timed out after first BlueBubbles chunk started")
+
+            def cancel(self):
+                cancel_calls.append(True)
+                return True
+
+        def run_coro(coro, _loop):
+            asyncio.run(start_real_send_then_cancel(coro))
+            return StartedSendTimeoutFuture()
+
+        loop = MagicMock()
+        loop.is_running.return_value = True
+        pconfig = PlatformConfig(enabled=True)
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.BLUEBUBBLES: pconfig}
+        job = {
+            "id": "bluebubbles-long-timeout-job",
+            "deliver": "origin",
+            "origin": {"platform": "bluebubbles", "chat_id": chat_id},
+        }
+        standalone_send = AsyncMock(return_value={"success": True})
+
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}), \
+             patch("agent.async_utils.safe_schedule_threadsafe", side_effect=run_coro), \
+             patch("gateway.delivery.DeliveryRouter._save_full_output", return_value=tmp_path / "audit.txt"), \
+             patch("tools.send_message_tool._send_to_platform", new=standalone_send):
+            result = _deliver_result(
+                job,
+                content,
+                adapters={Platform.BLUEBUBBLES: adapter},
+                loop=loop,
+            )
+
+        assert sent_chunks == [expected_chunks[0]]
+        assert cancel_calls == [True]
+        assert result is None
+        standalone_send.assert_not_awaited()
+
 
 class TestDeliverResultLiveAdapterUnconfirmed:
     """Regression for #47056.
