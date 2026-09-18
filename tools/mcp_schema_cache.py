@@ -3,7 +3,7 @@
 Stores per-server tool manifests on disk so Hermes can register MCP tools
 into the agent snapshot without spawning the stdio child process at idle
 dashboard startup. Cache entries are keyed by server name + a fingerprint
-of the connection config (command/args/url/tools filters).
+of the connection config (command/args/url/Unix socket/tools filters).
 """
 
 from __future__ import annotations
@@ -35,6 +35,7 @@ def config_fingerprint(config: dict) -> str:
         "command": config.get("command"),
         "args": config.get("args") or [],
         "url": config.get("url"),
+        "unix_socket": config.get("unix_socket"),
         "transport": config.get("transport"),
         "tools_include": sorted(tools_filter.get("include") or []),
         "tools_exclude": sorted(tools_filter.get("exclude") or []),
