@@ -228,7 +228,9 @@ export async function respondToApprovalAction(sessionId: null | string, actionId
     return
   }
 
-  if (!binding || typeof binding !== 'object') {return}
+  if (!binding || typeof binding !== 'object') {
+    return
+  }
   const { choice, request_id: requestId } = binding as { choice?: unknown; request_id?: unknown }
 
   if ((choice !== 'once' && choice !== 'deny') || typeof requestId !== 'string' || !requestId) {

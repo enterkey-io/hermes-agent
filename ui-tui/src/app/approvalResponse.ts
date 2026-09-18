@@ -11,7 +11,9 @@ export async function respondToApproval(
   sessionId: string | null,
   choice: string
 ): Promise<void> {
-  if (!requestId) {return}
+  if (!requestId) {
+    return
+  }
 
   const response = await rpc<ApprovalRespondResponse>('approval.respond', {
     choice,
@@ -19,7 +21,9 @@ export async function respondToApproval(
     session_id: sessionId
   })
 
-  if (!response || getUiState().sid !== sessionId || getOverlayState().approval?.requestId !== requestId) {return}
+  if (!response || getUiState().sid !== sessionId || getOverlayState().approval?.requestId !== requestId) {
+    return
+  }
 
   patchOverlayState({ approval: null })
   patchTurnState({
