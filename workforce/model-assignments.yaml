@@ -23,6 +23,10 @@ presets:
     provider: openai-codex
     model: gpt-5.6-terra
     reasoning_effort: high
+  mel-glm53-high:
+    provider: ollama-cloud
+    model: glm-5.3:cloud
+    reasoning_effort: high
   luna-xhigh:
     provider: openai-codex
     model: gpt-5.6-luna
@@ -31,12 +35,12 @@ presets:
 route_policy:
   main_telegram_buzz_api:
     source: agent_assignment
-    note: Buzz and the ordinary agent primary default must never use GLM; the configured service/rate fallback is governed separately.
+    note: Ordinary operational primary defaults use their assigned OpenAI preset except Mel, explicitly approved by Elliott on 2026-09-18 for ollama-cloud/glm-5.3:cloud at high effort. Personal-only Amy/Kourtnie routes and configured service/rate fallback remain separate exceptions.
   matrix:
     provider: ollama-cloud
     model: glm-5.2:cloud
     reasoning_effort: medium
-    note: GLM-5.2 is reserved for Matrix chat; GLM-5.3 is a configured service/rate fallback exception.
+    note: GLM-5.2 remains the Matrix route; GLM-5.3 is also Mel's explicitly approved ordinary primary and the separately configured service/rate fallback.
   voice:
     source: profile_platform_override
     current_default_when_configured:
@@ -148,7 +152,7 @@ assignments:
   xenia: {profile: xenia, preset: sol-medium}
   oyku: {profile: oyku, preset: terra-high}
   maggie: {profile: maggie, preset: sol-medium}
-  mel: {profile: mel, preset: terra-high}
+  mel: {profile: mel, preset: mel-glm53-high}
 
 fallback_policy:
   provider: ollama-cloud
