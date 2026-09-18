@@ -105,6 +105,13 @@ class TestUserLayerUnchanged:
 
 
 class TestCronSpecificDenylist:
+    def test_supported_config_surface_registers_the_denylist(self):
+        from hermes_cli.config import _validate_config_key
+        from hermes_cli.config_defaults import DEFAULT_CONFIG
+
+        assert DEFAULT_CONFIG["cron"]["disabled_toolsets"] == []
+        assert _validate_config_key("cron.disabled_toolsets") == (True, None)
+
     def test_layers_before_agent_denylist_and_deduplicates(self):
         cfg = {
             "cron": {"disabled_toolsets": ["agentmail", "browser"]},

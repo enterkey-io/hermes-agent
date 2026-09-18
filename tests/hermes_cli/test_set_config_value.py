@@ -111,6 +111,17 @@ class TestConfigYamlRouting:
         assert "not a recognized config key" not in capsys.readouterr().out
         assert "script_timeout_seconds: 600" in _read_config(_isolated_hermes_home)
 
+    def test_cron_disabled_toolsets_is_recognized(
+        self, _isolated_hermes_home, capsys
+    ):
+        """The Cron-only denylist is writable through the supported config UX."""
+        from hermes_cli.config import load_config
+
+        set_config_value("cron.disabled_toolsets", '["agentmail"]')
+
+        assert "not a recognized config key" not in capsys.readouterr().out
+        assert load_config()["cron"]["disabled_toolsets"] == ["agentmail"]
+
     def test_terminal_docker_cwd_mount_flag_goes_to_config_and_env(self, _isolated_hermes_home):
         set_config_value("terminal.docker_mount_cwd_to_workspace", "true")
         config = _read_config(_isolated_hermes_home)
