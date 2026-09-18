@@ -706,6 +706,46 @@ def _format_exec_approval_fallback(
         + ", ".join(choices[:-1]) + f", or {choices[-1]}."
     )
 
+
+def _deliver_full_approval_review(
+    ctx: Any,
+    approval_data: dict,
+    redacted_command: str,
+) -> str:
+    """Deliver complete review text and return the compact actionable binding.
+
+    Button cards and text fallbacks have platform-specific preview limits. An
+    exact approval must therefore send its complete redacted arguments through
+    the adapter's ordinary (chunking-aware) message path before any actionable
+    prompt is displayed. Delivery failure raises so the approval queue denies.
+    """
+    binding_summary = _redact_approval_command(
+        approval_data.get("binding_summary", "")
+    )
+    request_id = str(approval_data.get("request_id") or "")
+    if not binding_summary or not request_id:
+        raise RuntimeError("full-review approval metadata is incomplete")
+    review_text = (
+        f"Approval request {request_id} - complete review details:\n\n"
+        f"{redacted_command}"
+    )
+    future = safe_schedule_threadsafe(
+        ctx._status_adapter.send(
+            ctx._status_chat_id,
+            review_text,
+            metadata=ctx._status_thread_metadata,
+        ),
+        ctx._loop_for_step,
+        logger=logger,
+        log_message="Approval full-review send scheduling error",
+    )
+    if future is None:
+        raise RuntimeError("full-review delivery loop unavailable")
+    result = future.result(timeout=15)
+    if not getattr(result, "success", False):
+        raise RuntimeError("full-review approval delivery failed")
+    return f"Approval request {request_id}\n{binding_summary}"
+
 def _gateway_provider_error_reply(text: str) -> str:
     """Map raw provider/API errors to a short user-safe Telegram reply."""
     if _GATEWAY_AUTH_ERROR_RE.search(text):
@@ -6059,6 +6099,16 @@ class TurnRunner:
             # (send_exec_approval) and plain-text fallback paths below use
             # the redacted value.
             cmd = _redact_approval_command(cmd)
+
+            # Exact MCP approvals may carry more text than a button card (or
+            # the plain fallback preview) can safely render. Deliver the full
+            # redacted review document first through the adapter's ordinary
+            # message path, which owns platform chunking, then put only the
+            # keyed binding and request id on the actionable card. If the full
+            # document cannot be delivered, raise so the approval queue fails
+            # closed instead of authorizing a truncated snapshot.
+            if approval_data.get("requires_full_review"):
+                cmd = _deliver_full_approval_review(ctx, approval_data, cmd)
 
             # Prefer button-based approval when the adapter supports it.
             # Check the *class* for the method, not the instance — avoids

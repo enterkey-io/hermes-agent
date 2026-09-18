@@ -175,6 +175,18 @@ def test_write_json(capture):
     assert json.loads(buf.getvalue()) == {"test": True}
 
 
+def test_one_shot_approval_payload_never_advertises_session(server):
+    payload = server._approval_request_payload(
+        {
+            "command": "exact MCP write",
+            "description": "one request only",
+            "allow_session": False,
+            "allow_permanent": False,
+        }
+    )
+    assert payload["choices"] == ["once", "deny"]
+
+
 def test_live_session_payload_replays_pending_approval(server, monkeypatch):
     """A reattached client receives the approval that was emitted while detached."""
     from tools import approval

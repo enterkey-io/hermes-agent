@@ -13,7 +13,6 @@ const APPROVAL_OPTS = ['once', 'session', 'always', 'deny'] as const
 const APPROVAL_OPTS_NO_ALWAYS = APPROVAL_OPTS.filter(o => o !== 'always')
 const APPROVAL_OPTS_SMART_DENY = ['once', 'deny'] as const
 const LABELS = { always: 'Always allow', deny: 'Deny', once: 'Allow once', session: 'Allow this session' } as const
-const CMD_PREVIEW_LINES = 10
 
 type ApprovalChoice = 'always' | 'deny' | 'once' | 'session'
 
@@ -80,6 +79,12 @@ export function approvalAction(
   return { kind: 'noop' }
 }
 
+export function approvalDisplayLines(command: string, cols: number): string[] {
+  const innerWidth = Math.max(20, cols - 8)
+
+  return command.split('\n').flatMap(line => wrapAnsi(line, innerWidth, { hard: true, trim: false }).split('\n'))
+}
+
 export function ApprovalPrompt({ cols = 80, onChoice, req, t }: ApprovalPromptProps) {
   const [sel, setSel] = useState(0)
   const opts = approvalOptions(req)
@@ -97,14 +102,7 @@ export function ApprovalPrompt({ cols = 80, onChoice, req, t }: ApprovalPromptPr
   // Wrap long single-line commands to the panel width instead of clipping the
   // tail (mirrors the CLI approval panel fix — the full command must be
   // reviewable before approving). Border + paddingX + inner padding ≈ 8 cols.
-  const innerWidth = Math.max(20, cols - 8)
-
-  const rawLines = req.command
-    .split('\n')
-    .flatMap(line => wrapAnsi(line, innerWidth, { hard: true, trim: false }).split('\n'))
-
-  const shown = rawLines.slice(0, CMD_PREVIEW_LINES)
-  const overflow = rawLines.length - shown.length
+  const rawLines = approvalDisplayLines(req.command, cols)
 
   return (
     <Box borderColor={t.color.warn} borderStyle="double" flexDirection="column" paddingX={1}>
@@ -113,17 +111,11 @@ export function ApprovalPrompt({ cols = 80, onChoice, req, t }: ApprovalPromptPr
       </Text>
 
       <Box flexDirection="column" paddingLeft={1}>
-        {shown.map((line, i) => (
+        {rawLines.map((line, i) => (
           <Text color={t.color.text} key={i} wrap="truncate-end">
             {line || ' '}
           </Text>
         ))}
-
-        {overflow > 0 ? (
-          <Text color={t.color.muted}>
-            … +{overflow} more line{overflow === 1 ? '' : 's'} (full text above)
-          </Text>
-        ) : null}
       </Box>
 
       <Text />

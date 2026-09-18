@@ -4647,16 +4647,17 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
     #   once             → single-use consent; it covers ONLY the leader's
     #     execution, so the follower falls through to a fresh prompt.
     leader = None
-    with _lock:
-        for existing in _gateway_queues.get(session_key, []):
-            data = existing.data
-            if (
-                data.get("command") == approval_data.get("command")
-                and list(data.get("pattern_keys") or [])
-                == list(approval_data.get("pattern_keys") or [])
-            ):
-                leader = existing
-                break
+    if approval_data.get("coalesce", True):
+        with _lock:
+            for existing in _gateway_queues.get(session_key, []):
+                data = existing.data
+                if (
+                    data.get("command") == approval_data.get("command")
+                    and list(data.get("pattern_keys") or [])
+                    == list(approval_data.get("pattern_keys") or [])
+                ):
+                    leader = existing
+                    break
     if leader is not None:
         adopted = _await_coalesced_leader(
             session_key, leader, approval_data, surface=surface
@@ -5762,6 +5763,8 @@ def request_elicitation_consent(
     *,
     timeout_seconds: int | None = None,
     surface: str = "mcp-elicitation",
+    binding_summary: str | None = None,
+    requires_full_review: bool = False,
 ) -> str:
     """Route an MCP elicitation request to whichever approval surface owns
     the active session and return a normalized result.
@@ -5771,9 +5774,11 @@ def request_elicitation_consent(
     agent thread blocks until the user responds via the platform UI.
     CLI/TUI sessions go through ``prompt_dangerous_approval``.
 
-    Always fails closed: missing notify_cb in a gateway session, timeouts,
-    and exceptions all map to ``"decline"`` so a server treats them as
-    "user did not approve" rather than retrying or hanging.
+    Consent is single-request: it cannot persist to a session, cannot be
+    coalesced with a concurrent request, and accepts only a one-operation
+    decision. Missing notify_cb in a gateway session, denials, and exceptions
+    fail closed; timeouts map to ``"cancel"`` so a server can distinguish
+    silence from an explicit refusal.
 
     Returns one of ``"accept" | "decline" | "cancel"``.
     """
@@ -5799,7 +5804,18 @@ def request_elicitation_consent(
             "description": description,
             "pattern_key": "mcp_elicitation",
             "pattern_keys": ["mcp_elicitation"],
+            "allow_session": False,
+            "allow_permanent": False,
+            # Elicitation consent authorizes one exact request. Concurrent
+            # requests must never inherit even an identical-looking answer.
+            "coalesce": False,
         }
+        if requires_full_review:
+            if not binding_summary:
+                logger.error("Full-review elicitation omitted its binding summary")
+                return "decline"
+            approval_data["binding_summary"] = binding_summary
+            approval_data["requires_full_review"] = True
         try:
             decision = _await_gateway_decision(
                 session_key, notify_cb, approval_data, surface=surface,
@@ -5815,7 +5831,7 @@ def request_elicitation_consent(
         if not decision.get("resolved"):
             return "cancel"
         choice = decision.get("choice")
-        if choice in ("once", "session", "always"):
+        if choice == "once":
             return "accept"
         return "decline"
 
@@ -5827,6 +5843,7 @@ def request_elicitation_consent(
             description,
             timeout_seconds=timeout_seconds,
             allow_permanent=False,
+            allow_session=False,
         )
     except Exception as exc:
         logger.error(
@@ -5834,7 +5851,7 @@ def request_elicitation_consent(
         )
         return "decline"
 
-    if choice in ("once", "session", "always"):
+    if choice == "once":
         return "accept"
     if choice == "timeout":
         # Prompt expired without a user response — mirror the gateway's

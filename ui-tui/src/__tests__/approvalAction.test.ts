@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { approvalAction, approvalOptions } from '../components/prompts.js'
+import { approvalAction, approvalDisplayLines, approvalOptions } from '../components/prompts.js'
 
 describe('approvalAction — pure key dispatch for ApprovalPrompt', () => {
   it('maps Esc to deny — parity with global Ctrl+C cancellation', () => {
@@ -81,5 +81,16 @@ describe('approvalAction — pure key dispatch for ApprovalPrompt', () => {
         description: 'blocked'
       })
     ).toEqual(['once', 'deny'])
+  })
+})
+
+describe('approvalDisplayLines', () => {
+  it('keeps every wrapped line reviewable instead of truncating after ten', () => {
+    const command = Array.from({ length: 15 }, (_, index) => `field-${index}`).join('\n')
+    const lines = approvalDisplayLines(command, 80)
+
+    expect(lines).toHaveLength(15)
+    expect(lines[0]).toBe('field-0')
+    expect(lines[14]).toBe('field-14')
   })
 })

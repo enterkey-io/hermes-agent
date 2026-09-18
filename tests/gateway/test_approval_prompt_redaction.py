@@ -17,6 +17,10 @@ the redactor regexes so the assertions stay meaningful, but contain no real
 or real-looking key, so secret scanners do not flag this file.
 """
 
+from types import SimpleNamespace
+
+import pytest
+
 from gateway.run import _redact_approval_command
 
 # Synthetic, scanner-safe credential fixtures. Each matches its redactor
@@ -136,3 +140,80 @@ class TestApprovalTextFallbackContract:
         assert "approve always" not in text
 
 
+class TestExactApprovalReviewDelivery:
+    def test_full_document_is_delivered_before_compact_action(self, monkeypatch):
+        from gateway import run
+
+        sent = []
+
+        class Adapter:
+            def send(self, chat_id, text, metadata=None):
+                sent.append((chat_id, text, metadata))
+                return "awaitable-fixture"
+
+        class Future:
+            def result(self, timeout):
+                assert timeout == 15
+                return SimpleNamespace(success=True)
+
+        monkeypatch.setattr(
+            run,
+            "safe_schedule_threadsafe",
+            lambda awaitable, _loop, **_kwargs: (
+                Future() if awaitable == "awaitable-fixture" else None
+            ),
+        )
+        ctx = SimpleNamespace(
+            _status_adapter=Adapter(),
+            _status_chat_id="chat",
+            _status_thread_metadata={"thread_id": "thread"},
+            _loop_for_step=object(),
+        )
+        full = "binding\n" + ("exact redacted argument text\n" * 100)
+        compact = run._deliver_full_approval_review(
+            ctx,
+            {
+                "request_id": "request-123",
+                "binding_summary": "MCP argument binding HMAC-SHA-256: abc123",
+            },
+            full,
+        )
+
+        assert sent == [
+            (
+                "chat",
+                "Approval request request-123 - complete review details:\n\n" + full,
+                {"thread_id": "thread"},
+            )
+        ]
+        assert compact == (
+            "Approval request request-123\n"
+            "MCP argument binding HMAC-SHA-256: abc123"
+        )
+        assert len(compact) < 200
+
+    def test_failed_full_document_delivery_fails_closed(self, monkeypatch):
+        from gateway import run
+
+        adapter = SimpleNamespace(send=lambda *_args, **_kwargs: "awaitable")
+        future = SimpleNamespace(
+            result=lambda **_kwargs: SimpleNamespace(success=False)
+        )
+        monkeypatch.setattr(
+            run, "safe_schedule_threadsafe", lambda *_args, **_kwargs: future
+        )
+        ctx = SimpleNamespace(
+            _status_adapter=adapter,
+            _status_chat_id="chat",
+            _status_thread_metadata=None,
+            _loop_for_step=object(),
+        )
+        with pytest.raises(RuntimeError, match="delivery failed"):
+            run._deliver_full_approval_review(
+                ctx,
+                {
+                    "request_id": "request-123",
+                    "binding_summary": "binding",
+                },
+                "full review",
+            )

@@ -1921,6 +1921,8 @@ def _approval_request_payload(data: dict | None) -> dict:
     if "choices" not in payload:
         if payload.get("smart_denied"):
             payload["choices"] = ["once", "deny"]
+        elif payload.get("allow_session") is False:
+            payload["choices"] = ["once", "deny"]
         elif payload.get("allow_permanent") is False:
             payload["choices"] = ["once", "session", "deny"]
         elif "allow_permanent" in payload:

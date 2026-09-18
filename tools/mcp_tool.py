@@ -105,6 +105,8 @@ import contextvars
 import concurrent.futures
 import errno
 import fnmatch
+import hashlib
+import hmac
 import inspect
 import json
 import logging
@@ -112,6 +114,7 @@ import math
 import os
 import random
 import re
+import secrets
 import shutil
 import stat
 import sys
@@ -4402,11 +4405,17 @@ _CIRCUIT_BREAKER_COOLDOWN_SEC = 60.0
 # Classification happens at CALL TIME from data captured at DISCOVERY —
 # no toolset or schema mutation, so the conversation's toolset stays
 # byte-stable and prompt caching is preserved.
+# Write-call approval is bound to a canonical JSON snapshot. The reviewer
+# sees its fields (with secret-like values masked) plus a digest, and only
+# that frozen snapshot can reach the transport after one-call consent.
 _server_trust_levels: Dict[str, str] = {}
 _tool_read_only_hints: Dict[str, Dict[str, bool]] = {}
 
 _TRUST_FULL = "full"
 _TRUST_UNTRUSTED = "untrusted"
+# Per-process secret keeps the displayed binding useful for equality without
+# turning low-entropy masked arguments into an offline guessing oracle.
+_MCP_APPROVAL_BINDING_KEY = secrets.token_bytes(32)
 
 
 def _normalize_server_trust(value: Any) -> str:
@@ -4463,11 +4472,39 @@ def _record_tool_trust_metadata(
                 hints[name] = _annotation_read_only_hint(tool)
 
 
-def _trust_gate_check(server_name: str, tool_name: str) -> Optional[str]:
+def _snapshot_mcp_tool_arguments(args: Any) -> Tuple[Dict[str, Any], str]:
+    """Freeze one MCP call as JSON before approval and transport dispatch.
+
+    Model tool arguments are JSON by contract.  Round-tripping them here gives
+    the approval prompt and the eventual RPC one immutable logical snapshot,
+    rather than approving a label while a separately held dict is dispatched.
+    """
+    try:
+        canonical = json.dumps(
+            args,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        snapshot = json.loads(canonical)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("MCP tool arguments must be a JSON object") from exc
+    if not isinstance(snapshot, dict):
+        raise ValueError("MCP tool arguments must be a JSON object")
+    return snapshot, canonical
+
+
+def _trust_gate_check(
+    server_name: str,
+    tool_name: str,
+    canonical_arguments: str,
+) -> Optional[str]:
     """Consult the approval path for write-capable tools on untrusted servers.
 
-    Returns None when the call may proceed, or an error string (already
-    formatted via ``tool_error``) when the call is blocked. Fail-closed:
+    ``canonical_arguments`` is also the source of the eventual RPC argument
+    snapshot. Returns None when that exact call may proceed, or an error string
+    (already formatted via ``tool_error``) when it is blocked. Fail-closed:
     approval-system errors block the call.
     """
     trust = _server_trust_levels.get(server_name, _TRUST_FULL)
@@ -4480,20 +4517,37 @@ def _trust_gate_check(server_name: str, tool_name: str) -> Optional[str]:
     # routes the prompt to whichever surface owns the session (CLI, TUI,
     # Telegram, Slack, ...) and normalizes the answer.
     try:
+        from agent.redact import redact_sensitive_text
         from tools.approval import request_elicitation_consent
 
+        display_arguments = redact_sensitive_text(canonical_arguments)
+        arguments_binding = hmac.new(
+            _MCP_APPROVAL_BINDING_KEY,
+            canonical_arguments.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        binding_summary = f"MCP argument binding HMAC-SHA-256: {arguments_binding}"
         answer = request_elicitation_consent(
             (
+                f"{binding_summary}\n"
                 f"MCP tool '{tool_name}' on UNTRUSTED server "
-                f"'{server_name}' wants to run. This tool is write-capable "
-                f"(no readOnlyHint=true annotation) and may modify external "
-                f"state."
+                f"'{server_name}' wants to run with these exact arguments "
+                f"(canonical JSON; secret-like values are masked):\n"
+                f"{display_arguments}\n"
+                f"End exact arguments for {arguments_binding}.\n\n"
+                f"This tool is write-capable (no readOnlyHint=true "
+                f"annotation) and may modify external state."
             ),
             (
                 f"Server '{server_name}' is configured 'trust: untrusted'. "
-                f"Approve to run '{tool_name}' once, or deny to block it."
+                f"Approve to run '{tool_name}' once with exactly the JSON "
+                f"snapshot bound by the keyed value above, or deny to "
+                f"block it. Hermes dispatches that same frozen argument "
+                f"snapshot after approval."
             ),
             surface=f"mcp-trust/{server_name}",
+            binding_summary=binding_summary,
+            requires_full_review=True,
         )
     except Exception as exc:
         logger.error(
@@ -5848,7 +5902,22 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
     def _handler(args: dict, **kwargs) -> str:
         from tools.required_dependency_runtime import mark_pending
 
-        dependency_attempt = mark_pending(dependency_name, args)
+        try:
+            frozen_args, canonical_arguments = _snapshot_mcp_tool_arguments(args)
+        except ValueError:
+            dependency_attempt = mark_pending(
+                dependency_name, {"invalid_arguments": True}
+            )
+            return _dependency_failure(
+                tool_error(
+                    f"MCP tool '{tool_name}' was blocked because its "
+                    f"arguments were not a valid JSON object."
+                ),
+                dependency_attempt,
+                "invalid_arguments",
+            )
+
+        dependency_attempt = mark_pending(dependency_name, frozen_args)
         typed_outcome: List[Optional[str]] = [None]
 
         def _typed(result: str, outcome: str) -> str:
@@ -5859,7 +5928,9 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
         # servers configured ``trust: untrusted`` must be approved by the
         # user before ANY transport work happens — including the lazy
         # first-use spawn below. A denied call never touches the server.
-        gate_error = _trust_gate_check(server_name, tool_name)
+        gate_error = _trust_gate_check(
+            server_name, tool_name, canonical_arguments
+        )
         if gate_error is not None:
             return _dependency_failure(
                 gate_error, dependency_attempt, "policy_denied"
@@ -5949,7 +6020,9 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
                 # it and detect the gateway platform / session for routing.
                 server._pending_call_context = contextvars.copy_context()
                 try:
-                    result = await server.session.call_tool(tool_name, arguments=args)
+                    result = await server.session.call_tool(
+                        tool_name, arguments=frozen_args
+                    )
                 finally:
                     server._pending_call_context = None
             # The RPC round-trip completed — the session is demonstrably
