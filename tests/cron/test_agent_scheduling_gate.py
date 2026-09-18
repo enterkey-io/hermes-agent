@@ -102,3 +102,38 @@ class TestUserLayerUnchanged:
         disabled = _resolve_cron_disabled_toolsets(cfg)
         assert "browser" in disabled
         assert "" not in disabled
+
+
+class TestCronSpecificDenylist:
+    def test_layers_before_agent_denylist_and_deduplicates(self):
+        cfg = {
+            "cron": {"disabled_toolsets": ["agentmail", "browser"]},
+            "agent": {"disabled_toolsets": ["browser", "web"]},
+        }
+        disabled = _resolve_cron_disabled_toolsets(cfg)
+        assert disabled == [
+            "cronjob",
+            "messaging",
+            "clarify",
+            "memory",
+            "agentmail",
+            "browser",
+            "web",
+        ]
+
+    @pytest.mark.parametrize("value", [None, "", [], ["", "   "]])
+    def test_empty_values_preserve_default(self, value):
+        cfg = {"cron": {"disabled_toolsets": value}}
+        assert _resolve_cron_disabled_toolsets(cfg) == [
+            "cronjob",
+            "messaging",
+            "clarify",
+            "memory",
+        ]
+
+    def test_job_allowlist_cannot_override_cron_denylist(self):
+        cfg = {"cron": {"disabled_toolsets": ["agentmail"]}}
+        enabled = ["web", "agentmail"]
+        disabled = _resolve_cron_disabled_toolsets(cfg)
+        assert "agentmail" in enabled
+        assert "agentmail" in disabled
