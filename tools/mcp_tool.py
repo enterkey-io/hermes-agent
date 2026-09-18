@@ -47,6 +47,11 @@ Example config::
                               # Streamable HTTP endpoint that answers HEAD/GET
                               # with a non-MCP content type but serves real
                               # MCP over POST. Default: false.
+      local_broker:
+        url: "http://localhost:8000/mcp"
+        unix_socket: "/run/my-broker/mcp.sock"
+        # Streamable HTTP over a Unix socket. The URL supplies only the HTTP
+        # request target and Host header; no TCP connection is made.
       searxng:
         url: "http://localhost:8000/sse"
         transport: sse       # use SSE transport instead of Streamable HTTP
@@ -66,6 +71,7 @@ Example config::
 
 Features:
     - Stdio transport (command + args) and HTTP/StreamableHTTP transport (url)
+    - Streamable HTTP over a Unix-domain socket (url + unix_socket)
     - SSE transport (transport: sse) for MCP servers using the SSE protocol
     - Automatic reconnection with exponential backoff (up to 5 retries)
     - Environment variable filtering for stdio subprocesses (security)
@@ -107,6 +113,7 @@ import os
 import random
 import re
 import shutil
+import stat
 import sys
 import threading
 import time
@@ -1518,6 +1525,73 @@ def _resolve_client_cert(server_name: str, config: dict):
         return (cert_path, key_path)
     # Single combined PEM file (cert + key in one file).
     return cert_path
+
+
+def _resolve_unix_socket(server_name: str, config: dict) -> Optional[str]:
+    """Validate and canonicalize an optional Streamable-HTTP Unix socket.
+
+    The socket is a transport address, not an MCP URL replacement. A
+    loopback-shaped ``http://localhost/...`` URL remains required so the SDK
+    can construct valid HTTP requests while its owned httpx client sends them
+    exclusively over the Unix socket.
+    """
+    raw = config.get("unix_socket")
+    if raw is None:
+        return None
+    if not isinstance(raw, str) or not raw.strip() or "\x00" in raw:
+        raise ValueError(
+            f"MCP server '{server_name}': unix_socket must be a non-empty "
+            "absolute path"
+        )
+    path = os.path.expanduser(raw.strip())
+    if not os.path.isabs(path):
+        raise ValueError(
+            f"MCP server '{server_name}': unix_socket must be an absolute path"
+        )
+    if config.get("transport") == "sse":
+        raise ValueError(
+            f"MCP server '{server_name}': unix_socket supports Streamable HTTP, not SSE"
+        )
+    parsed = urlparse(str(config.get("url") or ""))
+    if (
+        parsed.scheme.lower() != "http"
+        or parsed.hostname not in {"localhost", "127.0.0.1", "::1"}
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise ValueError(
+            f"MCP server '{server_name}': unix_socket requires a plain "
+            "http://localhost URL without credentials"
+        )
+    if (config.get("auth") or "").lower().strip() == "oauth":
+        raise ValueError(
+            f"MCP server '{server_name}': OAuth is not supported with unix_socket"
+        )
+    if config.get("client_cert") is not None or config.get("client_key") is not None:
+        raise ValueError(
+            f"MCP server '{server_name}': TLS client certificates are not supported "
+            "with unix_socket"
+        )
+    if config.get("ssl_verify", True) is not True:
+        raise ValueError(
+            f"MCP server '{server_name}': ssl_verify overrides are not supported "
+            "with unix_socket"
+        )
+
+    # Resolve only the parent. The socket itself may not exist until a service
+    # starts, and reconnects must tolerate a service replacing its socket inode.
+    parent = os.path.realpath(os.path.dirname(path))
+    canonical = os.path.join(parent, os.path.basename(path))
+    try:
+        mode = os.lstat(canonical).st_mode
+    except FileNotFoundError:
+        pass
+    else:
+        if stat.S_ISLNK(mode) or not stat.S_ISSOCK(mode):
+            raise ValueError(
+                f"MCP server '{server_name}': unix_socket is not a Unix socket"
+            )
+    return canonical
 
 
 def _resolve_identity_header(server_name: str, config: dict):
@@ -3182,6 +3256,7 @@ class MCPServerTask:
         headers: Optional[dict] = None,
         ssl_verify: bool = True,
         client_cert=None,
+        unix_socket: Optional[str] = None,
         timeout: float = 5.0,
     ) -> None:
         """Probe *url* for an MCP-shaped response before the SDK connects.
@@ -3224,6 +3299,10 @@ class MCPServerTask:
         }
         if client_cert is not None:
             client_kwargs["cert"] = client_cert
+        if unix_socket is not None:
+            client_kwargs["transport"] = _httpx.AsyncHTTPTransport(
+                uds=unix_socket
+            )
 
         probe_headers = dict(headers) if headers else {}
         try:
@@ -3380,6 +3459,7 @@ class MCPServerTask:
         connect_timeout = config.get("connect_timeout", _DEFAULT_CONNECT_TIMEOUT)
         ssl_verify = config.get("ssl_verify", True)
         client_cert = _resolve_client_cert(self.name, config)
+        unix_socket = _resolve_unix_socket(self.name, config)
 
         # OAuth 2.1 PKCE: route through the central MCPOAuthManager so the
         # same provider instance is reused across reconnects, pre-flow
@@ -3537,6 +3617,10 @@ class MCPServerTask:
                 client_kwargs["auth"] = _oauth_auth
             if client_cert is not None:
                 client_kwargs["cert"] = client_cert
+            if unix_socket is not None:
+                client_kwargs["transport"] = httpx.AsyncHTTPTransport(
+                    uds=unix_socket
+                )
 
             # Caller owns the client lifecycle — the SDK skips cleanup when
             # http_client is provided, so we wrap in async-with.
@@ -3575,6 +3659,11 @@ class MCPServerTask:
             return reason
         else:
             # Deprecated API (mcp < 1.24.0): manages httpx client internally.
+            if unix_socket is not None:
+                raise ImportError(
+                    f"MCP server '{self.name}' requires mcp >= 1.24.0 for "
+                    "unix_socket transport support. Upgrade the mcp package."
+                )
             if _strict_cfg_headers:
                 # Fail closed: without an owned httpx client we cannot hook
                 # redirects, so the v1 cross-origin header boundary cannot be
@@ -3726,6 +3815,15 @@ class MCPServerTask:
                 self.name,
             )
 
+        if config.get("unix_socket") is not None and not self._is_http():
+            exc = ValueError(
+                f"MCP server '{self.name}': unix_socket requires an HTTP url"
+            )
+            logger.warning("%s", exc)
+            self._error = exc
+            self._ready.set()
+            return
+
         # Validate remote URL once, up front.  Raising here (rather than
         # letting it blow up inside the SDK's httpx layer on every retry)
         # means a typo in config.yaml fails fast with a clear error — and
@@ -3734,7 +3832,13 @@ class MCPServerTask:
         if self._is_http():
             try:
                 _validate_remote_mcp_url(self.name, config.get("url"))
+                _unix_socket = _resolve_unix_socket(self.name, config)
             except InvalidMcpUrlError as exc:
+                logger.warning("%s", exc)
+                self._error = exc
+                self._ready.set()
+                return
+            except ValueError as exc:
                 logger.warning("%s", exc)
                 self._error = exc
                 self._ready.set()
@@ -3760,6 +3864,7 @@ class MCPServerTask:
                         headers=_probe_headers,
                         ssl_verify=config.get("ssl_verify", True),
                         client_cert=_resolve_client_cert(self.name, config),
+                        unix_socket=_unix_socket,
                     )
                 except NonMcpEndpointError as exc:
                     logger.warning("%s", exc)
