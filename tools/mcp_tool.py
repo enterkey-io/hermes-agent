@@ -106,6 +106,7 @@ import concurrent.futures
 import errno
 import fnmatch
 import hashlib
+import hmac
 import inspect
 import json
 import logging
@@ -113,6 +114,7 @@ import math
 import os
 import random
 import re
+import secrets
 import shutil
 import stat
 import sys
@@ -4411,6 +4413,9 @@ _tool_read_only_hints: Dict[str, Dict[str, bool]] = {}
 
 _TRUST_FULL = "full"
 _TRUST_UNTRUSTED = "untrusted"
+# Per-process secret keeps the displayed binding useful for equality without
+# turning low-entropy masked arguments into an offline guessing oracle.
+_MCP_APPROVAL_BINDING_KEY = secrets.token_bytes(32)
 
 
 def _normalize_server_trust(value: Any) -> str:
@@ -4516,27 +4521,33 @@ def _trust_gate_check(
         from tools.approval import request_elicitation_consent
 
         display_arguments = redact_sensitive_text(canonical_arguments)
-        arguments_digest = hashlib.sha256(
-            canonical_arguments.encode("utf-8")
+        arguments_binding = hmac.new(
+            _MCP_APPROVAL_BINDING_KEY,
+            canonical_arguments.encode("utf-8"),
+            hashlib.sha256,
         ).hexdigest()
+        binding_summary = f"MCP argument binding HMAC-SHA-256: {arguments_binding}"
         answer = request_elicitation_consent(
             (
+                f"{binding_summary}\n"
                 f"MCP tool '{tool_name}' on UNTRUSTED server "
                 f"'{server_name}' wants to run with these exact arguments "
                 f"(canonical JSON; secret-like values are masked):\n"
                 f"{display_arguments}\n"
-                f"Argument snapshot SHA-256: {arguments_digest}\n\n"
+                f"End exact arguments for {arguments_binding}.\n\n"
                 f"This tool is write-capable (no readOnlyHint=true "
                 f"annotation) and may modify external state."
             ),
             (
                 f"Server '{server_name}' is configured 'trust: untrusted'. "
                 f"Approve to run '{tool_name}' once with exactly the JSON "
-                f"snapshot bound by the SHA-256 value above, or deny to "
+                f"snapshot bound by the keyed value above, or deny to "
                 f"block it. Hermes dispatches that same frozen argument "
                 f"snapshot after approval."
             ),
             surface=f"mcp-trust/{server_name}",
+            binding_summary=binding_summary,
+            requires_full_review=True,
         )
     except Exception as exc:
         logger.error(

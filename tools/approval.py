@@ -5763,6 +5763,8 @@ def request_elicitation_consent(
     *,
     timeout_seconds: int | None = None,
     surface: str = "mcp-elicitation",
+    binding_summary: str | None = None,
+    requires_full_review: bool = False,
 ) -> str:
     """Route an MCP elicitation request to whichever approval surface owns
     the active session and return a normalized result.
@@ -5808,6 +5810,12 @@ def request_elicitation_consent(
             # requests must never inherit even an identical-looking answer.
             "coalesce": False,
         }
+        if requires_full_review:
+            if not binding_summary:
+                logger.error("Full-review elicitation omitted its binding summary")
+                return "decline"
+            approval_data["binding_summary"] = binding_summary
+            approval_data["requires_full_review"] = True
         try:
             decision = _await_gateway_decision(
                 session_key, notify_cb, approval_data, surface=surface,

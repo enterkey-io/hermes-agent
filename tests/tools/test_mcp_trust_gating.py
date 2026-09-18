@@ -19,6 +19,7 @@ Adversarial notes encoded in these tests:
 
 import asyncio
 import hashlib
+import hmac
 import json
 import threading
 from types import SimpleNamespace
@@ -105,7 +106,7 @@ class TestTrustGateAtCallTime:
         consent.assert_called_once()
         message, description = consent.call_args.args
         assert '{"repo":"x","z":[2,1]}' in message
-        assert "Argument snapshot SHA-256:" in message
+        assert "MCP argument binding HMAC-SHA-256:" in message
         assert "same frozen argument snapshot" in description
         assert json.loads(raw) == {"result": "ok"}
         fake_session.call_tool.assert_awaited_once_with(
@@ -183,7 +184,14 @@ class TestTrustGateAtCallTime:
         message = consent.call_args.args[0]
         assert token not in message
         assert "***" in message
-        assert hashlib.sha256(canonical.encode()).hexdigest() in message
+        public_digest = hashlib.sha256(canonical.encode()).hexdigest()
+        keyed_binding = hmac.new(
+            mcp_tool._MCP_APPROVAL_BINDING_KEY,
+            canonical.encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        assert public_digest not in message
+        assert keyed_binding in message
         fake_session.call_tool.assert_not_awaited()
         assert "did not approve" in json.loads(raw)["error"]
 
@@ -245,6 +253,10 @@ class TestTrustGateAtCallTime:
         assert notices[0]["allow_session"] is False
         assert notices[0]["allow_permanent"] is False
         assert notices[0]["coalesce"] is False
+        assert notices[0]["requires_full_review"] is True
+        assert notices[0]["binding_summary"].startswith(
+            "MCP argument binding HMAC-SHA-256:"
+        )
         fake_session.call_tool.assert_awaited_once_with(
             "send_message",
             arguments={
