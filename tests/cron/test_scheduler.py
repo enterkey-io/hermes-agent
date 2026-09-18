@@ -1653,18 +1653,17 @@ class TestDeliverResultTimeoutCancelsFuture:
         assert result is None
         standalone_send.assert_not_awaited()
 
-    def test_started_bluebubbles_chunked_send_timeout_never_falls_back(self, tmp_path):
-        """A long BlueBubbles send may begin before its outer Future cancels.
+    def test_bluebubbles_chunked_send_timeout_never_falls_back(self, tmp_path):
+        """A timeout after a long live send must not resend its chunks.
 
         ``Future.cancel()`` can report success for the scheduler-facing future
-        even after the gateway task has begun its provider work.  Drive the real
-        BlueBubbles adapter through DeliveryRouter, suspend its first chunk at
-        the API boundary, then make the outer future time out and accept
-        cancellation.  A standalone fallback here would send the first iMessage
-        chunk twice.
+        even when its gateway-loop work has already sent all provider-visible
+        chunks. Drive the real BlueBubbles adapter through DeliveryRouter and
+        let it complete every chunk before simulating the scheduler's ambiguous
+        timeout/cancel-true result. A standalone fallback here would duplicate
+        the entire iMessage chunk sequence.
         """
         import asyncio
-        import contextlib
 
         from gateway.config import Platform, PlatformConfig
         from gateway.platforms.bluebubbles import BlueBubblesAdapter
@@ -1688,38 +1687,32 @@ class TestDeliverResultTimeoutCancelsFuture:
 
         sent_chunks = []
 
-        async def first_chunk_in_flight(_path, payload):
+        async def record_chunk(path, payload):
+            assert path == "/api/v1/message/text"
             sent_chunks.append(payload["message"])
-            # Model the live HTTP request after the first iMessage chunk has
-            # been handed to BlueBubbles but before it acknowledges the send.
-            await asyncio.Event().wait()
+            return {"data": {"guid": f"sent-chunk-{len(sent_chunks)}"}}
 
-        adapter._api_post = first_chunk_in_flight
+        adapter._api_post = record_chunk
 
-        async def start_real_send_then_cancel(coro):
-            task = asyncio.create_task(coro)
-            for _ in range(10):
-                await asyncio.sleep(0)
-                if sent_chunks:
-                    break
-            assert sent_chunks == [expected_chunks[0]]
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+        def complete_real_send_then_timeout(coro):
+            asyncio.run(coro)
+            # This is the complete live adapter contract: every chunk crossed
+            # the BlueBubbles text endpoint exactly once and in original order.
+            assert sent_chunks == expected_chunks
 
         cancel_calls = []
 
         class StartedSendTimeoutFuture:
             def result(self, timeout=None):
                 assert timeout == 60
-                raise TimeoutError("timed out after first BlueBubbles chunk started")
+                raise TimeoutError("timed out after BlueBubbles chunks were sent")
 
             def cancel(self):
                 cancel_calls.append(True)
                 return True
 
         def run_coro(coro, _loop):
-            asyncio.run(start_real_send_then_cancel(coro))
+            complete_real_send_then_timeout(coro)
             return StartedSendTimeoutFuture()
 
         loop = MagicMock()
@@ -1746,7 +1739,7 @@ class TestDeliverResultTimeoutCancelsFuture:
                 loop=loop,
             )
 
-        assert sent_chunks == [expected_chunks[0]]
+        assert sent_chunks == expected_chunks
         assert cancel_calls == [True]
         assert result is None
         standalone_send.assert_not_awaited()
