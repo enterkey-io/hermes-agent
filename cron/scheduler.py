@@ -3161,49 +3161,23 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                         try:
                             send_result = future.result(timeout=60)
                         except TimeoutError:
-                            # #38922: a slow confirmation does NOT necessarily
-                            # mean the send failed — but we must distinguish two
-                            # cases via future.cancel()'s return value:
-                            #
-                            #   cancel() == False -> the coroutine was already
-                            #     running on the gateway loop when the timeout
-                            #     fired; the request is in flight on the wire and
-                            #     cannot be un-sent.  Re-sending via standalone
-                            #     would be a guaranteed DUPLICATE, so treat it as
-                            #     delivered (assume-delivered).
-                            #
-                            #   cancel() == True -> the scheduled callback never
-                            #     started executing (loop wedged/backlogged for
-                            #     the full 60s), so nothing was sent.  We MUST
-                            #     fall through to the standalone path or the
-                            #     message is silently dropped (worse than a
-                            #     duplicate).
+                            # A True cancel result only means the Future accepted
+                            # our cancellation request. It cannot prove that the
+                            # gateway-loop callback did not begin a provider
+                            # request while the scheduler thread was timing out.
+                            # Treat every timeout as ambiguous: a standalone
+                            # fallback could otherwise duplicate an iMessage (or
+                            # any other outbound delivery) from this same run.
                             cancelled = future.cancel()
-                            if cancelled:
-                                msg = (
-                                    f"live adapter send to {platform_name}:{chat_id} "
-                                    "timed out before the coroutine was dispatched"
-                                )
-                                logger.warning(
-                                    "Job '%s': %s, falling back to standalone",
-                                    job["id"], msg,
-                                )
-                                target_errors.append(msg)
-                                adapter_ok = False  # fall through to standalone path
-                                if photon_identity:
-                                    photon_state = "confirmed_absent"
-                                    resolve_delivery(photon_identity, photon_state)
-                                timeout_handled = True
-                            else:
-                                timed_out = True
-                                timeout_handled = True
-                                logger.warning(
-                                    "Job '%s': live adapter send to %s:%s timed out "
-                                    "after 60s; already dispatched (in flight), "
-                                    "assuming delivered (skipping standalone fallback "
-                                    "to avoid duplicate)",
-                                    job["id"], platform_name, chat_id,
-                                )
+                            timed_out = True
+                            timeout_handled = True
+                            logger.warning(
+                                "Job '%s': live adapter send to %s:%s timed out "
+                                "after 60s; cancellation requested=%s; delivery state "
+                                "is ambiguous, assuming delivered (skipping standalone "
+                                "fallback to avoid duplicate)",
+                                job["id"], platform_name, chat_id, cancelled,
+                            )
                         except Exception as ex:
                             # A real send error (not a slow confirmation) — fall
                             # through to the standalone path so the message is
@@ -3212,10 +3186,8 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                             raise
 
                         if timeout_handled:
-                            # The timeout branch above already decided the
-                            # outcome (assume-delivered if in flight, or
-                            # adapter_ok=False to fall through if never
-                            # dispatched).  send_result is None, so skip the
+                            # The timeout branch treats the outcome as ambiguous
+                            # and assume-delivered. send_result is None, so skip
                             # confirmation/thread-fallback inspection below.
                             pass
                         else:
