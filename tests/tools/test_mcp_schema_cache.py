@@ -24,6 +24,15 @@ class TestConfigFingerprint:
             {**base, "tools": {"include": ["a"]}}
         )
 
+    def test_changes_when_unix_socket_endpoint_changes(self):
+        base = {
+            "url": "http://localhost:8000/mcp",
+            "unix_socket": "/run/broker-a/mcp.sock",
+        }
+        assert msc.config_fingerprint(base) != msc.config_fingerprint(
+            {**base, "unix_socket": "/run/broker-b/mcp.sock"}
+        )
+
     def test_ignores_non_connection_keys(self):
         base = {"command": "npx", "args": []}
         assert msc.config_fingerprint(base) == msc.config_fingerprint(
