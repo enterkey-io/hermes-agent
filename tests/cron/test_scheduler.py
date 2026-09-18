@@ -1532,12 +1532,10 @@ class TestParallelTick:
 
 class TestDeliverResultTimeoutCancelsFuture:
     """When future.result(timeout=60) raises TimeoutError in the live adapter
-    delivery path, the outcome depends on whether the coroutine was already
-    running.  future.cancel() returning False means it is in flight on the wire
-    (cannot be un-sent) → treat as DELIVERED and skip the standalone fallback to
-    avoid a duplicate (#38922).  future.cancel() returning True means it never
-    started (wedged loop) → nothing was sent, so fall through to standalone or
-    the message is silently dropped.  Regression for #38922.
+    delivery path, cancellation status does not prove whether a provider-visible
+    request began. The loop and caller can race between timeout and cancel, so
+    every timeout must suppress standalone fallback to preserve at-most-one
+    outbound attempt per target per run.
     """
 
     def test_live_adapter_timeout_assumes_delivered_no_duplicate(self):
@@ -1604,6 +1602,55 @@ class TestDeliverResultTimeoutCancelsFuture:
         assert result is None, f"expected successful delivery, got error: {result!r}"
         # 3. The standalone fallback must NOT run — that is the #38922 fix:
         #    an in-flight confirmation timeout is assume-delivered, not a resend.
+        standalone_send.assert_not_awaited()
+
+    def test_cancelled_live_adapter_timeout_does_not_fallback(self):
+        """A True cancel result cannot authorize a second BlueBubbles send."""
+        from concurrent.futures import Future
+        from gateway.config import Platform
+
+        adapter = AsyncMock()
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.BLUEBUBBLES: pconfig}
+        loop = MagicMock()
+        loop.is_running.return_value = True
+
+        captured_future = Future()
+        cancel_calls = []
+
+        def cancelled_before_result():
+            cancel_calls.append(True)
+            return True
+
+        captured_future.cancel = cancelled_before_result
+        captured_future.result = MagicMock(side_effect=TimeoutError("timed out"))
+
+        def fake_run_coro(coro, _loop):
+            coro.close()
+            return captured_future
+
+        job = {
+            "id": "bluebubbles-timeout-job",
+            "deliver": "origin",
+            "origin": {"platform": "bluebubbles", "chat_id": "iMessage;+;recipient"},
+        }
+        standalone_send = AsyncMock(return_value={"success": True})
+
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}), \
+             patch("asyncio.run_coroutine_threadsafe", side_effect=fake_run_coro), \
+             patch("tools.send_message_tool._send_to_platform", new=standalone_send):
+            result = _deliver_result(
+                job,
+                "Hello world",
+                adapters={Platform.BLUEBUBBLES: adapter},
+                loop=loop,
+            )
+
+        assert cancel_calls == [True]
+        assert result is None
         standalone_send.assert_not_awaited()
 
 

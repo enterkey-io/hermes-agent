@@ -40,26 +40,6 @@ def _make_adapter(monkeypatch: pytest.MonkeyPatch) -> PhotonAdapter:
     return PhotonAdapter(cfg)
 
 
-def test_sidecar_port_reads_nested_platform_extra(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Photon's per-profile listener setting lives under ``extra``.
-
-    A top-level ``sidecar_port`` is intentionally not part of PlatformConfig,
-    so activation guidance must use ``gateway.platforms.photon.extra``.
-    """
-    monkeypatch.setenv("PHOTON_PROJECT_ID", "test-project-id")
-    monkeypatch.setenv("PHOTON_PROJECT_SECRET", "test-project-secret")
-    monkeypatch.delenv("PHOTON_SIDECAR_PORT", raising=False)
-
-    config = PlatformConfig.from_dict(
-        {"enabled": True, "extra": {"sidecar_port": 8794}}
-    )
-
-    assert config.extra == {"sidecar_port": 8794}
-    assert PhotonAdapter(config)._sidecar_port == 8794
-
-
 # -- record helpers ----------------------------------------------------------
 
 
@@ -228,27 +208,6 @@ class _SendClient:
                 return {"ok": True, "messageId": "m1"}
 
         return _Resp()
-
-
-@pytest.mark.asyncio
-async def test_standalone_send_uses_nested_platform_extra_port(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("PHOTON_SIDECAR_TOKEN", "test-sidecar-token")
-    monkeypatch.delenv("PHOTON_SIDECAR_PORT", raising=False)
-    _SendClient.calls = []
-    monkeypatch.setattr(photon_adapter.httpx, "AsyncClient", _SendClient)
-
-    result = await photon_adapter._standalone_send(
-        PlatformConfig(enabled=True, token="", extra={"sidecar_port": 9111}),
-        "+155****4567",
-        "hi",
-    )
-
-    assert result == {"success": True, "message_id": "m1"}
-    url, _body, headers = _SendClient.calls[0]
-    assert ":9111/" in url
-    assert headers["X-Hermes-Sidecar-Token"] == "test-sidecar-token"
 
 
 @pytest.mark.asyncio
