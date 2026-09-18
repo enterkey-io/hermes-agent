@@ -18,7 +18,9 @@ Adversarial notes encoded in these tests:
 """
 
 import asyncio
+import hashlib
 import json
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -91,7 +93,7 @@ class TestTrustGateAtCallTime:
     def test_write_capable_on_untrusted_server_requires_approval(
         self, fake_session
     ):
-        """Approval consulted; 'accept' lets the RPC through."""
+        """Approval shows exact canonical args; 'accept' dispatches them."""
         _set_trust("srv", "untrusted")
         # No readOnlyHint recorded for delete_repo → write-capable.
         handler = mcp_tool._make_tool_handler("srv", "delete_repo", 30.0)
@@ -99,10 +101,273 @@ class TestTrustGateAtCallTime:
             "tools.approval.request_elicitation_consent",
             return_value="accept",
         ) as consent:
-            raw = handler({"repo": "x"})
+            raw = handler({"z": [2, 1], "repo": "x"})
         consent.assert_called_once()
+        message, description = consent.call_args.args
+        assert '{"repo":"x","z":[2,1]}' in message
+        assert "Argument snapshot SHA-256:" in message
+        assert "same frozen argument snapshot" in description
         assert json.loads(raw) == {"result": "ok"}
-        fake_session.call_tool.assert_awaited_once()
+        fake_session.call_tool.assert_awaited_once_with(
+            "delete_repo", arguments={"repo": "x", "z": [2, 1]}
+        )
+
+    def test_approval_and_rpc_share_snapshot_when_original_args_mutate(
+        self, fake_session
+    ):
+        """Approval callback cannot swap values in the later RPC payload."""
+        _set_trust("srv", "untrusted")
+        handler = mcp_tool._make_tool_handler("srv", "send_message", 30.0)
+        args = {
+            "to": ["approved@example.com"],
+            "subject": "Approved subject",
+            "body": "Approved body",
+        }
+
+        def approve_then_mutate(message, description, **kwargs):
+            assert (
+                '{"body":"Approved body","subject":"Approved subject",'
+                '"to":["approved@example.com"]}'
+            ) in message
+            args["to"] = ["substituted@example.com"]
+            args["subject"] = "Substituted subject"
+            args["body"] = "Substituted body"
+            return "accept"
+
+        with patch(
+            "tools.approval.request_elicitation_consent",
+            side_effect=approve_then_mutate,
+        ):
+            raw = handler(args)
+
+        assert json.loads(raw) == {"result": "ok"}
+        fake_session.call_tool.assert_awaited_once_with(
+            "send_message",
+            arguments={
+                "to": ["approved@example.com"],
+                "subject": "Approved subject",
+                "body": "Approved body",
+            },
+        )
+
+    def test_non_json_arguments_fail_before_approval_or_rpc(self, fake_session):
+        """No reviewer or transport sees an argument set Hermes cannot bind."""
+        _set_trust("srv", "untrusted")
+        handler = mcp_tool._make_tool_handler("srv", "send_message", 30.0)
+        with patch(
+            "tools.approval.request_elicitation_consent"
+        ) as consent:
+            raw = handler({"body": float("nan")})
+
+        consent.assert_not_called()
+        fake_session.call_tool.assert_not_awaited()
+        assert "valid JSON object" in json.loads(raw)["error"]
+
+    def test_secret_redaction_preserves_raw_snapshot_binding(self, fake_session):
+        """Reviewer sees a mask plus the digest of the exact dispatched JSON."""
+        _set_trust("srv", "untrusted")
+        handler = mcp_tool._make_tool_handler("srv", "store_token", 30.0)
+        token = "ghp_abcdefghijklmnopqrstuvwxyz1234567890"
+        canonical = json.dumps(
+            {"token": token},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+        with patch(
+            "tools.approval.request_elicitation_consent",
+            return_value="decline",
+        ) as consent:
+            raw = handler({"token": token})
+
+        message = consent.call_args.args[0]
+        assert token not in message
+        assert "***" in message
+        assert hashlib.sha256(canonical.encode()).hexdigest() in message
+        fake_session.call_tool.assert_not_awaited()
+        assert "did not approve" in json.loads(raw)["error"]
+
+    def test_real_gateway_approval_payload_matches_dispatched_snapshot(
+        self, fake_session
+    ):
+        """Exercise handler -> approval queue -> decision -> native RPC."""
+        from tools import approval
+
+        _set_trust("srv", "untrusted")
+        handler = mcp_tool._make_tool_handler("srv", "send_message", 30.0)
+        notices = []
+        session_key = "mcp-binding-gateway"
+
+        def notify(data):
+            notices.append(data)
+            assert approval.resolve_gateway_approval(
+                session_key,
+                "once",
+                request_id="not-this-request",
+            ) == 0
+            assert approval.resolve_gateway_approval(
+                session_key,
+                "once",
+                request_id=data["request_id"],
+            ) == 1
+
+        with (
+            patch(
+                "tools.approval.get_current_session_key",
+                return_value=session_key,
+            ),
+            patch(
+                "tools.approval._is_gateway_approval_context",
+                return_value=True,
+            ),
+            patch.dict(
+                approval._gateway_notify_cbs,
+                {session_key: notify},
+                clear=True,
+            ),
+            patch.dict(approval._gateway_queues, {}, clear=True),
+        ):
+            raw = handler(
+                {
+                    "to": ["owner@example.com"],
+                    "subject": "Review me",
+                    "body": "Exact body",
+                }
+            )
+
+        expected = (
+            '{"body":"Exact body","subject":"Review me",'
+            '"to":["owner@example.com"]}'
+        )
+        assert len(notices) == 1
+        assert expected in notices[0]["command"]
+        assert notices[0]["pattern_key"] == "mcp_elicitation"
+        assert notices[0]["allow_session"] is False
+        assert notices[0]["allow_permanent"] is False
+        assert notices[0]["coalesce"] is False
+        fake_session.call_tool.assert_awaited_once_with(
+            "send_message",
+            arguments={
+                "to": ["owner@example.com"],
+                "subject": "Review me",
+                "body": "Exact body",
+            },
+        )
+        assert json.loads(raw) == {"result": "ok"}
+
+    @pytest.mark.parametrize("decision", ["deny", "expire"])
+    def test_real_gateway_denial_and_expiry_never_dispatch(
+        self, fake_session, decision
+    ):
+        """A refusal or silence closes the exact request before transport."""
+        from tools import approval
+
+        _set_trust("srv", "untrusted")
+        handler = mcp_tool._make_tool_handler("srv", "send_message", 30.0)
+        notices = []
+        session_key = f"mcp-binding-{decision}"
+
+        def notify(data):
+            notices.append(data)
+            if decision == "deny":
+                assert approval.resolve_gateway_approval(
+                    session_key,
+                    "deny",
+                    request_id=data["request_id"],
+                ) == 1
+
+        with (
+            patch(
+                "tools.approval.get_current_session_key",
+                return_value=session_key,
+            ),
+            patch(
+                "tools.approval._is_gateway_approval_context",
+                return_value=True,
+            ),
+            patch(
+                "tools.approval._get_approval_timeout",
+                return_value=0 if decision == "expire" else 60,
+            ),
+            patch.dict(
+                approval._gateway_notify_cbs,
+                {session_key: notify},
+                clear=True,
+            ),
+            patch.dict(approval._gateway_queues, {}, clear=True),
+            patch.dict(approval._gateway_expired, {}, clear=True),
+        ):
+            raw = handler(
+                {
+                    "to": ["owner@example.com"],
+                    "subject": "Must not send",
+                    "body": "Must not send",
+                }
+            )
+
+        assert len(notices) == 1
+        assert notices[0]["request_id"]
+        assert '"subject":"Must not send"' in notices[0]["command"]
+        fake_session.call_tool.assert_not_awaited()
+        assert "did not approve" in json.loads(raw)["error"]
+
+    def test_identical_concurrent_consents_keep_distinct_request_ids(self):
+        """One request's answer cannot authorize a concurrent twin."""
+        from tools import approval
+
+        session_key = "mcp-binding-concurrent"
+        notices = []
+        two_notices = threading.Event()
+        results = []
+
+        def notify(data):
+            notices.append(data)
+            if len(notices) == 2:
+                two_notices.set()
+
+        def request():
+            results.append(
+                approval.request_elicitation_consent(
+                    "same exact operation",
+                    "one-request consent",
+                )
+            )
+
+        with (
+            patch(
+                "tools.approval.get_current_session_key",
+                return_value=session_key,
+            ),
+            patch(
+                "tools.approval._is_gateway_approval_context",
+                return_value=True,
+            ),
+            patch("tools.approval._get_approval_timeout", return_value=2),
+            patch.dict(
+                approval._gateway_notify_cbs,
+                {session_key: notify},
+                clear=True,
+            ),
+            patch.dict(approval._gateway_queues, {}, clear=True),
+            patch.dict(approval._gateway_expired, {}, clear=True),
+        ):
+            threads = [threading.Thread(target=request) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            assert two_notices.wait(timeout=1)
+            request_ids = [notice["request_id"] for notice in notices]
+            assert len(set(request_ids)) == 2
+            assert approval.resolve_gateway_approval(
+                session_key, "once", request_id=request_ids[0]
+            ) == 1
+            assert approval.resolve_gateway_approval(
+                session_key, "deny", request_id=request_ids[1]
+            ) == 1
+            for thread in threads:
+                thread.join(timeout=1)
+                assert not thread.is_alive()
+
+        assert sorted(results) == ["accept", "decline"]
 
     def test_denied_approval_blocks_rpc(self, fake_session):
         """'decline' blocks the call — the RPC must never fire."""
