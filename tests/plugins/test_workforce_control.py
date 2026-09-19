@@ -358,6 +358,57 @@ def test_semantic_signal_identity_deduplicates_new_evidence(board):
     assert board.execute("SELECT COUNT(*) FROM wc_items WHERE item_kind='signal'").fetchone()[0] == 1
 
 
+def test_concurrent_observed_signal_writers_create_once_and_merge(
+    board, monkeypatch,
+):
+    database_path = Path(board.execute("PRAGMA database_list").fetchone()["file"])
+    ready = threading.Barrier(2)
+    real_write_txn = workforce_store.write_txn
+
+    @contextmanager
+    def synchronized_write_txn(conn):
+        ready.wait(timeout=5)
+        with real_write_txn(conn) as transaction:
+            yield transaction
+
+    monkeypatch.setattr(workforce_store, "write_txn", synchronized_write_txn)
+
+    def observe(suffix):
+        conn = kanban_db.connect(database_path)
+        try:
+            return record_signal(
+                conn,
+                source_agent="chloe",
+                expected_outcome=f"wording {suffix}",
+                goal_ref="trading-vocation",
+                observation=f"observation {suffix}",
+                evidence_references=[f"buzz:event:{suffix}"],
+                action_class=f"class-{suffix}",
+                target_ref=f"target-{suffix}",
+                dedupe_ref="buzz-content:" + "a" * 64,
+            )
+        finally:
+            conn.close()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(observe, ("one", "two")))
+
+    assert {result["task_id"] for result in results} == {results[0]["task_id"]}
+    assert sorted(result["created"] for result in results) == [False, True]
+    item = board.execute(
+        "SELECT evidence_json,provenance_json FROM wc_items WHERE stable_key=?",
+        (results[0]["stable_key"],),
+    ).fetchone()
+    assert set(json.loads(item["evidence_json"])) == {
+        "buzz:event:one", "buzz:event:two",
+    }
+    assert len(json.loads(item["provenance_json"])) == 2
+    assert board.execute(
+        "SELECT COUNT(*) FROM tasks WHERE idempotency_key=?",
+        (f"workforce-signal:{results[0]['stable_key']}",),
+    ).fetchone()[0] == 1
+
+
 def test_goal_projection_is_aurora_owned_bounded_and_reports_freshness(board):
     with pytest.raises(PermissionError, match="only Aurora"):
         publish_goal_snapshot(
@@ -448,6 +499,7 @@ def test_buzz_observer_is_bounded_and_role_restricted(monkeypatch):
             "since": 1, "rooms_checked": 2,
             "events": [{
                 "room": "admin", "room_id": "room-1", "event_id": "event-1",
+                "author_id": "a" * 64,
                 "content": "A commitment changed",
             }],
             "errors": [], "requested": kwargs,
@@ -468,6 +520,59 @@ def test_buzz_observer_is_bounded_and_role_restricted(monkeypatch):
     assert "restricted" in denied["error"]
 
 
+def test_buzz_observer_binds_canonical_pubkey_not_shared_display_name(
+    monkeypatch,
+):
+    from hermes_cli import config as hermes_config
+    from plugins.platforms.buzz import adapter as buzz_adapter
+    from tools.workforce_observation_runtime import bind_buzz_events
+
+    monkeypatch.setattr(
+        hermes_config,
+        "load_config_readonly",
+        lambda: {"gateway": {"platforms": {"buzz": {"extra": {
+            "cli_path": "/tmp/buzz", "relay_url": "wss://relay.invalid",
+        }}}}},
+    )
+    monkeypatch.setattr(buzz_adapter, "_configured_channels", lambda _extra: ["room-1"])
+    monkeypatch.setattr(buzz_adapter, "_resolve_private_key", lambda _extra: "private")
+    monkeypatch.setattr(Path, "is_file", lambda _path: True)
+
+    def run(command, **_kwargs):
+        if command[-2:] == ["channels", "list"]:
+            return MagicMock(
+                returncode=0,
+                stdout=json.dumps([{"id": "room-1", "name": "finance"}]),
+            )
+        assert command[1:3] == ["--format", "json"]
+        return MagicMock(
+            returncode=0,
+            stdout=json.dumps([
+                {
+                    "id": "event-1", "kind": 9, "created_at": 1,
+                    "display_name": "Shared", "pubkey": "A" * 64,
+                    "content": "same alert",
+                },
+                {
+                    "id": "event-2", "kind": 9, "created_at": 2,
+                    "display_name": "Shared", "pubkey": "b" * 64,
+                    "content": "same alert",
+                },
+            ]),
+        )
+
+    monkeypatch.setattr(workforce_tools.subprocess, "run", run)
+
+    events = workforce_tools._buzz_events(
+        lookback_minutes=30, per_room_limit=4, max_events=4,
+    )["events"]
+    bind_buzz_events(events)
+
+    assert [event["author"] for event in events] == ["Shared", "Shared"]
+    assert [event["author_id"] for event in events] == ["a" * 64, "b" * 64]
+    assert events[0]["dedupe_ref"] != events[1]["dedupe_ref"]
+
+
 def test_failed_buzz_observation_clears_prior_signal_bindings(monkeypatch):
     from tools.workforce_observation_runtime import (
         bind_buzz_events,
@@ -475,7 +580,8 @@ def test_failed_buzz_observation_clears_prior_signal_bindings(monkeypatch):
     )
 
     events = [{
-        "room_id": "room-1", "event_id": "event-1", "content": "failure",
+        "room_id": "room-1", "event_id": "event-1",
+        "author_id": "a" * 64, "content": "failure",
     }]
     bind_buzz_events(events)
     dedupe_ref = events[0]["dedupe_ref"]

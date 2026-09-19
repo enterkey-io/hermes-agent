@@ -31,6 +31,7 @@ def _bind_buzz(*, event_id="event-1", content="Service example.service failed"):
     events = [{
         "room_id": "room-1",
         "event_id": event_id,
+        "author_id": "a" * 64,
         "content": content,
     }]
     bind_buzz_events(events)
@@ -42,11 +43,13 @@ def test_buzz_binding_distinguishes_full_messages_with_same_display_prefix():
     first_full = prefix + " first"
     second_full = prefix + " second"
     first = [{
-        "room_id": "room-1", "event_id": "one", "content": prefix,
+        "room_id": "room-1", "event_id": "one", "author_id": "a" * 64,
+        "content": prefix,
         "_full_content_sha256": hashlib.sha256(first_full.encode()).hexdigest(),
     }]
     second = [{
-        "room_id": "room-1", "event_id": "two", "content": prefix,
+        "room_id": "room-1", "event_id": "two", "author_id": "a" * 64,
+        "content": prefix,
         "_full_content_sha256": hashlib.sha256(second_full.encode()).hexdigest(),
     }]
     bind_buzz_events(first)
@@ -60,11 +63,13 @@ def test_buzz_binding_distinguishes_full_messages_with_same_display_prefix():
 
 def test_buzz_binding_does_not_merge_different_authors():
     first = [{
-        "room_id": "room-1", "event_id": "one", "author": "notifier-a",
+        "room_id": "room-1", "event_id": "one", "author": "same-name",
+        "author_id": "a" * 64,
         "content": "Service example.service failed",
     }]
     second = [{
-        "room_id": "room-1", "event_id": "two", "author": "human-copy",
+        "room_id": "room-1", "event_id": "two", "author": "same-name",
+        "author_id": "b" * 64,
         "content": "Service example.service failed",
     }]
     bind_buzz_events(first)
@@ -72,8 +77,8 @@ def test_buzz_binding_does_not_merge_different_authors():
     assert first[0]["dedupe_ref"] != second[0]["dedupe_ref"]
 
 
-def test_buzz_binding_survives_tool_worker_context_copy():
-    token, state = activate(False, observe_attempts=True)
+def test_optional_buzz_binding_survives_tool_worker_context_copy():
+    token, state = activate(False)
     try:
         worker_context = copy_context()
         captured = {}
@@ -90,8 +95,21 @@ def test_buzz_binding_survives_tool_worker_context_copy():
             evidence_references=[captured["evidence_ref"]],
         ) == captured["dedupe_ref"]
         assert state.buzz_refs
+        assert state.track_attempts is False
     finally:
         reset(token)
+
+
+def test_buzz_binding_without_stable_author_fails_closed():
+    events = [{
+        "room_id": "room-1", "event_id": "one", "author": "display-only",
+        "content": "Service example.service failed",
+    }]
+
+    bind_buzz_events(events)
+
+    assert "dedupe_ref" not in events[0]
+    assert events[0]["binding_error"] == "stable Buzz event identity unavailable"
 
 
 def test_signal_is_fixed_nonexecuting_record_for_aurora(tmp_path, monkeypatch):
@@ -303,7 +321,13 @@ def test_chloe_rejects_missing_stale_and_mismatched_buzz_binding(
         "dedupe_ref": dedupe_ref,
         "evidence_references": ["buzz:event:another-event"],
     }))
-    assert "must include" in mismatched["error"]
+    assert "outside the selected dedupe_ref" in mismatched["error"]
+    valid_plus_forged = json.loads(signal._handle({
+        **base,
+        "dedupe_ref": dedupe_ref,
+        "evidence_references": [evidence_ref, "buzz:event:forged"],
+    }))
+    assert "outside the selected dedupe_ref" in valid_plus_forged["error"]
     assert not db_path.exists()
 
 

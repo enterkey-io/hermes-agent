@@ -22,12 +22,12 @@ def clear_buzz_events() -> None:
 
 
 def _buzz_dedupe_ref(
-    *, room_id: str, author: str, content_sha256: str
+    *, room_id: str, author_id: str, content_sha256: str
 ) -> str:
     canonical = json.dumps(
         {
             "room_id": room_id.strip(),
-            "author": author.strip() or "unknown",
+            "author_id": author_id.strip(),
             "content_sha256": content_sha256,
         },
         sort_keys=True,
@@ -41,20 +41,29 @@ def bind_buzz_events(events: Iterable[dict[str, Any]]) -> None:
     """Annotate observed events and replace the current turn's valid bindings."""
     bindings: dict[str, set[str]] = {}
     for event in events:
+        event.pop("dedupe_ref", None)
+        event.pop("evidence_ref", None)
+        event.pop("binding_error", None)
         room_id = str(event.get("room_id") or "").strip()
         event_id = str(event.get("event_id") or "").strip()
-        author = str(event.get("author") or "unknown").strip() or "unknown"
+        author_id = str(event.get("author_id") or "").strip().casefold()
         content = str(event.get("content") or "").strip()
         content_sha256 = str(event.pop("_full_content_sha256", "")).strip()
-        if not room_id or not event_id or not content:
+        valid_author = (
+            len(author_id) == 64
+            and all(value in "0123456789abcdef" for value in author_id)
+        )
+        if not room_id or not event_id or not valid_author or not content:
+            event["binding_error"] = "stable Buzz event identity unavailable"
             continue
+        event["author_id"] = author_id
         if (
             len(content_sha256) != 64
             or any(value not in "0123456789abcdef" for value in content_sha256)
         ):
             content_sha256 = hashlib.sha256(content.encode()).hexdigest()
         dedupe_ref = _buzz_dedupe_ref(
-            room_id=room_id, author=author, content_sha256=content_sha256
+            room_id=room_id, author_id=author_id, content_sha256=content_sha256
         )
         evidence_ref = f"buzz:event:{event_id}"
         event["dedupe_ref"] = dedupe_ref
@@ -83,8 +92,13 @@ def validate_buzz_signal_binding(
     supplied = {
         str(value).strip() for value in evidence_references if str(value).strip()
     }
-    if not supplied.intersection(allowed_evidence):
+    if not supplied:
         raise ValueError(
             "evidence_references must include the observed event's evidence_ref"
+        )
+    unexpected = supplied.difference(allowed_evidence)
+    if unexpected:
+        raise ValueError(
+            "evidence_references contain an event outside the selected dedupe_ref"
         )
     return candidate

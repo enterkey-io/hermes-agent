@@ -225,7 +225,7 @@ def _buzz_events(
     for channel_id in channel_ids:
         completed = subprocess.run(
             [
-                cli, "--format", "compact", "messages", "get",
+                cli, "--format", "json", "messages", "get",
                 "--channel", channel_id, "--since", str(since),
                 "--limit", str(max(1, min(int(per_room_limit), 10))),
                 "--kinds", "9",
@@ -253,7 +253,8 @@ def _buzz_events(
                 "room_id": channel_id,
                 "event_id": str(item.get("id") or ""),
                 "created_at": int(item.get("created_at") or 0),
-                "author": str(item.get("display_name") or item.get("name") or item.get("pubkey") or "unknown")[:96],
+                "author": str(item.get("display_name") or item.get("name") or "")[:96],
+                "author_id": str(item.get("pubkey") or "").strip().casefold(),
                 "content": content[:600],
                 "_full_content_sha256": hashlib.sha256(content.encode()).hexdigest(),
             })

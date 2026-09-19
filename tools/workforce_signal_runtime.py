@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 @dataclass
 class RequiredSignalState:
     required: bool = False
+    track_attempts: bool = False
     attempted: bool = False
     failure: str | None = None
     completed: bool = False
@@ -24,11 +25,14 @@ def activate(
     required: bool,
     *,
     observe_attempts: bool = False,
-) -> tuple[Token, RequiredSignalState | None]:
-    state = (
-        RequiredSignalState(required=required)
-        if required or observe_attempts
-        else None
+) -> tuple[Token, RequiredSignalState]:
+    # The mutable state must always exist before tool-worker contexts are
+    # copied. Observation bindings then cross those contexts even when signal
+    # attempts are voluntary, while track_attempts preserves the scheduler's
+    # existing optional-attempt behavior.
+    state = RequiredSignalState(
+        required=required,
+        track_attempts=required or observe_attempts,
     )
     return _ACTIVE.set(state), state
 
@@ -39,20 +43,20 @@ def reset(token: Token) -> None:
 
 def mark_attempted() -> None:
     state = _ACTIVE.get()
-    if state is not None:
+    if state is not None and state.track_attempts:
         state.attempted = True
 
 
 def mark_failure(message: str) -> None:
     state = _ACTIVE.get()
-    if state is not None and not state.completed:
+    if state is not None and state.track_attempts and not state.completed:
         state.attempted = True
         state.failure = str(message)[:800]
 
 
 def mark_success() -> None:
     state = _ACTIVE.get()
-    if state is not None:
+    if state is not None and state.track_attempts:
         # A validation-only rejection is recoverable within the same model
         # turn because registry preflight runs before write reservation. Once a
         # later call commits the required signal, that earlier rejection must
