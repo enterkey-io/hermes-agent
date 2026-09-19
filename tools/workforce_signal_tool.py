@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from typing import Any
 
 from hermes_cli import kanban_db
@@ -117,21 +118,37 @@ def _handle(args: dict[str, Any], **_kwargs: Any) -> str:
             "aurora_assignment_id": aurora_assignment_id or None,
             "dedupe_ref": str(args.get("dedupe_ref") or "").strip() or None,
         }
-        with kanban_db.connect_closing() as conn:
-            recorded = record_signal(
-                conn,
-                source_agent=source.agent,
-                expected_outcome=packet["expected_outcome"],
-                goal_ref=packet["approved_goal"],
-                observation=packet["observation"],
+        dedupe_ref = str(args.get("dedupe_ref") or "").strip()
+        binding_guard = nullcontext(dedupe_ref)
+        if dedupe_ref:
+            from tools.workforce_observation_runtime import hold_buzz_signal_binding
+
+            binding_guard = hold_buzz_signal_binding(
+                dedupe_ref=dedupe_ref,
                 evidence_references=packet["evidence_references"],
-                action_class=str(args.get("action_class") or "opportunity"),
-                target_ref=str(args.get("target_ref") or ""),
-                dedupe_ref=str(args.get("dedupe_ref") or "").strip(),
-                packet=packet,
             )
-        from tools.workforce_signal_runtime import mark_success
-        mark_success()
+        with kanban_db.connect_closing() as conn, binding_guard:
+            try:
+                recorded = record_signal(
+                    conn,
+                    source_agent=source.agent,
+                    expected_outcome=packet["expected_outcome"],
+                    goal_ref=packet["approved_goal"],
+                    observation=packet["observation"],
+                    evidence_references=packet["evidence_references"],
+                    action_class=str(args.get("action_class") or "opportunity"),
+                    target_ref=str(args.get("target_ref") or ""),
+                    dedupe_ref=dedupe_ref,
+                    packet=packet,
+                )
+            except (ValueError, WorkforceOrganizationError, OSError) as exc:
+                from tools.workforce_signal_runtime import mark_failure
+
+                mark_failure(str(exc))
+                raise
+            from tools.workforce_signal_runtime import mark_success
+
+            mark_success()
         return tool_result(
             success=True, signal_id=recorded["task_id"], status=recorded["status"],
             assignee=recorded["assignee"], decision_owner="aurora",

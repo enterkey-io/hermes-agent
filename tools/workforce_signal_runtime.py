@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
+import threading
+from typing import Iterator
 
 
 @dataclass
@@ -15,6 +18,8 @@ class RequiredSignalState:
     completed: bool = False
     buzz_refs: dict[str, frozenset[str]] = field(default_factory=dict)
     turn_claimed: bool = False
+    closed: bool = False
+    _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
 
 _ACTIVE: ContextVar[RequiredSignalState | None] = ContextVar(
@@ -51,59 +56,86 @@ def claim_turn() -> tuple[Token | None, RequiredSignalState]:
     outer Context receives a fresh state instead of sharing observation refs.
     """
     state = _ACTIVE.get()
-    if state is not None and not state.turn_claimed:
-        state.turn_claimed = True
-        return None, state
+    if state is not None:
+        with state._lock:
+            if not state.closed and not state.turn_claimed:
+                state.turn_claimed = True
+                return None, state
     state = RequiredSignalState(turn_claimed=True)
     return _ACTIVE.set(state), state
 
 
 def release_turn(token: Token | None, state: RequiredSignalState) -> None:
     """Release a state claimed by :func:`claim_turn`."""
-    if token is None:
+    with state._lock:
+        state.closed = True
         state.turn_claimed = False
-    else:
+    if token is not None:
         _ACTIVE.reset(token)
 
 
 def mark_attempted() -> None:
     state = _ACTIVE.get()
-    if state is not None and state.track_attempts:
-        state.attempted = True
+    if state is not None:
+        with state._lock:
+            if not state.closed and state.track_attempts:
+                state.attempted = True
 
 
 def mark_failure(message: str) -> None:
     state = _ACTIVE.get()
-    if state is not None and state.track_attempts and not state.completed:
-        state.attempted = True
-        state.failure = str(message)[:800]
+    if state is not None:
+        with state._lock:
+            if not state.closed and state.track_attempts and not state.completed:
+                state.attempted = True
+                state.failure = str(message)[:800]
 
 
 def mark_success() -> None:
     state = _ACTIVE.get()
-    if state is not None and state.track_attempts:
-        # A validation-only rejection is recoverable within the same model
-        # turn because registry preflight runs before write reservation. Once a
-        # later call commits the required signal, that earlier rejection must
-        # not poison the host-observed outcome.
-        state.failure = None
-        state.attempted = True
-        state.completed = True
+    if state is not None:
+        with state._lock:
+            if not state.closed and state.track_attempts:
+                # A validation-only rejection is recoverable within the same
+                # model turn because registry preflight runs before write
+                # reservation. A later commit clears that earlier rejection.
+                state.failure = None
+                state.attempted = True
+                state.completed = True
 
 
 def replace_buzz_refs(bindings: dict[str, frozenset[str]]) -> None:
     """Replace observed refs on the mutable state shared across context copies."""
     state = _ACTIVE.get()
     if state is not None:
-        state.buzz_refs = dict(bindings)
+        with state._lock:
+            if not state.closed:
+                state.buzz_refs = dict(bindings)
 
 
 def current_buzz_refs() -> dict[str, frozenset[str]]:
     state = _ACTIVE.get()
-    return state.buzz_refs if state is not None else {}
+    if state is None:
+        return {}
+    with state._lock:
+        return {} if state.closed else dict(state.buzz_refs)
 
 
 def active_buzz_refs() -> dict[str, frozenset[str]] | None:
     """Return authoritative turn bindings, or ``None`` outside a turn."""
     state = _ACTIVE.get()
-    return state.buzz_refs if state is not None else None
+    if state is None:
+        return None
+    with state._lock:
+        return {} if state.closed else dict(state.buzz_refs)
+
+
+@contextmanager
+def locked_active_buzz_refs() -> Iterator[dict[str, frozenset[str]] | None]:
+    """Hold an active turn open across the final local signal write boundary."""
+    state = _ACTIVE.get()
+    if state is None:
+        yield None
+        return
+    with state._lock:
+        yield {} if state.closed else dict(state.buzz_refs)

@@ -2,6 +2,7 @@ from contextvars import copy_context
 import hashlib
 import json
 from pathlib import Path
+import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -47,6 +48,16 @@ def _bind_buzz(*, event_id="event-1", content="Service example.service failed"):
     }]
     bind_buzz_events(events)
     return events[0]["dedupe_ref"], events[0]["evidence_ref"]
+
+
+def _invoke_workforce_turn_hook(name, **kwargs):
+    from plugins.workforce_control import _on_turn_end, _on_turn_start
+
+    if name == "on_turn_start":
+        _on_turn_start(**kwargs)
+    elif name == "on_turn_end":
+        _on_turn_end(**kwargs)
+    return []
 
 
 def test_buzz_binding_distinguishes_full_messages_with_same_display_prefix():
@@ -177,6 +188,15 @@ def test_ordinary_conversation_real_executor_shares_buzz_binding_between_workers
     with (
         patch("agent.conversation_loop.run_conversation", side_effect=execute_two_rounds),
         patch("run_agent.handle_function_call", side_effect=dispatch),
+        patch(
+            "hermes_cli.lifecycle.has_hook",
+            # An end-only listener still activates the paired host scope.
+            side_effect=lambda name: name == "on_turn_end",
+        ),
+        patch(
+            "hermes_cli.lifecycle.invoke_hook",
+            side_effect=_invoke_workforce_turn_hook,
+        ),
         patch("hermes_cli.observability.relay_shared_metrics.start_task_run"),
         patch("hermes_cli.observability.relay_shared_metrics.finish_task_run"),
     ):
@@ -242,6 +262,118 @@ def test_cron_state_is_borrowed_and_keeps_host_observed_outcome():
         assert cron_state.turn_claimed is False
     finally:
         reset(cron_token)
+
+
+def test_abandoned_worker_is_revoked_after_turn_release():
+    from tools.workforce_observation_runtime import validate_buzz_signal_binding
+
+    cron_token, cron_state = activate(True)
+    turn_token, turn_state = claim_turn()
+    dedupe_ref, evidence_ref = _bind_buzz(event_id="abandoned")
+    worker = copy_context()
+    release_turn(turn_token, turn_state)
+    reset(cron_token)
+
+    def late_worker():
+        mark_success()
+        with pytest.raises(ValueError, match="not returned by this turn"):
+            validate_buzz_signal_binding(
+                dedupe_ref=dedupe_ref,
+                evidence_references=[evidence_ref],
+            )
+
+    worker.run(late_worker)
+    assert cron_state.completed is False
+    assert cron_state.failure is None
+    assert cron_state.attempted is False
+
+
+def test_real_timed_out_executor_worker_cannot_bind_after_turn_end():
+    """A worker abandoned by the real timeout path loses signal authority."""
+    from run_agent import AIAgent
+    from tools.workforce_observation_runtime import validate_buzz_signal_binding
+
+    tool_defs = [{
+        "type": "function",
+        "function": {
+            "name": "workforce_observe_buzz",
+            "description": "observe",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }]
+    with (
+        patch("run_agent.get_tool_definitions", return_value=tool_defs),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("hermes_cli.config.load_config", return_value={}),
+        patch("hermes_cli.config.load_config_readonly", return_value={}),
+        patch("run_agent.OpenAI"),
+    ):
+        agent = AIAgent(
+            api_key="test-key-1234567890",
+            base_url="https://openrouter.ai/api/v1",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+    agent.client = MagicMock()
+    agent.compression_enabled = False
+    agent.save_trajectories = False
+    release_worker = threading.Event()
+    worker_done = threading.Event()
+    observed = {}
+
+    def delayed_observation(_name, _args, _task_id, **_kwargs):
+        release_worker.wait(timeout=5)
+        dedupe_ref, evidence_ref = _bind_buzz(event_id="late-real-worker")
+        observed.update(dedupe_ref=dedupe_ref, evidence_ref=evidence_ref)
+        try:
+            validate_buzz_signal_binding(
+                dedupe_ref=dedupe_ref,
+                evidence_references=[evidence_ref],
+            )
+        except ValueError as exc:
+            observed["error"] = str(exc)
+        finally:
+            worker_done.set()
+        return json.dumps(observed)
+
+    def execute_timed_out_round(active_agent, *_args, **_kwargs):
+        call = SimpleNamespace(
+            id="call-timeout",
+            type="function",
+            function=SimpleNamespace(name="workforce_observe_buzz", arguments="{}"),
+        )
+        messages = []
+        active_agent._execute_tool_calls_sequential(
+            SimpleNamespace(content="", tool_calls=[call]),
+            messages,
+            "task-timeout",
+        )
+        return {"final_response": "timed out", "messages": messages, "failed": False}
+
+    with (
+        patch("agent.conversation_loop.run_conversation", side_effect=execute_timed_out_round),
+        patch("run_agent.handle_function_call", side_effect=delayed_observation),
+        patch("agent.tool_executor._resolve_sequential_tool_timeout", return_value=0.05),
+        patch(
+            "hermes_cli.lifecycle.has_hook",
+            side_effect=lambda name: name == "on_turn_start",
+        ),
+        patch(
+            "hermes_cli.lifecycle.invoke_hook",
+            side_effect=_invoke_workforce_turn_hook,
+        ),
+        patch("hermes_cli.observability.relay_shared_metrics.start_task_run"),
+        patch("hermes_cli.observability.relay_shared_metrics.finish_task_run"),
+    ):
+        result = agent.run_conversation("inspect Buzz", task_id="task-timeout")
+
+    assert result["final_response"] == "timed out"
+    release_worker.set()
+    assert worker_done.wait(timeout=5)
+    assert observed["error"] == (
+        "dedupe_ref was not returned by this turn's Buzz observation"
+    )
 
 
 def test_buzz_binding_without_stable_author_fails_closed():

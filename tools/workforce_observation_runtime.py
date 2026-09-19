@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from contextvars import ContextVar
 import hashlib
 import json
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 
 _ACTIVE_BUZZ_REFS: ContextVar[dict[str, frozenset[str]]] = ContextVar(
@@ -107,3 +108,40 @@ def validate_buzz_signal_binding(
             "evidence_references contain an event outside the selected dedupe_ref"
         )
     return candidate
+
+
+@contextmanager
+def hold_buzz_signal_binding(
+    *, dedupe_ref: str, evidence_references: Iterable[Any]
+) -> Iterator[str]:
+    """Revalidate and pin an active binding across its local database write."""
+    from tools.workforce_signal_runtime import locked_active_buzz_refs
+
+    with locked_active_buzz_refs() as active_bindings:
+        candidate = str(dedupe_ref or "").strip()
+        if active_bindings is None:
+            validated = validate_buzz_signal_binding(
+                dedupe_ref=candidate,
+                evidence_references=evidence_references,
+            )
+            yield validated
+            return
+        allowed_evidence = active_bindings.get(candidate)
+        if not allowed_evidence:
+            raise ValueError(
+                "dedupe_ref was not returned by this turn's Buzz observation"
+            )
+        supplied = {
+            str(value).strip()
+            for value in evidence_references
+            if str(value).strip()
+        }
+        if not supplied:
+            raise ValueError(
+                "evidence_references must include the observed event's evidence_ref"
+            )
+        if supplied.difference(allowed_evidence):
+            raise ValueError(
+                "evidence_references contain an event outside the selected dedupe_ref"
+            )
+        yield candidate

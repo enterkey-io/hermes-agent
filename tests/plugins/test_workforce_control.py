@@ -31,9 +31,23 @@ from plugins.workforce_control.store import (
 )
 from plugins.workforce_control import tools as workforce_tools
 from plugins.workforce_control import store as workforce_store
+from plugins import workforce_control
 
 
 ROOT = Path(__file__).parents[2]
+
+
+def test_plugin_registers_generic_turn_lifecycle_hooks():
+    ctx = MagicMock()
+
+    workforce_control.register(ctx)
+
+    registered = {
+        call.args[0]: call.args[1]
+        for call in ctx.register_hook.call_args_list
+    }
+    assert registered["on_turn_start"] is workforce_control._on_turn_start
+    assert registered["on_turn_end"] is workforce_control._on_turn_end
 
 
 @pytest.fixture
