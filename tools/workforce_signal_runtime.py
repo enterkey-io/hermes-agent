@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 import threading
-from typing import Iterator
+from typing import Callable
 
 
 @dataclass
@@ -130,12 +129,19 @@ def active_buzz_refs() -> dict[str, frozenset[str]] | None:
         return {} if state.closed else dict(state.buzz_refs)
 
 
-@contextmanager
-def locked_active_buzz_refs() -> Iterator[dict[str, frozenset[str]] | None]:
-    """Hold an active turn open across the final local signal write boundary."""
+def active_buzz_commit_reader() -> tuple[
+    dict[str, frozenset[str]] | None,
+    Callable[[], dict[str, frozenset[str]] | None],
+]:
+    """Snapshot bindings and return a short, revocation-aware commit reader."""
     state = _ACTIVE.get()
     if state is None:
-        yield None
-        return
+        return None, lambda: None
     with state._lock:
-        yield {} if state.closed else dict(state.buzz_refs)
+        snapshot = {} if state.closed else dict(state.buzz_refs)
+
+    def read_at_commit() -> dict[str, frozenset[str]]:
+        with state._lock:
+            return {} if state.closed else dict(state.buzz_refs)
+
+    return snapshot, read_at_commit

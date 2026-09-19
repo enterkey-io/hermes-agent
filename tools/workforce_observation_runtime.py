@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 from contextvars import ContextVar
 import hashlib
 import json
-from typing import Any, Iterable, Iterator
+from typing import Any, Callable, Iterable
 
 
 _ACTIVE_BUZZ_REFS: ContextVar[dict[str, frozenset[str]]] = ContextVar(
@@ -77,21 +76,15 @@ def bind_buzz_events(events: Iterable[dict[str, Any]]) -> None:
     replace_buzz_refs(frozen)
 
 
-def validate_buzz_signal_binding(
-    *, dedupe_ref: str, evidence_references: Iterable[Any]
+def _validate_binding_map(
+    bindings: dict[str, frozenset[str]],
+    *,
+    dedupe_ref: str,
+    evidence_references: Iterable[Any],
 ) -> str:
-    """Return a current observed ref or reject missing, stale, and forged input."""
     candidate = str(dedupe_ref or "").strip()
     if not candidate:
         raise ValueError("dedupe_ref is required for a bounded Buzz observation")
-    from tools.workforce_signal_runtime import active_buzz_refs
-
-    active_bindings = active_buzz_refs()
-    bindings = (
-        active_bindings
-        if active_bindings is not None
-        else _ACTIVE_BUZZ_REFS.get()
-    )
     allowed_evidence = bindings.get(candidate)
     if not allowed_evidence:
         raise ValueError("dedupe_ref was not returned by this turn's Buzz observation")
@@ -110,38 +103,46 @@ def validate_buzz_signal_binding(
     return candidate
 
 
-@contextmanager
-def hold_buzz_signal_binding(
+def validate_buzz_signal_binding(
     *, dedupe_ref: str, evidence_references: Iterable[Any]
-) -> Iterator[str]:
-    """Revalidate and pin an active binding across its local database write."""
-    from tools.workforce_signal_runtime import locked_active_buzz_refs
+) -> str:
+    """Return a current observed ref or reject missing, stale, and forged input."""
+    from tools.workforce_signal_runtime import active_buzz_refs
 
-    with locked_active_buzz_refs() as active_bindings:
-        candidate = str(dedupe_ref or "").strip()
-        if active_bindings is None:
-            validated = validate_buzz_signal_binding(
-                dedupe_ref=candidate,
-                evidence_references=evidence_references,
-            )
-            yield validated
-            return
-        allowed_evidence = active_bindings.get(candidate)
-        if not allowed_evidence:
-            raise ValueError(
-                "dedupe_ref was not returned by this turn's Buzz observation"
-            )
-        supplied = {
-            str(value).strip()
-            for value in evidence_references
-            if str(value).strip()
-        }
-        if not supplied:
-            raise ValueError(
-                "evidence_references must include the observed event's evidence_ref"
-            )
-        if supplied.difference(allowed_evidence):
-            raise ValueError(
-                "evidence_references contain an event outside the selected dedupe_ref"
-            )
-        yield candidate
+    active_bindings = active_buzz_refs()
+    return _validate_binding_map(
+        active_bindings if active_bindings is not None else _ACTIVE_BUZZ_REFS.get(),
+        dedupe_ref=dedupe_ref,
+        evidence_references=evidence_references,
+    )
+
+
+def prepare_buzz_signal_commit_guard(
+    *, dedupe_ref: str, evidence_references: Iterable[Any]
+) -> Callable[[], None]:
+    """Return the transaction's nonblocking commit-admission callback.
+
+    The callback is the linearization point: revocation first makes it fail,
+    while a successful callback admits the immediately following commit. No
+    state lock is retained across SQLite or filesystem I/O.
+    """
+    from tools.workforce_signal_runtime import active_buzz_commit_reader
+
+    evidence = tuple(evidence_references)
+    snapshot, read_at_commit = active_buzz_commit_reader()
+    bindings = snapshot if snapshot is not None else _ACTIVE_BUZZ_REFS.get()
+    _validate_binding_map(
+        bindings,
+        dedupe_ref=dedupe_ref,
+        evidence_references=evidence,
+    )
+
+    def guard() -> None:
+        current = read_at_commit()
+        _validate_binding_map(
+            current if current is not None else _ACTIVE_BUZZ_REFS.get(),
+            dedupe_ref=dedupe_ref,
+            evidence_references=evidence,
+        )
+
+    return guard

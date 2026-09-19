@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from contextlib import nullcontext
 from typing import Any
 
 from hermes_cli import kanban_db
@@ -119,15 +118,17 @@ def _handle(args: dict[str, Any], **_kwargs: Any) -> str:
             "dedupe_ref": str(args.get("dedupe_ref") or "").strip() or None,
         }
         dedupe_ref = str(args.get("dedupe_ref") or "").strip()
-        binding_guard = nullcontext(dedupe_ref)
+        before_commit = None
         if dedupe_ref:
-            from tools.workforce_observation_runtime import hold_buzz_signal_binding
+            from tools.workforce_observation_runtime import (
+                prepare_buzz_signal_commit_guard,
+            )
 
-            binding_guard = hold_buzz_signal_binding(
+            before_commit = prepare_buzz_signal_commit_guard(
                 dedupe_ref=dedupe_ref,
                 evidence_references=packet["evidence_references"],
             )
-        with kanban_db.connect_closing() as conn, binding_guard:
+        with kanban_db.connect_closing() as conn:
             try:
                 recorded = record_signal(
                     conn,
@@ -140,6 +141,7 @@ def _handle(args: dict[str, Any], **_kwargs: Any) -> str:
                     target_ref=str(args.get("target_ref") or ""),
                     dedupe_ref=dedupe_ref,
                     packet=packet,
+                    before_commit=before_commit,
                 )
             except (ValueError, WorkforceOrganizationError, OSError) as exc:
                 from tools.workforce_signal_runtime import mark_failure

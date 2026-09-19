@@ -13,7 +13,7 @@ import json
 import re
 import sqlite3
 import time
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from hermes_cli import kanban_db
 from hermes_cli.workforce_org import WorkforceOrganization, load_organization
@@ -284,6 +284,7 @@ def record_signal(
     target_ref: str = "",
     dedupe_ref: str = "",
     packet: Mapping[str, Any] | None = None,
+    before_commit: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     ensure_schema(conn)
     stable_key = (
@@ -336,48 +337,60 @@ def record_signal(
                 conn, existing["task_id"], "workforce_signal_reobserved",
                 {"source_agent": source_agent, "stable_key": stable_key},
             )
-            return {
+            result = {
                 "task_id": existing["task_id"], "status": existing["status"],
                 "assignee": existing["assignee"], "stable_key": stable_key,
                 "created": False,
             }
-
-        body = dict(packet or {})
-        body.update({
-            "kind": "workforce_signal", "decision_owner": "aurora",
-            "launch_authorized": False, "source_agent": source_agent,
-            "expected_outcome": expected_outcome, "approved_goal": goal_ref,
-            "observation": observation, "evidence_references": evidence_references,
-            "stable_key": stable_key, "action_class": action_class,
-            "target_ref": target_ref or None, "dedupe_ref": dedupe_ref or None,
-        })
-        now = _now()
-        task_id = kanban_db.create_task(
-            conn, title=f"Signal: {expected_outcome[:120]}", body=json.dumps(body, indent=2, sort_keys=True),
-            assignee="aurora", created_by=source_agent, workspace_kind="scratch",
-            triage=False, initial_status="blocked",
-            idempotency_key=f"workforce-signal:{stable_key}",
-        )
-        kanban_db._append_event(
-            conn,
-            task_id,
-            "blocked",
-            {
-                "reason": "non-executing workforce signal awaiting Aurora decision",
-                "kind": "needs_input",
-            },
-        )
-        conn.execute(
-            "UPDATE tasks SET block_kind='needs_input',block_recurrences=1 WHERE id=?",
-            (task_id,),
-        )
-        conn.execute(
-            "INSERT INTO wc_items(task_id,item_kind,stable_key,goal_ref,desired_outcome,action_class,target_ref,evidence_json,provenance_json,verification_state,current_state,created_at,updated_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,'not_required','open',?,?)",
-            (task_id, "signal", stable_key, goal_ref or "unknown", expected_outcome,
-             action_class, target_ref or None, _json(evidence_references), _json([provenance]), now, now),
-        )
-        return {"task_id": task_id, "status": "blocked", "assignee": "aurora", "stable_key": stable_key, "created": True}
+        else:
+            body = dict(packet or {})
+            body.update({
+                "kind": "workforce_signal", "decision_owner": "aurora",
+                "launch_authorized": False, "source_agent": source_agent,
+                "expected_outcome": expected_outcome, "approved_goal": goal_ref,
+                "observation": observation, "evidence_references": evidence_references,
+                "stable_key": stable_key, "action_class": action_class,
+                "target_ref": target_ref or None, "dedupe_ref": dedupe_ref or None,
+            })
+            now = _now()
+            task_id = kanban_db.create_task(
+                conn, title=f"Signal: {expected_outcome[:120]}", body=json.dumps(body, indent=2, sort_keys=True),
+                assignee="aurora", created_by=source_agent, workspace_kind="scratch",
+                triage=False, initial_status="blocked",
+                idempotency_key=f"workforce-signal:{stable_key}",
+            )
+            kanban_db._append_event(
+                conn,
+                task_id,
+                "blocked",
+                {
+                    "reason": "non-executing workforce signal awaiting Aurora decision",
+                    "kind": "needs_input",
+                },
+            )
+            conn.execute(
+                "UPDATE tasks SET block_kind='needs_input',block_recurrences=1 WHERE id=?",
+                (task_id,),
+            )
+            conn.execute(
+                "INSERT INTO wc_items(task_id,item_kind,stable_key,goal_ref,desired_outcome,action_class,target_ref,evidence_json,provenance_json,verification_state,current_state,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,'not_required','open',?,?)",
+                (task_id, "signal", stable_key, goal_ref or "unknown", expected_outcome,
+                 action_class, target_ref or None, _json(evidence_references), _json([provenance]), now, now),
+            )
+            result = {
+                "task_id": task_id,
+                "status": "blocked",
+                "assignee": "aurora",
+                "stable_key": stable_key,
+                "created": True,
+            }
+        if before_commit is not None:
+            # This callback is the authorization linearization point. It must
+            # stay immediately adjacent to COMMIT and must not retain a lock
+            # across the transaction manager's SQLite/filesystem boundary.
+            before_commit()
+    return result
 
 
 def publish_goal_snapshot(

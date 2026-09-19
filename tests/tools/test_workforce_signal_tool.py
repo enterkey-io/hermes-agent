@@ -3,6 +3,7 @@ import hashlib
 import json
 from pathlib import Path
 import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -463,6 +464,132 @@ def test_signal_authority_is_revoked_before_conversation_lease_release(
     assert result["final_response"] == "ok"
     assert "not returned by this turn" in captured["release_result"]["error"]
     record_signal.assert_not_called()
+
+
+def test_revocation_does_not_wait_for_blocked_signal_io_and_forces_rollback(
+    tmp_path, monkeypatch
+):
+    """A stalled worker cannot hold turn cleanup or commit after revocation."""
+    from tools.workforce_observation_runtime import (
+        prepare_buzz_signal_commit_guard,
+    )
+
+    db_path = tmp_path / "kanban.db"
+    monkeypatch.setattr(kanban_db, "kanban_db_path", lambda **_kwargs: db_path)
+    turn_token, turn_state = claim_turn()
+    dedupe_ref, evidence_ref = _bind_buzz(event_id="blocked-write")
+    commit_guard = prepare_buzz_signal_commit_guard(
+        dedupe_ref=dedupe_ref,
+        evidence_references=[evidence_ref],
+    )
+    worker_context = copy_context()
+    before_commit = threading.Event()
+    resume_commit = threading.Event()
+    worker_done = threading.Event()
+    observed = {}
+
+    def paused_commit_guard():
+        before_commit.set()
+        resume_commit.wait(timeout=5)
+        commit_guard()
+
+    def blocked_write():
+        try:
+            with kanban_db.connect_closing(db_path) as conn:
+                signal.record_signal(
+                    conn,
+                    source_agent="chloe",
+                    expected_outcome="Repair the repeated service failure",
+                    goal_ref="Reliable operations",
+                    observation="The same service alert recurred",
+                    evidence_references=[evidence_ref],
+                    dedupe_ref=dedupe_ref,
+                    packet={"kind": "workforce_signal"},
+                    before_commit=paused_commit_guard,
+                )
+        except ValueError as exc:
+            observed["error"] = str(exc)
+        finally:
+            worker_done.set()
+
+    worker = threading.Thread(
+        target=lambda: worker_context.run(blocked_write),
+        daemon=True,
+    )
+    worker.start()
+    assert before_commit.wait(timeout=5)
+
+    started = time.monotonic()
+    release_turn(turn_token, turn_state)
+    release_elapsed = time.monotonic() - started
+    resume_commit.set()
+    assert worker_done.wait(timeout=5)
+    worker.join(timeout=1)
+
+    assert release_elapsed < 0.5
+    assert observed["error"] == (
+        "dedupe_ref was not returned by this turn's Buzz observation"
+    )
+    with kanban_db.connect_closing(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM wc_items").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+
+    # The opposite race is linearizable too: once the short commit callback
+    # succeeds, revocation returns without waiting for the admitted COMMIT.
+    admitted_token, admitted_state = claim_turn()
+    admitted_ref, admitted_evidence = _bind_buzz(event_id="admitted-write")
+    admitted_guard = prepare_buzz_signal_commit_guard(
+        dedupe_ref=admitted_ref,
+        evidence_references=[admitted_evidence],
+    )
+    admitted_context = copy_context()
+    commit_admitted = threading.Event()
+    resume_admitted_commit = threading.Event()
+    admitted_done = threading.Event()
+    admitted_result = {}
+
+    def pause_after_admission():
+        admitted_guard()
+        commit_admitted.set()
+        resume_admitted_commit.wait(timeout=5)
+
+    def admitted_write():
+        try:
+            with kanban_db.connect_closing(db_path) as conn:
+                admitted_result.update(
+                    signal.record_signal(
+                        conn,
+                        source_agent="chloe",
+                        expected_outcome="Repair the newly observed failure",
+                        goal_ref="Reliable operations",
+                        observation="A separate stable alert recurred",
+                        evidence_references=[admitted_evidence],
+                        dedupe_ref=admitted_ref,
+                        packet={"kind": "workforce_signal"},
+                        before_commit=pause_after_admission,
+                    )
+                )
+        finally:
+            admitted_done.set()
+
+    admitted_worker = threading.Thread(
+        target=lambda: admitted_context.run(admitted_write),
+        daemon=True,
+    )
+    admitted_worker.start()
+    assert commit_admitted.wait(timeout=5)
+    started = time.monotonic()
+    release_turn(admitted_token, admitted_state)
+    admitted_release_elapsed = time.monotonic() - started
+    resume_admitted_commit.set()
+    assert admitted_done.wait(timeout=5)
+    admitted_worker.join(timeout=1)
+
+    assert admitted_release_elapsed < 0.5
+    assert admitted_result["created"] is True
+    with kanban_db.connect_closing(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM wc_items").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
 
 
 def test_buzz_binding_without_stable_author_fails_closed():
