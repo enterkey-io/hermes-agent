@@ -47,6 +47,19 @@ def _validate_preflight(args: dict[str, Any]):
             raise ValueError("Chloe requires an explicit aurora_assignment_id for mechanical intake")
         if str(args.get("department_recommendation") or "").strip():
             raise ValueError("Chloe may record facts but may not provide a recommendation")
+        from tools.workforce_observation_runtime import validate_buzz_signal_binding
+
+        validate_buzz_signal_binding(
+            dedupe_ref=str(args.get("dedupe_ref") or ""),
+            evidence_references=list(args.get("evidence_references") or []),
+        )
+    elif str(args.get("dedupe_ref") or "").strip():
+        from tools.workforce_observation_runtime import validate_buzz_signal_binding
+
+        validate_buzz_signal_binding(
+            dedupe_ref=str(args.get("dedupe_ref") or ""),
+            evidence_references=list(args.get("evidence_references") or []),
+        )
     else:
         _required_text(args, "estimated_effort")
         _required_text(args, "department_recommendation")
@@ -102,6 +115,7 @@ def _handle(args: dict[str, Any], **_kwargs: Any) -> str:
             "needed_capabilities": list(args.get("needed_capabilities") or []),
             "department_recommendation": recommendation,
             "aurora_assignment_id": aurora_assignment_id or None,
+            "dedupe_ref": str(args.get("dedupe_ref") or "").strip() or None,
         }
         with kanban_db.connect_closing() as conn:
             recorded = record_signal(
@@ -113,6 +127,7 @@ def _handle(args: dict[str, Any], **_kwargs: Any) -> str:
                 evidence_references=packet["evidence_references"],
                 action_class=str(args.get("action_class") or "opportunity"),
                 target_ref=str(args.get("target_ref") or ""),
+                dedupe_ref=str(args.get("dedupe_ref") or "").strip(),
                 packet=packet,
             )
         from tools.workforce_signal_runtime import mark_success
@@ -151,6 +166,13 @@ WORKFORCE_SIGNAL_SCHEMA = {
             "aurora_assignment_id": {"type": "string"},
             "action_class": {"type": "string", "default": "opportunity"},
             "target_ref": {"type": "string"},
+            "dedupe_ref": {
+                "type": "string",
+                "description": (
+                    "For a bounded Buzz observation, copy the exact dedupe_ref "
+                    "returned with the material event. Chloe must provide it."
+                ),
+            },
         },
         "required": ["expected_outcome", "observation"],
         "additionalProperties": False,

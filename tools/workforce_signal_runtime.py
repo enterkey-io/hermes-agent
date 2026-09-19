@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -12,6 +12,7 @@ class RequiredSignalState:
     attempted: bool = False
     failure: str | None = None
     completed: bool = False
+    buzz_refs: dict[str, frozenset[str]] = field(default_factory=dict)
 
 
 _ACTIVE: ContextVar[RequiredSignalState | None] = ContextVar(
@@ -59,3 +60,15 @@ def mark_success() -> None:
         state.failure = None
         state.attempted = True
         state.completed = True
+
+
+def replace_buzz_refs(bindings: dict[str, frozenset[str]]) -> None:
+    """Replace observed refs on the mutable state shared across context copies."""
+    state = _ACTIVE.get()
+    if state is not None:
+        state.buzz_refs = dict(bindings)
+
+
+def current_buzz_refs() -> dict[str, frozenset[str]]:
+    state = _ACTIVE.get()
+    return state.buzz_refs if state is not None else {}

@@ -446,7 +446,10 @@ def test_buzz_observer_is_bounded_and_role_restricted(monkeypatch):
         "_buzz_events",
         lambda **kwargs: {
             "since": 1, "rooms_checked": 2,
-            "events": [{"room": "admin", "content": "A commitment changed"}],
+            "events": [{
+                "room": "admin", "room_id": "room-1", "event_id": "event-1",
+                "content": "A commitment changed",
+            }],
             "errors": [], "requested": kwargs,
         },
     )
@@ -455,12 +458,42 @@ def test_buzz_observer_is_bounded_and_role_restricted(monkeypatch):
     assert result["requested"] == {
         "lookback_minutes": 90, "per_room_limit": 4, "max_events": 20,
     }
+    assert result["events"][0]["evidence_ref"] == "buzz:event:event-1"
+    assert result["events"][0]["dedupe_ref"].startswith("buzz-content:")
     monkeypatch.setattr(workforce_tools, "_actor", lambda: "milena")
     assert json.loads(workforce_tools._observe_buzz({}))["success"] is True
     monkeypatch.setattr(workforce_tools, "_actor", lambda: "emily")
     denied = json.loads(workforce_tools._observe_buzz({}))
     assert "success" not in denied
     assert "restricted" in denied["error"]
+
+
+def test_failed_buzz_observation_clears_prior_signal_bindings(monkeypatch):
+    from tools.workforce_observation_runtime import (
+        bind_buzz_events,
+        validate_buzz_signal_binding,
+    )
+
+    events = [{
+        "room_id": "room-1", "event_id": "event-1", "content": "failure",
+    }]
+    bind_buzz_events(events)
+    dedupe_ref = events[0]["dedupe_ref"]
+    evidence_ref = events[0]["evidence_ref"]
+    monkeypatch.setattr(workforce_tools, "_actor", lambda: "chloe")
+    monkeypatch.setattr(
+        workforce_tools, "_buzz_events", lambda **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("relay unavailable")
+        ),
+    )
+
+    result = json.loads(workforce_tools._observe_buzz({}))
+
+    assert "relay unavailable" in result["error"]
+    with pytest.raises(ValueError, match="not returned by this turn"):
+        validate_buzz_signal_binding(
+            dedupe_ref=dedupe_ref, evidence_references=[evidence_ref]
+        )
 
 
 def test_only_aurora_can_plan_and_draft_creates_no_execution(board, organization):

@@ -282,12 +282,17 @@ def record_signal(
     evidence_references: list[str],
     action_class: str = "opportunity",
     target_ref: str = "",
+    dedupe_ref: str = "",
     packet: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     ensure_schema(conn)
-    stable_key = stable_identity(
-        item_kind="signal", desired_outcome=expected_outcome,
-        action_class=action_class, target_ref=target_ref,
+    stable_key = (
+        hashlib.sha256(f"signal\0observed\0{dedupe_ref}".encode()).hexdigest()
+        if dedupe_ref
+        else stable_identity(
+            item_kind="signal", desired_outcome=expected_outcome,
+            action_class=action_class, target_ref=target_ref,
+        )
     )
     existing = conn.execute(
         "SELECT i.*,t.status,t.assignee FROM wc_items i JOIN tasks t ON t.id=i.task_id WHERE i.stable_key=?",
@@ -296,13 +301,33 @@ def record_signal(
     provenance = {"source_agent": source_agent, "observation": observation, "recorded_at": _now()}
     if existing:
         with write_txn(conn):
+            task_row = conn.execute(
+                "SELECT body FROM tasks WHERE id=?", (existing["task_id"],)
+            ).fetchone()
+            body = _loads(task_row["body"] if task_row else None, None)
+            if not isinstance(body, dict) or body.get("kind") != "workforce_signal":
+                raise RuntimeError("existing workforce signal body is invalid")
+            if body.get("stable_key") != stable_key:
+                raise RuntimeError("existing workforce signal identity is inconsistent")
+            merged_evidence = _merge_list(
+                existing["evidence_json"], evidence_references
+            )
+            body["observation"] = observation
+            body["latest_source_agent"] = source_agent
+            body["evidence_references"] = _loads(merged_evidence, [])
+            if dedupe_ref:
+                body["dedupe_ref"] = dedupe_ref
             conn.execute(
                 "UPDATE wc_items SET evidence_json=?,provenance_json=?,updated_at=? WHERE task_id=?",
                 (
-                    _merge_list(existing["evidence_json"], evidence_references),
+                    merged_evidence,
                     _merge_list(existing["provenance_json"], [provenance]),
                     _now(), existing["task_id"],
                 ),
+            )
+            conn.execute(
+                "UPDATE tasks SET body=? WHERE id=?",
+                (json.dumps(body, indent=2, sort_keys=True), existing["task_id"]),
             )
             kanban_db._append_event(
                 conn, existing["task_id"], "workforce_signal_reobserved",
@@ -321,7 +346,7 @@ def record_signal(
         "expected_outcome": expected_outcome, "approved_goal": goal_ref,
         "observation": observation, "evidence_references": evidence_references,
         "stable_key": stable_key, "action_class": action_class,
-        "target_ref": target_ref or None,
+        "target_ref": target_ref or None, "dedupe_ref": dedupe_ref or None,
     })
     now = _now()
     with write_txn(conn):

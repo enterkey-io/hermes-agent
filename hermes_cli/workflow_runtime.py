@@ -63,7 +63,8 @@ def build_runbook_agent_prompt(
             lines.extend([
                 "For a material factual workforce_signal within this assigned step, "
                 f"use aurora_assignment_id: `{assignment_ref}`.",
-                "Include the observation, expected factual outcome, and evidence references; "
+                "Include the observation and expected factual outcome; copy the material "
+                "event's exact dedupe_ref and evidence_ref from workforce_observe_buzz; "
                 "omit department_recommendation and estimated_effort. This reference "
                 "does not authorize recommendations, execution, or a signal on a quiet run.",
             ])

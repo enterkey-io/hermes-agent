@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -254,6 +255,7 @@ def _buzz_events(
                 "created_at": int(item.get("created_at") or 0),
                 "author": str(item.get("display_name") or item.get("name") or item.get("pubkey") or "unknown")[:96],
                 "content": content[:600],
+                "_full_content_sha256": hashlib.sha256(content.encode()).hexdigest(),
             })
     events.sort(key=lambda value: (value["created_at"], value["room_id"]))
     bounded_max = max(1, min(int(max_events), 20))
@@ -266,6 +268,12 @@ def _buzz_events(
 
 
 def _observe_buzz(args: dict[str, Any], **_kwargs: Any) -> str:
+    from tools.workforce_observation_runtime import (
+        bind_buzz_events,
+        clear_buzz_events,
+    )
+
+    clear_buzz_events()
     try:
         actor = _actor()
         if actor not in {"chloe", "milena", "aurora"}:
@@ -277,6 +285,7 @@ def _observe_buzz(args: dict[str, Any], **_kwargs: Any) -> str:
             per_room_limit=int(args.get("per_room_limit") or 6),
             max_events=int(args.get("limit") or 20),
         )
+        bind_buzz_events(result["events"])
         return tool_result(success=True, **result)
     except Exception as exc:
         return tool_error(str(exc))
