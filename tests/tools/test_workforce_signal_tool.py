@@ -2,12 +2,21 @@ from contextvars import copy_context
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 from hermes_constants import reset_hermes_home_override, set_hermes_home_override
 from hermes_cli import kanban_db
 from tools import workforce_signal_tool as signal
 from tools.workforce_observation_runtime import bind_buzz_events
-from tools.workforce_signal_runtime import activate, reset
+from tools.workforce_signal_runtime import (
+    activate,
+    claim_turn,
+    current_buzz_refs,
+    mark_success,
+    release_turn,
+    reset,
+)
 
 
 SOURCE = Path(__file__).parents[2] / "workforce" / "organization.yaml"
@@ -98,6 +107,117 @@ def test_optional_buzz_binding_survives_tool_worker_context_copy():
         assert state.track_attempts is False
     finally:
         reset(token)
+
+
+def test_ordinary_conversation_real_executor_shares_buzz_binding_between_workers():
+    """CLI/gateway turns bind observations across separate executor workers."""
+    from run_agent import AIAgent
+    from tools.workforce_observation_runtime import validate_buzz_signal_binding
+
+    tool_defs = [
+        {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": name,
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        for name in ("workforce_observe_buzz", "workforce_signal")
+    ]
+    with (
+        patch("run_agent.get_tool_definitions", return_value=tool_defs),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("hermes_cli.config.load_config", return_value={}),
+        patch("hermes_cli.config.load_config_readonly", return_value={}),
+        patch("run_agent.OpenAI"),
+    ):
+        agent = AIAgent(
+            api_key="test-key-1234567890",
+            base_url="https://openrouter.ai/api/v1",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+    agent.client = MagicMock()
+    agent.compression_enabled = False
+    agent.save_trajectories = False
+    observed = {}
+
+    def dispatch(name, _args, _task_id, **_kwargs):
+        if name == "workforce_observe_buzz":
+            dedupe_ref, evidence_ref = _bind_buzz()
+            observed.update(dedupe_ref=dedupe_ref, evidence_ref=evidence_ref)
+            return json.dumps(observed)
+        observed["validated"] = validate_buzz_signal_binding(
+            dedupe_ref=observed["dedupe_ref"],
+            evidence_references=[observed["evidence_ref"]],
+        )
+        return json.dumps({"success": True})
+
+    def execute_two_rounds(active_agent, *_args, **_kwargs):
+        messages = []
+        for index, name in enumerate(
+            ("workforce_observe_buzz", "workforce_signal"), start=1
+        ):
+            call = SimpleNamespace(
+                id=f"call-{index}",
+                type="function",
+                function=SimpleNamespace(name=name, arguments="{}"),
+            )
+            active_agent._execute_tool_calls_sequential(
+                SimpleNamespace(content="", tool_calls=[call]),
+                messages,
+                "task-ordinary",
+            )
+        return {"final_response": "ok", "messages": messages, "failed": False}
+
+    with (
+        patch("agent.conversation_loop.run_conversation", side_effect=execute_two_rounds),
+        patch("run_agent.handle_function_call", side_effect=dispatch),
+        patch("hermes_cli.observability.relay_shared_metrics.start_task_run"),
+        patch("hermes_cli.observability.relay_shared_metrics.finish_task_run"),
+    ):
+        result = agent.run_conversation("inspect Buzz", task_id="task-ordinary")
+
+    assert result["final_response"] == "ok"
+    assert observed["validated"] == observed["dedupe_ref"]
+    assert current_buzz_refs() == {}
+
+
+def test_nested_conversation_claim_gets_isolated_buzz_bindings():
+    outer_token, outer = claim_turn()
+    try:
+        outer_ref, _ = _bind_buzz(event_id="outer")
+        inner_token, inner = claim_turn()
+        try:
+            assert inner is not outer
+            assert current_buzz_refs() == {}
+            inner_ref, _ = _bind_buzz(event_id="inner", content="Another failure")
+            assert inner_ref in current_buzz_refs()
+            assert outer_ref not in current_buzz_refs()
+        finally:
+            release_turn(inner_token, inner)
+        assert outer_ref in current_buzz_refs()
+        assert inner_ref not in current_buzz_refs()
+    finally:
+        release_turn(outer_token, outer)
+
+
+def test_cron_state_is_borrowed_and_keeps_host_observed_outcome():
+    cron_token, cron_state = activate(True)
+    try:
+        turn_token, turn_state = claim_turn()
+        assert turn_token is None
+        assert turn_state is cron_state
+        try:
+            mark_success()
+        finally:
+            release_turn(turn_token, turn_state)
+        assert cron_state.completed is True
+        assert cron_state.turn_claimed is False
+    finally:
+        reset(cron_token)
 
 
 def test_buzz_binding_without_stable_author_fails_closed():

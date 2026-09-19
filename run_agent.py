@@ -8472,6 +8472,8 @@ class AIAgent:
         durable_turn_lease_interrupt_message = None
         token = None
         acct_token = None
+        workforce_signal_turn_token = None
+        workforce_signal_turn_state = None
         task_started = False
         task_finished = False
         relay_outcome = "failed"
@@ -8778,6 +8780,14 @@ class AIAgent:
                 getattr(self, "_session_db", None),
                 getattr(self, "session_id", None),
             )
+            # Tool calls execute in fresh copied worker Contexts.  Claim one
+            # mutable state before those copies are made so an observation can
+            # bind a later workforce_signal call in ordinary CLI/gateway turns
+            # as well as in Cron.  Nested conversations receive an isolated
+            # state; Cron's pre-installed host outcome state is borrowed.
+            from tools.workforce_signal_runtime import claim_turn
+
+            workforce_signal_turn_token, workforce_signal_turn_state = claim_turn()
             from agent.auxiliary_client import scoped_runtime_main
 
             # The outer token restores the caller's Context even though turn setup
@@ -8906,6 +8916,13 @@ class AIAgent:
                         self._relay_pending_turn_id = None
                     if acct_token is not None:
                         reset_accounting_context(acct_token)
+                    if workforce_signal_turn_state is not None:
+                        from tools.workforce_signal_runtime import release_turn
+
+                        release_turn(
+                            workforce_signal_turn_token,
+                            workforce_signal_turn_state,
+                        )
                     if token is not None:
                         reset_conversation_context(token)
 

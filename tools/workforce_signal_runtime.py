@@ -14,6 +14,7 @@ class RequiredSignalState:
     failure: str | None = None
     completed: bool = False
     buzz_refs: dict[str, frozenset[str]] = field(default_factory=dict)
+    turn_claimed: bool = False
 
 
 _ACTIVE: ContextVar[RequiredSignalState | None] = ContextVar(
@@ -39,6 +40,30 @@ def activate(
 
 def reset(token: Token) -> None:
     _ACTIVE.reset(token)
+
+
+def claim_turn() -> tuple[Token | None, RequiredSignalState]:
+    """Provide one mutable signal state shared by every worker in a turn.
+
+    Cron installs its host-observed state before entering the agent.  The first
+    conversation turn claims that state; ordinary CLI and gateway turns create
+    an equivalent untracked state.  A nested conversation that inherits the
+    outer Context receives a fresh state instead of sharing observation refs.
+    """
+    state = _ACTIVE.get()
+    if state is not None and not state.turn_claimed:
+        state.turn_claimed = True
+        return None, state
+    state = RequiredSignalState(turn_claimed=True)
+    return _ACTIVE.set(state), state
+
+
+def release_turn(token: Token | None, state: RequiredSignalState) -> None:
+    """Release a state claimed by :func:`claim_turn`."""
+    if token is None:
+        state.turn_claimed = False
+    else:
+        _ACTIVE.reset(token)
 
 
 def mark_attempted() -> None:
