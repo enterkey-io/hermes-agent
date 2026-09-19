@@ -377,6 +377,127 @@ def test_real_timed_out_executor_worker_cannot_bind_after_turn_end():
     )
 
 
+def test_real_timed_out_signal_write_does_not_hold_turn_cleanup(
+    tmp_path, monkeypatch
+):
+    """The real executor may abandon DB work without blocking turn revocation."""
+    from run_agent import AIAgent
+
+    profiles = tmp_path / "profiles"
+    (profiles / "chloe").mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(profiles / "chloe"))
+    monkeypatch.setenv("HERMES_WORKFORCE_ORG", str(SOURCE))
+    monkeypatch.setattr(
+        kanban_db,
+        "kanban_db_path",
+        lambda **_kwargs: tmp_path / "kanban.db",
+    )
+    tool_defs = [
+        {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": name,
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        for name in ("workforce_observe_buzz", "workforce_signal")
+    ]
+    with (
+        patch("run_agent.get_tool_definitions", return_value=tool_defs),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("hermes_cli.config.load_config", return_value={}),
+        patch("hermes_cli.config.load_config_readonly", return_value={}),
+        patch("run_agent.OpenAI"),
+    ):
+        agent = AIAgent(
+            api_key="test-key-1234567890",
+            base_url="https://openrouter.ai/api/v1",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+    agent.client = MagicMock()
+    agent.compression_enabled = False
+    agent.save_trajectories = False
+    write_entered = threading.Event()
+    resume_write = threading.Event()
+    worker_done = threading.Event()
+    captured = {}
+
+    def blocked_record_signal(*_args, before_commit=None, **_kwargs):
+        write_entered.set()
+        resume_write.wait(timeout=5)
+        assert before_commit is not None
+        before_commit()
+        raise AssertionError("a revoked signal transaction reached commit")
+
+    def dispatch(name, _args, _task_id, **_kwargs):
+        if name == "workforce_observe_buzz":
+            dedupe_ref, evidence_ref = _bind_buzz(event_id="blocked-real-write")
+            captured.update(dedupe_ref=dedupe_ref, evidence_ref=evidence_ref)
+            return json.dumps(captured)
+        payload = {
+            **_payload(),
+            "department_recommendation": "",
+            "aurora_assignment_id": "workflow:test:chloe",
+            "dedupe_ref": captured["dedupe_ref"],
+            "evidence_references": [captured["evidence_ref"]],
+        }
+        try:
+            captured["signal_result"] = json.loads(signal._handle(payload))
+            return json.dumps(captured["signal_result"])
+        finally:
+            worker_done.set()
+
+    def execute_two_rounds(active_agent, *_args, **_kwargs):
+        messages = []
+        for index, name in enumerate(
+            ("workforce_observe_buzz", "workforce_signal"), start=1
+        ):
+            call = SimpleNamespace(
+                id=f"call-blocked-{index}",
+                type="function",
+                function=SimpleNamespace(name=name, arguments="{}"),
+            )
+            active_agent._execute_tool_calls_sequential(
+                SimpleNamespace(content="", tool_calls=[call]),
+                messages,
+                "task-blocked-signal",
+            )
+        return {"final_response": "timed out", "messages": messages, "failed": False}
+
+    with (
+        patch("agent.conversation_loop.run_conversation", side_effect=execute_two_rounds),
+        patch("run_agent.handle_function_call", side_effect=dispatch),
+        patch("agent.tool_executor._resolve_sequential_tool_timeout", return_value=0.5),
+        patch(
+            "hermes_cli.lifecycle.has_hook",
+            side_effect=lambda name: name == "on_turn_start",
+        ),
+        patch(
+            "hermes_cli.lifecycle.invoke_hook",
+            side_effect=_invoke_workforce_turn_hook,
+        ),
+        patch("hermes_cli.observability.relay_shared_metrics.start_task_run"),
+        patch("hermes_cli.observability.relay_shared_metrics.finish_task_run"),
+        patch.object(signal, "record_signal", side_effect=blocked_record_signal),
+    ):
+        started = time.monotonic()
+        result = agent.run_conversation(
+            "inspect and record Buzz",
+            task_id="task-blocked-signal",
+        )
+        turn_elapsed = time.monotonic() - started
+
+    assert result["final_response"] == "timed out"
+    assert write_entered.is_set()
+    assert turn_elapsed < 2
+    resume_write.set()
+    assert worker_done.wait(timeout=5)
+    assert "not returned by this turn" in captured["signal_result"]["error"]
+
+
 def test_signal_authority_is_revoked_before_conversation_lease_release(
     tmp_path, monkeypatch
 ):
