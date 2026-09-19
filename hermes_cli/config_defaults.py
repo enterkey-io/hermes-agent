@@ -2386,6 +2386,11 @@ DEFAULT_CONFIG = {
         # job. Interactive toolsets (messaging/clarify) stay denied in cron
         # context regardless of this setting.
         "allow_agent_scheduling": False,
+        # Toolsets that remain available to interactive sessions but must not
+        # be exposed to any scheduled job. This denylist is layered with the
+        # built-in Cron safety policy and agent.disabled_toolsets after each
+        # job's enabled_toolsets are resolved.
+        "disabled_toolsets": [],
         # Pre-dispatch configuration validation (T1-26): before constructing
         # any agent machinery for a job, verify the provider API key resolves
         # (unless a fallback chain is configured), attached skills are ready

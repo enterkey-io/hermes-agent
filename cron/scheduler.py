@@ -386,24 +386,29 @@ def _resolve_cron_disabled_toolsets(cfg: dict) -> list[str]:
     manage the user's cron table. The gate only removes the built-in policy
     denial — it never overrides the user denylist below.
 
-    User-level ``agent.disabled_toolsets`` from config.yaml is layered on top
-    so per-job ``enabled_toolsets`` cannot bypass policy that applies to
-    ordinary agent runs (#25752 — LLM-supplied enabled_toolsets was widening
-    past config.yaml's denylist).
+    Cron-specific ``cron.disabled_toolsets`` and user-level
+    ``agent.disabled_toolsets`` from config.yaml are layered on top so per-job
+    ``enabled_toolsets`` cannot bypass policy. The cron-specific list is useful
+    for tools that are valid in interactive sessions but must never be exposed
+    to scheduled work.
     """
     cron_cfg = (cfg or {}).get("cron") or {}
     if cron_cfg.get("allow_agent_scheduling"):
         disabled = ["messaging", "clarify", "memory"]
     else:
         disabled = ["cronjob", "messaging", "clarify", "memory"]
-    agent_cfg = (cfg or {}).get("agent") or {}
     from agent.skill_utils import parse_config_string_list
 
-    user_disabled = parse_config_string_list(agent_cfg.get("disabled_toolsets"))
-    for name in user_disabled:
-        name = str(name).strip()
-        if name and name not in disabled:
-            disabled.append(name)
+    agent_cfg = (cfg or {}).get("agent") or {}
+    configured_denylists = (
+        parse_config_string_list(cron_cfg.get("disabled_toolsets")),
+        parse_config_string_list(agent_cfg.get("disabled_toolsets")),
+    )
+    for configured in configured_denylists:
+        for name in configured:
+            name = str(name).strip()
+            if name and name not in disabled:
+                disabled.append(name)
     return disabled
 
 
