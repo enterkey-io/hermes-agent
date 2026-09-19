@@ -5,6 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from hermes_constants import reset_hermes_home_override, set_hermes_home_override
 from hermes_cli import kanban_db
 from tools import workforce_signal_tool as signal
@@ -204,6 +206,28 @@ def test_nested_conversation_claim_gets_isolated_buzz_bindings():
         release_turn(outer_token, outer)
 
 
+def test_empty_nested_turn_cannot_fall_back_to_parent_observation_cache():
+    from tools.workforce_observation_runtime import validate_buzz_signal_binding
+
+    outer_token, outer = claim_turn()
+    try:
+        outer_ref, outer_evidence = _bind_buzz(event_id="outer-stale")
+        inner_token, inner = claim_turn()
+        try:
+            with pytest.raises(
+                ValueError,
+                match="not returned by this turn",
+            ):
+                validate_buzz_signal_binding(
+                    dedupe_ref=outer_ref,
+                    evidence_references=[outer_evidence],
+                )
+        finally:
+            release_turn(inner_token, inner)
+    finally:
+        release_turn(outer_token, outer)
+
+
 def test_cron_state_is_borrowed_and_keeps_host_observed_outcome():
     cron_token, cron_state = activate(True)
     try:
@@ -324,11 +348,11 @@ def test_chloe_offline_write_failure_is_observed_and_a_later_retry_can_recover(t
         "department_recommendation": "",
         "aurora_assignment_id": "t_aurora-1",
     }
-    dedupe_ref, evidence_ref = _bind_buzz()
-    payload["dedupe_ref"] = dedupe_ref
-    payload["evidence_references"] = [evidence_ref]
     token, failed_attempt = activate(True)
     try:
+        dedupe_ref, evidence_ref = _bind_buzz()
+        payload["dedupe_ref"] = dedupe_ref
+        payload["evidence_references"] = [evidence_ref]
         monkeypatch.setattr(signal, "record_signal", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("offline")))
         failure = json.loads(signal._handle(payload))
     finally:
@@ -344,6 +368,9 @@ def test_chloe_offline_write_failure_is_observed_and_a_later_retry_can_recover(t
     monkeypatch.setenv("HERMES_WORKFORCE_ORG", str(SOURCE))
     token, recovered_attempt = activate(True)
     try:
+        dedupe_ref, evidence_ref = _bind_buzz()
+        payload["dedupe_ref"] = dedupe_ref
+        payload["evidence_references"] = [evidence_ref]
         recovery = json.loads(signal._handle(payload))
     finally:
         reset(token)

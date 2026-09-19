@@ -101,3 +101,9 @@ def replace_buzz_refs(bindings: dict[str, frozenset[str]]) -> None:
 def current_buzz_refs() -> dict[str, frozenset[str]]:
     state = _ACTIVE.get()
     return state.buzz_refs if state is not None else {}
+
+
+def active_buzz_refs() -> dict[str, frozenset[str]] | None:
+    """Return authoritative turn bindings, or ``None`` outside a turn."""
+    state = _ACTIVE.get()
+    return state.buzz_refs if state is not None else None

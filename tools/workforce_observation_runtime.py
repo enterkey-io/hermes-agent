@@ -83,9 +83,14 @@ def validate_buzz_signal_binding(
     candidate = str(dedupe_ref or "").strip()
     if not candidate:
         raise ValueError("dedupe_ref is required for a bounded Buzz observation")
-    from tools.workforce_signal_runtime import current_buzz_refs
+    from tools.workforce_signal_runtime import active_buzz_refs
 
-    bindings = current_buzz_refs() or _ACTIVE_BUZZ_REFS.get()
+    active_bindings = active_buzz_refs()
+    bindings = (
+        active_bindings
+        if active_bindings is not None
+        else _ACTIVE_BUZZ_REFS.get()
+    )
     allowed_evidence = bindings.get(candidate)
     if not allowed_evidence:
         raise ValueError("dedupe_ref was not returned by this turn's Buzz observation")
