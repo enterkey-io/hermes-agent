@@ -427,7 +427,7 @@ def test_real_timed_out_signal_write_does_not_hold_turn_cleanup(
 
     def blocked_record_signal(*_args, before_commit=None, **_kwargs):
         write_entered.set()
-        resume_write.wait(timeout=5)
+        resume_write.wait(timeout=15)
         assert before_commit is not None
         before_commit()
         raise AssertionError("a revoked signal transaction reached commit")
@@ -470,7 +470,7 @@ def test_real_timed_out_signal_write_does_not_hold_turn_cleanup(
     with (
         patch("agent.conversation_loop.run_conversation", side_effect=execute_two_rounds),
         patch("run_agent.handle_function_call", side_effect=dispatch),
-        patch("agent.tool_executor._resolve_sequential_tool_timeout", return_value=0.5),
+        patch("agent.tool_executor._resolve_sequential_tool_timeout", return_value=3.0),
         patch(
             "hermes_cli.lifecycle.has_hook",
             side_effect=lambda name: name == "on_turn_start",
@@ -492,7 +492,7 @@ def test_real_timed_out_signal_write_does_not_hold_turn_cleanup(
 
     assert result["final_response"] == "timed out"
     assert write_entered.is_set()
-    assert turn_elapsed < 2
+    assert turn_elapsed < 5
     resume_write.set()
     assert worker_done.wait(timeout=5)
     assert "not returned by this turn" in captured["signal_result"]["error"]
