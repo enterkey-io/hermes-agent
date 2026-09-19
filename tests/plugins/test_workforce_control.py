@@ -573,6 +573,50 @@ def test_buzz_observer_binds_canonical_pubkey_not_shared_display_name(
     assert events[0]["dedupe_ref"] != events[1]["dedupe_ref"]
 
 
+def test_buzz_observer_hashes_untrimmed_full_source_content(monkeypatch):
+    from hermes_cli import config as hermes_config
+    from plugins.platforms.buzz import adapter as buzz_adapter
+    from tools.workforce_observation_runtime import bind_buzz_events
+
+    monkeypatch.setattr(
+        hermes_config,
+        "load_config_readonly",
+        lambda: {"gateway": {"platforms": {"buzz": {"extra": {
+            "cli_path": "/tmp/buzz", "relay_url": "wss://relay.invalid",
+        }}}}},
+    )
+    monkeypatch.setattr(buzz_adapter, "_configured_channels", lambda _extra: ["room-1"])
+    monkeypatch.setattr(buzz_adapter, "_resolve_private_key", lambda _extra: "private")
+    monkeypatch.setattr(Path, "is_file", lambda _path: True)
+
+    def run(command, **_kwargs):
+        if command[-2:] == ["channels", "list"]:
+            return MagicMock(returncode=0, stdout="[]")
+        return MagicMock(
+            returncode=0,
+            stdout=json.dumps([
+                {
+                    "id": "event-1", "kind": 9, "created_at": 1,
+                    "pubkey": "a" * 64, "content": "same alert",
+                },
+                {
+                    "id": "event-2", "kind": 9, "created_at": 2,
+                    "pubkey": "a" * 64, "content": "same alert ",
+                },
+            ]),
+        )
+
+    monkeypatch.setattr(workforce_tools.subprocess, "run", run)
+
+    events = workforce_tools._buzz_events(
+        lookback_minutes=30, per_room_limit=4, max_events=4,
+    )["events"]
+    assert [event["content"] for event in events] == ["same alert", "same alert"]
+    bind_buzz_events(events)
+
+    assert events[0]["dedupe_ref"] != events[1]["dedupe_ref"]
+
+
 def test_failed_buzz_observation_clears_prior_signal_bindings(monkeypatch):
     from tools.workforce_observation_runtime import (
         bind_buzz_events,

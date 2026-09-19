@@ -245,7 +245,8 @@ def _buzz_events(
         for item in payload if isinstance(payload, list) else []:
             if int(item.get("kind") or 9) != 9:
                 continue
-            content = str(item.get("content") or "").strip()
+            full_content = str(item.get("content") or "")
+            content = full_content.strip()
             if not content:
                 continue
             events.append({
@@ -256,7 +257,9 @@ def _buzz_events(
                 "author": str(item.get("display_name") or item.get("name") or "")[:96],
                 "author_id": str(item.get("pubkey") or "").strip().casefold(),
                 "content": content[:600],
-                "_full_content_sha256": hashlib.sha256(content.encode()).hexdigest(),
+                "_full_content_sha256": hashlib.sha256(
+                    full_content.encode()
+                ).hexdigest(),
             })
     events.sort(key=lambda value: (value["created_at"], value["room_id"]))
     bounded_max = max(1, min(int(max_events), 20))
