@@ -1,10 +1,26 @@
+from contextvars import copy_context
+import hashlib
 import json
 from pathlib import Path
+import threading
+import time
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 from hermes_constants import reset_hermes_home_override, set_hermes_home_override
 from hermes_cli import kanban_db
 from tools import workforce_signal_tool as signal
-from tools.workforce_signal_runtime import activate, reset
+from tools.workforce_observation_runtime import bind_buzz_events
+from tools.workforce_signal_runtime import (
+    activate,
+    claim_turn,
+    current_buzz_refs,
+    mark_success,
+    release_turn,
+    reset,
+)
 
 
 SOURCE = Path(__file__).parents[2] / "workforce" / "organization.yaml"
@@ -22,6 +38,691 @@ def _payload():
         "needed_capabilities": ["product", "agent systems"],
         "department_recommendation": "Investigate the common validator",
     }
+
+
+def _bind_buzz(*, event_id="event-1", content="Service example.service failed"):
+    events = [{
+        "room_id": "room-1",
+        "event_id": event_id,
+        "author_id": "a" * 64,
+        "content": content,
+    }]
+    bind_buzz_events(events)
+    return events[0]["dedupe_ref"], events[0]["evidence_ref"]
+
+
+def _invoke_workforce_turn_hook(name, **kwargs):
+    from plugins.workforce_control import _on_turn_end, _on_turn_start
+
+    if name == "on_turn_start":
+        _on_turn_start(**kwargs)
+    elif name == "on_turn_end":
+        _on_turn_end(**kwargs)
+    return []
+
+
+def test_buzz_binding_distinguishes_full_messages_with_same_display_prefix():
+    prefix = "x" * 600
+    first_full = prefix + " first"
+    second_full = prefix + " second"
+    first = [{
+        "room_id": "room-1", "event_id": "one", "author_id": "a" * 64,
+        "content": prefix,
+        "_full_content_sha256": hashlib.sha256(first_full.encode()).hexdigest(),
+    }]
+    second = [{
+        "room_id": "room-1", "event_id": "two", "author_id": "a" * 64,
+        "content": prefix,
+        "_full_content_sha256": hashlib.sha256(second_full.encode()).hexdigest(),
+    }]
+    bind_buzz_events(first)
+    bind_buzz_events(second)
+    first_ref = first[0]["dedupe_ref"]
+    second_ref = second[0]["dedupe_ref"]
+    assert first_ref != second_ref
+    assert "_full_content_sha256" not in first[0]
+    assert "_full_content_sha256" not in second[0]
+
+
+def test_buzz_binding_does_not_merge_different_authors():
+    first = [{
+        "room_id": "room-1", "event_id": "one", "author": "same-name",
+        "author_id": "a" * 64,
+        "content": "Service example.service failed",
+    }]
+    second = [{
+        "room_id": "room-1", "event_id": "two", "author": "same-name",
+        "author_id": "b" * 64,
+        "content": "Service example.service failed",
+    }]
+    bind_buzz_events(first)
+    bind_buzz_events(second)
+    assert first[0]["dedupe_ref"] != second[0]["dedupe_ref"]
+
+
+def test_optional_buzz_binding_survives_tool_worker_context_copy():
+    token, state = activate(False)
+    try:
+        worker_context = copy_context()
+        captured = {}
+
+        def bind_in_worker():
+            dedupe_ref, evidence_ref = _bind_buzz()
+            captured.update(dedupe_ref=dedupe_ref, evidence_ref=evidence_ref)
+
+        worker_context.run(bind_in_worker)
+        from tools.workforce_observation_runtime import validate_buzz_signal_binding
+
+        assert validate_buzz_signal_binding(
+            dedupe_ref=captured["dedupe_ref"],
+            evidence_references=[captured["evidence_ref"]],
+        ) == captured["dedupe_ref"]
+        assert state.buzz_refs
+        assert state.track_attempts is False
+    finally:
+        reset(token)
+
+
+def test_ordinary_conversation_real_executor_shares_buzz_binding_between_workers():
+    """CLI/gateway turns bind observations across separate executor workers."""
+    from run_agent import AIAgent
+    from tools.workforce_observation_runtime import validate_buzz_signal_binding
+
+    tool_defs = [
+        {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": name,
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        for name in ("workforce_observe_buzz", "workforce_signal")
+    ]
+    with (
+        patch("run_agent.get_tool_definitions", return_value=tool_defs),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("hermes_cli.config.load_config", return_value={}),
+        patch("hermes_cli.config.load_config_readonly", return_value={}),
+        patch("run_agent.OpenAI"),
+    ):
+        agent = AIAgent(
+            api_key="test-key-1234567890",
+            base_url="https://openrouter.ai/api/v1",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+    agent.client = MagicMock()
+    agent.compression_enabled = False
+    agent.save_trajectories = False
+    observed = {}
+
+    def dispatch(name, _args, _task_id, **_kwargs):
+        if name == "workforce_observe_buzz":
+            dedupe_ref, evidence_ref = _bind_buzz()
+            observed.update(dedupe_ref=dedupe_ref, evidence_ref=evidence_ref)
+            return json.dumps(observed)
+        observed["validated"] = validate_buzz_signal_binding(
+            dedupe_ref=observed["dedupe_ref"],
+            evidence_references=[observed["evidence_ref"]],
+        )
+        return json.dumps({"success": True})
+
+    def execute_two_rounds(active_agent, *_args, **_kwargs):
+        messages = []
+        for index, name in enumerate(
+            ("workforce_observe_buzz", "workforce_signal"), start=1
+        ):
+            call = SimpleNamespace(
+                id=f"call-{index}",
+                type="function",
+                function=SimpleNamespace(name=name, arguments="{}"),
+            )
+            active_agent._execute_tool_calls_sequential(
+                SimpleNamespace(content="", tool_calls=[call]),
+                messages,
+                "task-ordinary",
+            )
+        return {"final_response": "ok", "messages": messages, "failed": False}
+
+    with (
+        patch("agent.conversation_loop.run_conversation", side_effect=execute_two_rounds),
+        patch("run_agent.handle_function_call", side_effect=dispatch),
+        patch(
+            "hermes_cli.lifecycle.has_hook",
+            # An end-only listener still activates the paired host scope.
+            side_effect=lambda name: name == "on_turn_end",
+        ),
+        patch(
+            "hermes_cli.lifecycle.invoke_hook",
+            side_effect=_invoke_workforce_turn_hook,
+        ),
+        patch("hermes_cli.observability.relay_shared_metrics.start_task_run"),
+        patch("hermes_cli.observability.relay_shared_metrics.finish_task_run"),
+    ):
+        result = agent.run_conversation("inspect Buzz", task_id="task-ordinary")
+
+    assert result["final_response"] == "ok"
+    assert observed["validated"] == observed["dedupe_ref"]
+    assert current_buzz_refs() == {}
+
+
+def test_nested_conversation_claim_gets_isolated_buzz_bindings():
+    outer_token, outer = claim_turn()
+    try:
+        outer_ref, _ = _bind_buzz(event_id="outer")
+        inner_token, inner = claim_turn()
+        try:
+            assert inner is not outer
+            assert current_buzz_refs() == {}
+            inner_ref, _ = _bind_buzz(event_id="inner", content="Another failure")
+            assert inner_ref in current_buzz_refs()
+            assert outer_ref not in current_buzz_refs()
+        finally:
+            release_turn(inner_token, inner)
+        assert outer_ref in current_buzz_refs()
+        assert inner_ref not in current_buzz_refs()
+    finally:
+        release_turn(outer_token, outer)
+
+
+def test_empty_nested_turn_cannot_fall_back_to_parent_observation_cache():
+    from tools.workforce_observation_runtime import validate_buzz_signal_binding
+
+    outer_token, outer = claim_turn()
+    try:
+        outer_ref, outer_evidence = _bind_buzz(event_id="outer-stale")
+        inner_token, inner = claim_turn()
+        try:
+            with pytest.raises(
+                ValueError,
+                match="not returned by this turn",
+            ):
+                validate_buzz_signal_binding(
+                    dedupe_ref=outer_ref,
+                    evidence_references=[outer_evidence],
+                )
+        finally:
+            release_turn(inner_token, inner)
+    finally:
+        release_turn(outer_token, outer)
+
+
+def test_cron_state_is_borrowed_and_keeps_host_observed_outcome():
+    cron_token, cron_state = activate(True)
+    try:
+        turn_token, turn_state = claim_turn()
+        assert turn_token is None
+        assert turn_state is cron_state
+        try:
+            mark_success()
+        finally:
+            release_turn(turn_token, turn_state)
+        assert cron_state.completed is True
+        assert cron_state.turn_claimed is False
+    finally:
+        reset(cron_token)
+
+
+def test_abandoned_worker_is_revoked_after_turn_release():
+    from tools.workforce_observation_runtime import validate_buzz_signal_binding
+
+    cron_token, cron_state = activate(True)
+    turn_token, turn_state = claim_turn()
+    dedupe_ref, evidence_ref = _bind_buzz(event_id="abandoned")
+    worker = copy_context()
+    release_turn(turn_token, turn_state)
+    reset(cron_token)
+
+    def late_worker():
+        mark_success()
+        with pytest.raises(ValueError, match="not returned by this turn"):
+            validate_buzz_signal_binding(
+                dedupe_ref=dedupe_ref,
+                evidence_references=[evidence_ref],
+            )
+
+    worker.run(late_worker)
+    assert cron_state.completed is False
+    assert cron_state.failure is None
+    assert cron_state.attempted is False
+
+
+def test_real_timed_out_executor_worker_cannot_bind_after_turn_end():
+    """A worker abandoned by the real timeout path loses signal authority."""
+    from run_agent import AIAgent
+    from tools.workforce_observation_runtime import validate_buzz_signal_binding
+
+    tool_defs = [{
+        "type": "function",
+        "function": {
+            "name": "workforce_observe_buzz",
+            "description": "observe",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }]
+    with (
+        patch("run_agent.get_tool_definitions", return_value=tool_defs),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("hermes_cli.config.load_config", return_value={}),
+        patch("hermes_cli.config.load_config_readonly", return_value={}),
+        patch("run_agent.OpenAI"),
+    ):
+        agent = AIAgent(
+            api_key="test-key-1234567890",
+            base_url="https://openrouter.ai/api/v1",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+    agent.client = MagicMock()
+    agent.compression_enabled = False
+    agent.save_trajectories = False
+    release_worker = threading.Event()
+    worker_done = threading.Event()
+    observed = {}
+
+    def delayed_observation(_name, _args, _task_id, **_kwargs):
+        release_worker.wait(timeout=5)
+        dedupe_ref, evidence_ref = _bind_buzz(event_id="late-real-worker")
+        observed.update(dedupe_ref=dedupe_ref, evidence_ref=evidence_ref)
+        try:
+            validate_buzz_signal_binding(
+                dedupe_ref=dedupe_ref,
+                evidence_references=[evidence_ref],
+            )
+        except ValueError as exc:
+            observed["error"] = str(exc)
+        finally:
+            worker_done.set()
+        return json.dumps(observed)
+
+    def execute_timed_out_round(active_agent, *_args, **_kwargs):
+        call = SimpleNamespace(
+            id="call-timeout",
+            type="function",
+            function=SimpleNamespace(name="workforce_observe_buzz", arguments="{}"),
+        )
+        messages = []
+        active_agent._execute_tool_calls_sequential(
+            SimpleNamespace(content="", tool_calls=[call]),
+            messages,
+            "task-timeout",
+        )
+        return {"final_response": "timed out", "messages": messages, "failed": False}
+
+    with (
+        patch("agent.conversation_loop.run_conversation", side_effect=execute_timed_out_round),
+        patch("run_agent.handle_function_call", side_effect=delayed_observation),
+        patch("agent.tool_executor._resolve_sequential_tool_timeout", return_value=0.05),
+        patch(
+            "hermes_cli.lifecycle.has_hook",
+            side_effect=lambda name: name == "on_turn_start",
+        ),
+        patch(
+            "hermes_cli.lifecycle.invoke_hook",
+            side_effect=_invoke_workforce_turn_hook,
+        ),
+        patch("hermes_cli.observability.relay_shared_metrics.start_task_run"),
+        patch("hermes_cli.observability.relay_shared_metrics.finish_task_run"),
+    ):
+        result = agent.run_conversation("inspect Buzz", task_id="task-timeout")
+
+    assert result["final_response"] == "timed out"
+    release_worker.set()
+    assert worker_done.wait(timeout=5)
+    assert observed["error"] == (
+        "dedupe_ref was not returned by this turn's Buzz observation"
+    )
+
+
+def test_real_timed_out_signal_write_does_not_hold_turn_cleanup(
+    tmp_path, monkeypatch
+):
+    """The real executor may abandon DB work without blocking turn revocation."""
+    from run_agent import AIAgent
+
+    profiles = tmp_path / "profiles"
+    (profiles / "chloe").mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(profiles / "chloe"))
+    monkeypatch.setenv("HERMES_WORKFORCE_ORG", str(SOURCE))
+    monkeypatch.setattr(
+        kanban_db,
+        "kanban_db_path",
+        lambda **_kwargs: tmp_path / "kanban.db",
+    )
+    tool_defs = [
+        {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": name,
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        for name in ("workforce_observe_buzz", "workforce_signal")
+    ]
+    with (
+        patch("run_agent.get_tool_definitions", return_value=tool_defs),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("hermes_cli.config.load_config", return_value={}),
+        patch("hermes_cli.config.load_config_readonly", return_value={}),
+        patch("run_agent.OpenAI"),
+    ):
+        agent = AIAgent(
+            api_key="test-key-1234567890",
+            base_url="https://openrouter.ai/api/v1",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+    agent.client = MagicMock()
+    agent.compression_enabled = False
+    agent.save_trajectories = False
+    write_entered = threading.Event()
+    resume_write = threading.Event()
+    worker_done = threading.Event()
+    captured = {}
+
+    def blocked_record_signal(*_args, before_commit=None, **_kwargs):
+        write_entered.set()
+        resume_write.wait(timeout=15)
+        assert before_commit is not None
+        before_commit()
+        raise AssertionError("a revoked signal transaction reached commit")
+
+    def dispatch(name, _args, _task_id, **_kwargs):
+        if name == "workforce_observe_buzz":
+            dedupe_ref, evidence_ref = _bind_buzz(event_id="blocked-real-write")
+            captured.update(dedupe_ref=dedupe_ref, evidence_ref=evidence_ref)
+            return json.dumps(captured)
+        payload = {
+            **_payload(),
+            "department_recommendation": "",
+            "aurora_assignment_id": "workflow:test:chloe",
+            "dedupe_ref": captured["dedupe_ref"],
+            "evidence_references": [captured["evidence_ref"]],
+        }
+        try:
+            captured["signal_result"] = json.loads(signal._handle(payload))
+            return json.dumps(captured["signal_result"])
+        finally:
+            worker_done.set()
+
+    def execute_two_rounds(active_agent, *_args, **_kwargs):
+        messages = []
+        for index, name in enumerate(
+            ("workforce_observe_buzz", "workforce_signal"), start=1
+        ):
+            call = SimpleNamespace(
+                id=f"call-blocked-{index}",
+                type="function",
+                function=SimpleNamespace(name=name, arguments="{}"),
+            )
+            active_agent._execute_tool_calls_sequential(
+                SimpleNamespace(content="", tool_calls=[call]),
+                messages,
+                "task-blocked-signal",
+            )
+        return {"final_response": "timed out", "messages": messages, "failed": False}
+
+    with (
+        patch("agent.conversation_loop.run_conversation", side_effect=execute_two_rounds),
+        patch("run_agent.handle_function_call", side_effect=dispatch),
+        patch("agent.tool_executor._resolve_sequential_tool_timeout", return_value=3.0),
+        patch(
+            "hermes_cli.lifecycle.has_hook",
+            side_effect=lambda name: name == "on_turn_start",
+        ),
+        patch(
+            "hermes_cli.lifecycle.invoke_hook",
+            side_effect=_invoke_workforce_turn_hook,
+        ),
+        patch("hermes_cli.observability.relay_shared_metrics.start_task_run"),
+        patch("hermes_cli.observability.relay_shared_metrics.finish_task_run"),
+        patch.object(signal, "record_signal", side_effect=blocked_record_signal),
+    ):
+        started = time.monotonic()
+        result = agent.run_conversation(
+            "inspect and record Buzz",
+            task_id="task-blocked-signal",
+        )
+        turn_elapsed = time.monotonic() - started
+
+    assert result["final_response"] == "timed out"
+    assert write_entered.is_set()
+    assert turn_elapsed < 5
+    resume_write.set()
+    assert worker_done.wait(timeout=5)
+    assert "not returned by this turn" in captured["signal_result"]["error"]
+
+
+def test_signal_authority_is_revoked_before_conversation_lease_release(
+    tmp_path, monkeypatch
+):
+    """Lease release cannot expose a still-authorized copied tool context."""
+    from run_agent import AIAgent
+
+    profiles = tmp_path / "profiles"
+    (profiles / "chloe").mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(profiles / "chloe"))
+    monkeypatch.setenv("HERMES_WORKFORCE_ORG", str(SOURCE))
+    monkeypatch.setattr(
+        kanban_db,
+        "kanban_db_path",
+        lambda **_kwargs: tmp_path / "kanban.db",
+    )
+    with (
+        patch("run_agent.get_tool_definitions", return_value=[]),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("hermes_cli.config.load_config", return_value={}),
+        patch("hermes_cli.config.load_config_readonly", return_value={}),
+        patch("run_agent.OpenAI"),
+    ):
+        agent = AIAgent(
+            api_key="test-key-1234567890",
+            base_url="https://openrouter.ai/api/v1",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+    agent.client = MagicMock()
+    agent.compression_enabled = False
+    agent.save_trajectories = False
+    captured = {}
+    coordinator = MagicMock()
+    coordinator.acquire_conversation.return_value = SimpleNamespace(
+        parent_session_id="",
+        profile_key="/profile",
+        session_id=agent.session_id or "",
+    )
+    coordinator.begin_turn.return_value = SimpleNamespace(relay_enabled=True)
+
+    def run_turn(*_args, **_kwargs):
+        dedupe_ref, evidence_ref = _bind_buzz(event_id="lease-release")
+        captured.update(
+            dedupe_ref=dedupe_ref,
+            evidence_ref=evidence_ref,
+            worker=copy_context(),
+        )
+        return {"final_response": "ok", "messages": [], "failed": False}
+
+    payload = {
+        **_payload(),
+        "department_recommendation": "",
+        "aurora_assignment_id": "workflow:test:chloe",
+    }
+
+    def attempt_from_released_lease(_lease):
+        payload.update(
+            dedupe_ref=captured["dedupe_ref"],
+            evidence_references=[captured["evidence_ref"]],
+        )
+        captured["release_result"] = json.loads(
+            captured["worker"].run(signal._handle, payload)
+        )
+
+    coordinator.release_conversation.side_effect = attempt_from_released_lease
+    with (
+        patch("agent.conversation_loop.run_conversation", side_effect=run_turn),
+        patch("agent.relay_runtime.SESSION_COORDINATOR", coordinator),
+        patch("agent.relay_runtime.current_profile_key", return_value="/profile"),
+        patch(
+            "hermes_cli.lifecycle.has_hook",
+            side_effect=lambda name: name == "on_turn_start",
+        ),
+        patch(
+            "hermes_cli.lifecycle.invoke_hook",
+            side_effect=_invoke_workforce_turn_hook,
+        ),
+        patch("hermes_cli.observability.relay_shared_metrics.start_task_run"),
+        patch("hermes_cli.observability.relay_shared_metrics.finish_task_run"),
+        patch.object(signal, "record_signal") as record_signal,
+    ):
+        result = agent.run_conversation("inspect Buzz", task_id="task-release")
+
+    assert result["final_response"] == "ok"
+    assert "not returned by this turn" in captured["release_result"]["error"]
+    record_signal.assert_not_called()
+
+
+def test_revocation_does_not_wait_for_blocked_signal_io_and_forces_rollback(
+    tmp_path, monkeypatch
+):
+    """A stalled worker cannot hold turn cleanup or commit after revocation."""
+    from tools.workforce_observation_runtime import (
+        prepare_buzz_signal_commit_guard,
+    )
+
+    db_path = tmp_path / "kanban.db"
+    monkeypatch.setattr(kanban_db, "kanban_db_path", lambda **_kwargs: db_path)
+    turn_token, turn_state = claim_turn()
+    dedupe_ref, evidence_ref = _bind_buzz(event_id="blocked-write")
+    commit_guard = prepare_buzz_signal_commit_guard(
+        dedupe_ref=dedupe_ref,
+        evidence_references=[evidence_ref],
+    )
+    worker_context = copy_context()
+    before_commit = threading.Event()
+    resume_commit = threading.Event()
+    worker_done = threading.Event()
+    observed = {}
+
+    def paused_commit_guard():
+        before_commit.set()
+        resume_commit.wait(timeout=5)
+        commit_guard()
+
+    def blocked_write():
+        try:
+            with kanban_db.connect_closing(db_path) as conn:
+                signal.record_signal(
+                    conn,
+                    source_agent="chloe",
+                    expected_outcome="Repair the repeated service failure",
+                    goal_ref="Reliable operations",
+                    observation="The same service alert recurred",
+                    evidence_references=[evidence_ref],
+                    dedupe_ref=dedupe_ref,
+                    packet={"kind": "workforce_signal"},
+                    before_commit=paused_commit_guard,
+                )
+        except ValueError as exc:
+            observed["error"] = str(exc)
+        finally:
+            worker_done.set()
+
+    worker = threading.Thread(
+        target=lambda: worker_context.run(blocked_write),
+        daemon=True,
+    )
+    worker.start()
+    assert before_commit.wait(timeout=5)
+
+    started = time.monotonic()
+    release_turn(turn_token, turn_state)
+    release_elapsed = time.monotonic() - started
+    resume_commit.set()
+    assert worker_done.wait(timeout=5)
+    worker.join(timeout=1)
+
+    assert release_elapsed < 0.5
+    assert observed["error"] == (
+        "dedupe_ref was not returned by this turn's Buzz observation"
+    )
+    with kanban_db.connect_closing(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM wc_items").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+
+    # The opposite race is linearizable too: once the short commit callback
+    # succeeds, revocation returns without waiting for the admitted COMMIT.
+    admitted_token, admitted_state = claim_turn()
+    admitted_ref, admitted_evidence = _bind_buzz(event_id="admitted-write")
+    admitted_guard = prepare_buzz_signal_commit_guard(
+        dedupe_ref=admitted_ref,
+        evidence_references=[admitted_evidence],
+    )
+    admitted_context = copy_context()
+    commit_admitted = threading.Event()
+    resume_admitted_commit = threading.Event()
+    admitted_done = threading.Event()
+    admitted_result = {}
+
+    def pause_after_admission():
+        admitted_guard()
+        commit_admitted.set()
+        resume_admitted_commit.wait(timeout=5)
+
+    def admitted_write():
+        try:
+            with kanban_db.connect_closing(db_path) as conn:
+                admitted_result.update(
+                    signal.record_signal(
+                        conn,
+                        source_agent="chloe",
+                        expected_outcome="Repair the newly observed failure",
+                        goal_ref="Reliable operations",
+                        observation="A separate stable alert recurred",
+                        evidence_references=[admitted_evidence],
+                        dedupe_ref=admitted_ref,
+                        packet={"kind": "workforce_signal"},
+                        before_commit=pause_after_admission,
+                    )
+                )
+        finally:
+            admitted_done.set()
+
+    admitted_worker = threading.Thread(
+        target=lambda: admitted_context.run(admitted_write),
+        daemon=True,
+    )
+    admitted_worker.start()
+    assert commit_admitted.wait(timeout=5)
+    started = time.monotonic()
+    release_turn(admitted_token, admitted_state)
+    admitted_release_elapsed = time.monotonic() - started
+    resume_admitted_commit.set()
+    assert admitted_done.wait(timeout=5)
+    admitted_worker.join(timeout=1)
+
+    assert admitted_release_elapsed < 0.5
+    assert admitted_result["created"] is True
+    with kanban_db.connect_closing(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM wc_items").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
+
+
+def test_buzz_binding_without_stable_author_fails_closed():
+    events = [{
+        "room_id": "room-1", "event_id": "one", "author": "display-only",
+        "content": "Service example.service failed",
+    }]
+
+    bind_buzz_events(events)
+
+    assert "dedupe_ref" not in events[0]
+    assert events[0]["binding_error"] == "stable Buzz event identity unavailable"
 
 
 def test_signal_is_fixed_nonexecuting_record_for_aurora(tmp_path, monkeypatch):
@@ -93,6 +794,9 @@ def test_chloe_can_only_make_mechanical_record_under_aurora_assignment(tmp_path,
         **missing_assignment,
         "aurora_assignment_id": "task-aurora-1",
     }
+    dedupe_ref, evidence_ref = _bind_buzz()
+    allowed["dedupe_ref"] = dedupe_ref
+    allowed["evidence_references"] = [evidence_ref]
     result = json.loads(signal._handle(allowed))
     assert result["success"] is True
     with kanban_db.connect_closing(db_path) as conn:
@@ -115,6 +819,9 @@ def test_chloe_offline_write_failure_is_observed_and_a_later_retry_can_recover(t
     }
     token, failed_attempt = activate(True)
     try:
+        dedupe_ref, evidence_ref = _bind_buzz()
+        payload["dedupe_ref"] = dedupe_ref
+        payload["evidence_references"] = [evidence_ref]
         monkeypatch.setattr(signal, "record_signal", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("offline")))
         failure = json.loads(signal._handle(payload))
     finally:
@@ -130,12 +837,114 @@ def test_chloe_offline_write_failure_is_observed_and_a_later_retry_can_recover(t
     monkeypatch.setenv("HERMES_WORKFORCE_ORG", str(SOURCE))
     token, recovered_attempt = activate(True)
     try:
+        dedupe_ref, evidence_ref = _bind_buzz()
+        payload["dedupe_ref"] = dedupe_ref
+        payload["evidence_references"] = [evidence_ref]
         recovery = json.loads(signal._handle(payload))
     finally:
         reset(token)
     assert recovery["success"] is True
     assert recovered_attempt.failure is None
     assert recovered_attempt.completed is True
+
+
+def test_chloe_reobserves_same_buzz_fact_despite_model_wording_drift(
+    tmp_path, monkeypatch
+):
+    profiles = tmp_path / "profiles"
+    (profiles / "chloe").mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(profiles / "chloe"))
+    monkeypatch.setenv("HERMES_WORKFORCE_ORG", str(SOURCE))
+    db_path = tmp_path / "kanban.db"
+    monkeypatch.setattr(kanban_db, "kanban_db_path", lambda **_kwargs: db_path)
+    content = (
+        "Maggie finance service failure\n\n"
+        "Service elliott-finance-qbo-refresh.service failed."
+    )
+
+    first_ref, first_evidence = _bind_buzz(
+        event_id="qbo-event-1", content=content
+    )
+    first_payload = {
+        **_payload(),
+        "department_recommendation": "",
+        "aurora_assignment_id": "workflow:test:chloe",
+        "dedupe_ref": first_ref,
+        "evidence_references": [first_evidence],
+        "expected_outcome": "Restore the finance refresh service",
+        "action_class": "risk",
+    }
+    first = json.loads(signal._handle(first_payload))
+
+    second_ref, second_evidence = _bind_buzz(
+        event_id="qbo-event-2", content=content
+    )
+    second_payload = {
+        **first_payload,
+        "dedupe_ref": second_ref,
+        "evidence_references": [second_evidence],
+        "expected_outcome": "Keep the current finance failure visible",
+        "observation": "The exact alert recurred in the later window",
+        "action_class": "exception",
+        "target_ref": "systemd:elliott-finance-qbo-refresh.service",
+    }
+    second = json.loads(signal._handle(second_payload))
+
+    assert first_ref == second_ref
+    assert first["signal_id"] == second["signal_id"]
+    assert first["created"] is True
+    assert second["created"] is False
+    with kanban_db.connect_closing(db_path) as conn:
+        item = conn.execute(
+            "SELECT evidence_json,provenance_json FROM wc_items WHERE task_id=?",
+            (first["signal_id"],),
+        ).fetchone()
+        task = kanban_db.get_task(conn, first["signal_id"])
+    assert json.loads(item["evidence_json"]) == [first_evidence, second_evidence]
+    assert len(json.loads(item["provenance_json"])) == 2
+    body = json.loads(task.body)
+    assert body["observation"] == second_payload["observation"]
+    assert body["latest_source_agent"] == "chloe"
+    assert body["evidence_references"] == [first_evidence, second_evidence]
+
+
+def test_chloe_rejects_missing_stale_and_mismatched_buzz_binding(
+    tmp_path, monkeypatch
+):
+    profiles = tmp_path / "profiles"
+    (profiles / "chloe").mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(profiles / "chloe"))
+    monkeypatch.setenv("HERMES_WORKFORCE_ORG", str(SOURCE))
+    db_path = tmp_path / "kanban.db"
+    monkeypatch.setattr(kanban_db, "kanban_db_path", lambda **_kwargs: db_path)
+    base = {
+        **_payload(),
+        "department_recommendation": "",
+        "aurora_assignment_id": "workflow:test:chloe",
+    }
+
+    missing = json.loads(signal._handle(base))
+    assert "dedupe_ref is required" in missing["error"]
+    dedupe_ref, evidence_ref = _bind_buzz()
+    stale = json.loads(signal._handle({
+        **base,
+        "dedupe_ref": "buzz-content:" + "0" * 64,
+        "evidence_references": [evidence_ref],
+    }))
+    assert "not returned by this turn" in stale["error"]
+    mismatched = json.loads(signal._handle({
+        **base,
+        "dedupe_ref": dedupe_ref,
+        "evidence_references": ["buzz:event:another-event"],
+    }))
+    assert "outside the selected dedupe_ref" in mismatched["error"]
+    valid_plus_forged = json.loads(signal._handle({
+        **base,
+        "dedupe_ref": dedupe_ref,
+        "evidence_references": [evidence_ref, "buzz:event:forged"],
+    }))
+    assert "outside the selected dedupe_ref" in valid_plus_forged["error"]
+    assert not db_path.exists()
 
 
 def test_mel_cannot_route_a_signal(tmp_path, monkeypatch):

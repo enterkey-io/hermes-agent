@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -224,7 +225,7 @@ def _buzz_events(
     for channel_id in channel_ids:
         completed = subprocess.run(
             [
-                cli, "--format", "compact", "messages", "get",
+                cli, "--format", "json", "messages", "get",
                 "--channel", channel_id, "--since", str(since),
                 "--limit", str(max(1, min(int(per_room_limit), 10))),
                 "--kinds", "9",
@@ -244,7 +245,8 @@ def _buzz_events(
         for item in payload if isinstance(payload, list) else []:
             if int(item.get("kind") or 9) != 9:
                 continue
-            content = str(item.get("content") or "").strip()
+            full_content = str(item.get("content") or "")
+            content = full_content.strip()
             if not content:
                 continue
             events.append({
@@ -252,8 +254,12 @@ def _buzz_events(
                 "room_id": channel_id,
                 "event_id": str(item.get("id") or ""),
                 "created_at": int(item.get("created_at") or 0),
-                "author": str(item.get("display_name") or item.get("name") or item.get("pubkey") or "unknown")[:96],
+                "author": str(item.get("display_name") or item.get("name") or "")[:96],
+                "author_id": str(item.get("pubkey") or "").strip().casefold(),
                 "content": content[:600],
+                "_full_content_sha256": hashlib.sha256(
+                    full_content.encode()
+                ).hexdigest(),
             })
     events.sort(key=lambda value: (value["created_at"], value["room_id"]))
     bounded_max = max(1, min(int(max_events), 20))
@@ -266,6 +272,12 @@ def _buzz_events(
 
 
 def _observe_buzz(args: dict[str, Any], **_kwargs: Any) -> str:
+    from tools.workforce_observation_runtime import (
+        bind_buzz_events,
+        clear_buzz_events,
+    )
+
+    clear_buzz_events()
     try:
         actor = _actor()
         if actor not in {"chloe", "milena", "aurora"}:
@@ -277,6 +289,7 @@ def _observe_buzz(args: dict[str, Any], **_kwargs: Any) -> str:
             per_room_limit=int(args.get("per_room_limit") or 6),
             max_events=int(args.get("limit") or 20),
         )
+        bind_buzz_events(result["events"])
         return tool_result(success=True, **result)
     except Exception as exc:
         return tool_error(str(exc))

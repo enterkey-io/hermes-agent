@@ -108,8 +108,17 @@ These hooks frame the user turn, not individual provider API attempts:
 
 | Hook | When it fires |
 | --- | --- |
+| `on_turn_start` | The outer conversation host admits a turn, before any tool worker contexts are copied. |
+| `on_turn_end` | The matching outer host scope exits, including setup failure, interruption, and abandoned tool workers. |
 | `pre_llm_call` | Before the tool loop begins for a user turn. |
 | `post_llm_call` | After the turn completes with final assistant output. |
+
+`on_turn_start` and `on_turn_end` are paired scope notifications for plugins
+that maintain ContextVar-backed per-turn state. Their return values are ignored,
+callbacks are fail-open, and `on_turn_end` receives `outcome` plus the same
+`session_id`, `task_id`, `turn_id`, `model`, and `platform` identity supplied at
+start. A plugin must revoke state retained by copied or abandoned workers when
+the end hook fires.
 
 Common `pre_llm_call` fields include `session_id`, `turn_id`,
 `user_message`, `conversation_history`, `is_first_turn`, `model`, `platform`,

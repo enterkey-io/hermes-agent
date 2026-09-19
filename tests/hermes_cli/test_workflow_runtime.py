@@ -114,6 +114,7 @@ def test_prompt_binds_chloe_intake_to_canonical_aurora_step(owner, executor, dir
     assert ("aurora_assignment_id: `workflow:wf-daily-brief:step:collect`" in prompt) is directed
     if directed:
         assert "omit department_recommendation and estimated_effort" in prompt
+        assert "exact dedupe_ref and evidence_ref" in prompt
         assert "does not authorize recommendations, execution, or a signal on a quiet run" in prompt
     assert "aurora_assignment_id" not in build_runbook_agent_prompt("daily-brief")
 

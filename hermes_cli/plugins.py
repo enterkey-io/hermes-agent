@@ -213,6 +213,13 @@ VALID_HOOKS: Set[str] = {
     "on_session_end",
     "on_session_finalize",
     "on_session_reset",
+    # Per-conversation-call scopes. Unlike on_session_start/on_session_end,
+    # these fire for every turn and the end hook is guaranteed from the outer
+    # host finally, including setup failures and interrupted/abandoned tools.
+    # Plugins may use ContextVars initialized at start and revoked at end;
+    # callbacks remain fail-open and return values are ignored.
+    "on_turn_start",
+    "on_turn_end",
     # Successful skill lifecycle facts. The local skill name is available to
     # plugins, while built-in shared metrics emit only bounded classifications.
     "on_skill_lifecycle",

@@ -8472,6 +8472,7 @@ class AIAgent:
         durable_turn_lease_interrupt_message = None
         token = None
         acct_token = None
+        turn_lifecycle_started = False
         task_started = False
         task_finished = False
         relay_outcome = "failed"
@@ -8778,6 +8779,27 @@ class AIAgent:
                 getattr(self, "_session_db", None),
                 getattr(self, "session_id", None),
             )
+            # Give enabled plugins a generic per-turn scope before any tool
+            # worker Contexts are copied. The paired end hook is emitted from
+            # the outer finally, including setup failures and abandoned tools.
+            from hermes_cli import lifecycle as turn_lifecycle
+
+            if (
+                turn_lifecycle.has_hook("on_turn_start")
+                or turn_lifecycle.has_hook("on_turn_end")
+            ):
+                turn_lifecycle_started = True
+                try:
+                    turn_lifecycle.invoke_hook(
+                        "on_turn_start",
+                        session_id=task_context["session_id"],
+                        task_id=effective_task_id,
+                        turn_id=relay_turn_id,
+                        model=str(getattr(self, "model", None) or ""),
+                        platform=task_context["platform"],
+                    )
+                except Exception:
+                    logger.warning("on_turn_start hook failed", exc_info=True)
             from agent.auxiliary_client import scoped_runtime_main
 
             # The outer token restores the caller's Context even though turn setup
@@ -8851,6 +8873,22 @@ class AIAgent:
                 finish_task_run(**task_context, error=exc)
             raise
         finally:
+            # Revoke per-turn plugin authority before releasing either logical
+            # or durable session ownership. Copied/abandoned workers may still
+            # be running, so lease release cannot precede this boundary.
+            if turn_lifecycle_started:
+                try:
+                    turn_lifecycle.invoke_hook(
+                        "on_turn_end",
+                        session_id=task_context["session_id"],
+                        task_id=effective_task_id,
+                        turn_id=relay_turn_id,
+                        model=str(getattr(self, "model", None) or ""),
+                        platform=task_context["platform"],
+                        outcome=relay_outcome,
+                    )
+                except Exception:
+                    logger.warning("on_turn_end hook failed", exc_info=True)
             finish_agent_photo_request_run(
                 self,
                 agent_photo_request_run,
