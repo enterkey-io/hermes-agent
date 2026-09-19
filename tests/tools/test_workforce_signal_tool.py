@@ -376,6 +376,95 @@ def test_real_timed_out_executor_worker_cannot_bind_after_turn_end():
     )
 
 
+def test_signal_authority_is_revoked_before_conversation_lease_release(
+    tmp_path, monkeypatch
+):
+    """Lease release cannot expose a still-authorized copied tool context."""
+    from run_agent import AIAgent
+
+    profiles = tmp_path / "profiles"
+    (profiles / "chloe").mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(profiles / "chloe"))
+    monkeypatch.setenv("HERMES_WORKFORCE_ORG", str(SOURCE))
+    monkeypatch.setattr(
+        kanban_db,
+        "kanban_db_path",
+        lambda **_kwargs: tmp_path / "kanban.db",
+    )
+    with (
+        patch("run_agent.get_tool_definitions", return_value=[]),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("hermes_cli.config.load_config", return_value={}),
+        patch("hermes_cli.config.load_config_readonly", return_value={}),
+        patch("run_agent.OpenAI"),
+    ):
+        agent = AIAgent(
+            api_key="test-key-1234567890",
+            base_url="https://openrouter.ai/api/v1",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+    agent.client = MagicMock()
+    agent.compression_enabled = False
+    agent.save_trajectories = False
+    captured = {}
+    coordinator = MagicMock()
+    coordinator.acquire_conversation.return_value = SimpleNamespace(
+        parent_session_id="",
+        profile_key="/profile",
+        session_id=agent.session_id or "",
+    )
+    coordinator.begin_turn.return_value = SimpleNamespace(relay_enabled=True)
+
+    def run_turn(*_args, **_kwargs):
+        dedupe_ref, evidence_ref = _bind_buzz(event_id="lease-release")
+        captured.update(
+            dedupe_ref=dedupe_ref,
+            evidence_ref=evidence_ref,
+            worker=copy_context(),
+        )
+        return {"final_response": "ok", "messages": [], "failed": False}
+
+    payload = {
+        **_payload(),
+        "department_recommendation": "",
+        "aurora_assignment_id": "workflow:test:chloe",
+    }
+
+    def attempt_from_released_lease(_lease):
+        payload.update(
+            dedupe_ref=captured["dedupe_ref"],
+            evidence_references=[captured["evidence_ref"]],
+        )
+        captured["release_result"] = json.loads(
+            captured["worker"].run(signal._handle, payload)
+        )
+
+    coordinator.release_conversation.side_effect = attempt_from_released_lease
+    with (
+        patch("agent.conversation_loop.run_conversation", side_effect=run_turn),
+        patch("agent.relay_runtime.SESSION_COORDINATOR", coordinator),
+        patch("agent.relay_runtime.current_profile_key", return_value="/profile"),
+        patch(
+            "hermes_cli.lifecycle.has_hook",
+            side_effect=lambda name: name == "on_turn_start",
+        ),
+        patch(
+            "hermes_cli.lifecycle.invoke_hook",
+            side_effect=_invoke_workforce_turn_hook,
+        ),
+        patch("hermes_cli.observability.relay_shared_metrics.start_task_run"),
+        patch("hermes_cli.observability.relay_shared_metrics.finish_task_run"),
+        patch.object(signal, "record_signal") as record_signal,
+    ):
+        result = agent.run_conversation("inspect Buzz", task_id="task-release")
+
+    assert result["final_response"] == "ok"
+    assert "not returned by this turn" in captured["release_result"]["error"]
+    record_signal.assert_not_called()
+
+
 def test_buzz_binding_without_stable_author_fails_closed():
     events = [{
         "room_id": "room-1", "event_id": "one", "author": "display-only",

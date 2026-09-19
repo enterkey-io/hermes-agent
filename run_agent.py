@@ -8873,6 +8873,22 @@ class AIAgent:
                 finish_task_run(**task_context, error=exc)
             raise
         finally:
+            # Revoke per-turn plugin authority before releasing either logical
+            # or durable session ownership. Copied/abandoned workers may still
+            # be running, so lease release cannot precede this boundary.
+            if turn_lifecycle_started:
+                try:
+                    turn_lifecycle.invoke_hook(
+                        "on_turn_end",
+                        session_id=task_context["session_id"],
+                        task_id=effective_task_id,
+                        turn_id=relay_turn_id,
+                        model=str(getattr(self, "model", None) or ""),
+                        platform=task_context["platform"],
+                        outcome=relay_outcome,
+                    )
+                except Exception:
+                    logger.warning("on_turn_end hook failed", exc_info=True)
             finish_agent_photo_request_run(
                 self,
                 agent_photo_request_run,
@@ -8928,19 +8944,6 @@ class AIAgent:
                         self._relay_pending_turn_id = None
                     if acct_token is not None:
                         reset_accounting_context(acct_token)
-                    if turn_lifecycle_started:
-                        try:
-                            turn_lifecycle.invoke_hook(
-                                "on_turn_end",
-                                session_id=task_context["session_id"],
-                                task_id=effective_task_id,
-                                turn_id=relay_turn_id,
-                                model=str(getattr(self, "model", None) or ""),
-                                platform=task_context["platform"],
-                                outcome=relay_outcome,
-                            )
-                        except Exception:
-                            logger.warning("on_turn_end hook failed", exc_info=True)
                     if token is not None:
                         reset_conversation_context(token)
 
