@@ -23,10 +23,10 @@ presets:
     provider: openai-codex
     model: gpt-5.6-terra
     reasoning_effort: high
-  mel-glm53-high:
+  mel-glm53-medium:
     provider: ollama-cloud
     model: glm-5.3:cloud
-    reasoning_effort: high
+    reasoning_effort: medium
   luna-xhigh:
     provider: openai-codex
     model: gpt-5.6-luna
@@ -35,7 +35,7 @@ presets:
 route_policy:
   main_telegram_buzz_api:
     source: agent_assignment
-    note: Ordinary operational primary defaults use their assigned OpenAI preset except Mel, explicitly approved by Elliott on 2026-09-18 for ollama-cloud/glm-5.3:cloud at high effort. Personal-only Amy/Kourtnie routes and configured service/rate fallback remain separate exceptions.
+    note: Ordinary operational primary defaults use their assigned OpenAI preset except Mel, explicitly approved by Elliott for ollama-cloud/glm-5.3:cloud at medium effort. Personal-only Amy/Kourtnie routes and configured service/rate fallback remain separate exceptions.
   matrix:
     provider: ollama-cloud
     model: glm-5.2:cloud
@@ -152,7 +152,7 @@ assignments:
   xenia: {profile: xenia, preset: sol-medium}
   oyku: {profile: oyku, preset: terra-high}
   maggie: {profile: maggie, preset: sol-medium}
-  mel: {profile: mel, preset: mel-glm53-high}
+  mel: {profile: mel, preset: mel-glm53-medium}
 
 fallback_policy:
   provider: ollama-cloud
