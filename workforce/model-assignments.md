@@ -107,9 +107,9 @@ Luna xhigh.
 | Xenia | `xenia` | `gpt-5.6-sol`, medium | `glm-5.2:cloud`, medium |
 | Oyku | `oyku` | `gpt-5.6-terra`, high | `glm-5.2:cloud`, medium |
 | Maggie | `maggie` | `gpt-5.6-sol`, medium | `glm-5.2:cloud`, medium |
-| Mel | `mel` | `gpt-5.6-terra`, high | `glm-5.2:cloud`, medium |
+| Mel | `mel` | `glm-5.3:cloud`, medium | `glm-5.2:cloud`, medium |
 
-Totals: 9 Sol, 11 Terra, and 2 Luna assignments.
+Totals: 9 Sol, 10 Terra, 2 Luna, and 1 GLM assignment.
 
 Emma uses Sol at low effort as a specialist assignment: Sol preserves the
 creative judgment, voice fidelity, and direct taste feedback her role needs,
