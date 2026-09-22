@@ -70,6 +70,27 @@ def personal_profile(monkeypatch, tmp_path, trusted_wrapper):
     return configure
 
 
+def test_explicit_org_capability_allows_operational_agent_photo_profile(
+    personal_profile, tmp_path
+):
+    """A canonical per-agent grant may authorize one operational profile."""
+    from tools import agent_photo_tool
+
+    personal_profile("sloane")
+    organization_path = tmp_path / "organization" / "organization.yaml"
+    organization = yaml.safe_load(organization_path.read_text(encoding="utf-8"))
+    for agent in organization["agents"]:
+        if agent["agent"] == "sloane":
+            agent["capabilities"] = ["agent_photo"]
+            break
+    organization_path.write_text(yaml.safe_dump(organization), encoding="utf-8")
+
+    assert agent_photo_tool.check_personal_agent_photo_requirements() is True
+    result = json.loads(agent_photo_tool.agent_photo_tool({"action": "instructions"}))
+    assert result["success"] is True
+    assert result["skill"] == "agent-photo"
+
+
 @pytest.mark.windows_only
 def test_agent_photo_imports_but_is_unavailable_without_posix_descriptor_security():
     from tools import agent_photo_tool

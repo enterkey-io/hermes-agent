@@ -145,7 +145,7 @@ def _wrapper_timeout(action: str) -> int:
 
 
 def _active_personal_profile() -> Path:
-    """Return the active profile only when it is an authorized personal profile."""
+    """Return the active profile only when canonical policy authorizes photos."""
     _require_secure_descriptor_capability()
     root = get_default_hermes_root().resolve(strict=True)
     home = get_hermes_home().expanduser().resolve(strict=True)
@@ -163,7 +163,9 @@ def _active_personal_profile() -> Path:
         ).from_profile_path(home)
     except WorkforceOrganizationError as exc:
         raise ValueError("agent-photo is unavailable for an unknown profile") from exc
-    if agent.operational or agent.status != "friend":
+    is_personal_friend = not agent.operational and agent.status == "friend"
+    has_explicit_capability = "agent_photo" in agent.capabilities
+    if not (is_personal_friend or has_explicit_capability):
         raise ValueError("agent-photo is available only to authorized personal profiles")
     if not agent.profile_path or Path(agent.profile_path).resolve(strict=True) != home:
         raise ValueError("agent-photo profile path does not match the canonical organization")

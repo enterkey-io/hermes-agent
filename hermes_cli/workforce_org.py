@@ -61,6 +61,7 @@ class WorkforceAgent:
     cross_team_request_path: str | None
     buzz_rooms: tuple[str, ...]
     profile_path: str | None
+    capabilities: tuple[str, ...] = ()
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "WorkforceAgent":
@@ -102,11 +103,19 @@ class WorkforceAgent:
             cross_team_request_path=text("cross_team_request_path"),
             buzz_rooms=strings("buzz_rooms"),
             profile_path=text("profile_path"),
+            capabilities=strings("capabilities"),
         )
 
     def to_dict(self) -> dict[str, Any]:
         data = dict(self.__dict__)
-        for key in ("direct_reports", "owned_outcomes", "authority", "prohibited_actions", "buzz_rooms"):
+        for key in (
+            "direct_reports",
+            "owned_outcomes",
+            "authority",
+            "prohibited_actions",
+            "buzz_rooms",
+            "capabilities",
+        ):
             data[key] = list(data[key])
         return data
 
