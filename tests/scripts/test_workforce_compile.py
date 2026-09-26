@@ -51,7 +51,7 @@ def test_compile_reports_externalized_contract_reconciliation(tmp_path):
     assert (tmp_path / "out" / "aurora" / "AGENTS.md").read_text() == source.read_text()
 
 
-def test_canonical_compile_includes_active_chloe_and_emma(tmp_path):
+def test_canonical_compile_includes_active_chloe_emma_and_priya(tmp_path):
     organization = materialize_test_organization(
         ROOT / "workforce" / "organization.yaml", tmp_path
     )
@@ -60,7 +60,7 @@ def test_canonical_compile_includes_active_chloe_and_emma(tmp_path):
         ROOT / "workforce" / "templates" / "workforce-contract.md",
         tmp_path,
     )
-    assert len(manifest["profiles"]) == 22
+    assert len(manifest["profiles"]) == 23
     assert [item["agent"] for item in manifest["profiles"][:2]] == ["aurora", "grace"]
     assert all(item["original_instruction_preserved_as_exact_suffix"] for item in manifest["profiles"])
     chloe = next(item for item in manifest["profiles"] if item["agent"] == "chloe")
@@ -75,6 +75,9 @@ def test_canonical_compile_includes_active_chloe_and_emma(tmp_path):
     emma = next(item for item in manifest["profiles"] if item["agent"] == "emma")
     assert emma["status"] == "active"
     assert emma["source_kind"] == "live-profile"
+    priya = next(item for item in manifest["profiles"] if item["agent"] == "priya")
+    assert priya["status"] == "active"
+    assert priya["source_kind"] == "live-profile"
 
     aurora_text = (tmp_path / "aurora" / "AGENTS.md").read_text()
     assert "translate that intent into execution" in aurora_text

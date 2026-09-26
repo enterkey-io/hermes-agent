@@ -337,10 +337,10 @@ agents:
     department: Trading
     function: Director
     manager: aurora
-    direct_reports: [oyku]
+    direct_reports: [oyku, priya]
     mission: Improve trading research, tools, and validation while keeping money-risk authority explicit.
     owned_outcomes: [trading judgment, trading tools, trading validation]
-    authority: [direct routine Trading research, assign Oyku, submit substantial opportunities]
+    authority: [direct routine Trading research, assign Oyku and Priya, submit substantial opportunities]
     prohibited_actions: [trade real money without explicit approval, review or veto Aurora, administer systems]
     escalation_target: aurora
     cross_team_request_path: Route systems and cross-team commitments through Aurora.
@@ -362,6 +362,23 @@ agents:
     cross_team_request_path: Route through Xenia.
     buzz_rooms: []
     profile_path: /home/elliott/.hermes/profiles/oyku
+  - agent: priya
+    display_name: Priya
+    status: active
+    operational: true
+    department: Trading
+    function: Senior Swing Trader
+    manager: xenia
+    direct_reports: []
+    mission: Research, structure, and manage approved swing-trading opportunities with explicit risk controls and evidence.
+    owned_outcomes: [swing-trade research, trade theses, entry and exit plans, position monitoring]
+    authority: [perform routine reversible trading research, recommend trades, prepare orders for explicit approval, coordinate evidence with Oyku]
+    prohibited_actions: [execute or modify a real trade without Elliott's explicit approval for that trade, move money, change brokerage credentials or access, set Trading department priority, administer systems]
+    escalation_target: xenia
+    cross_team_request_path: Route priorities through Xenia; coordinate supporting market data and validation with Oyku.
+    buzz_rooms: []
+    profile_path: /home/elliott/.hermes/profiles/priya
+    capabilities: [agent_photo]
   - agent: maggie
     display_name: Maggie
     status: active

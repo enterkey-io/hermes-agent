@@ -15,7 +15,7 @@ def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def test_current_manifest_is_ready_after_emma_onboarding(tmp_path: Path):
+def test_current_manifest_is_ready_after_priya_onboarding(tmp_path: Path):
     staging = tmp_path / "staging"
     organization = materialize_test_organization(
         ROOT / "workforce/organization.yaml", tmp_path
@@ -27,8 +27,8 @@ def test_current_manifest_is_ready_after_emma_onboarding(tmp_path: Path):
     )
     report, _ = preflight(staging / "manifest.json")
     assert report["valid"] is True
-    assert report["profiles"] == 22
-    assert report["writes_ready"] == 22
+    assert report["profiles"] == 23
+    assert report["writes_ready"] == 23
     assert report["gates"] == []
 
 
