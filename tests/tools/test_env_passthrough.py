@@ -101,6 +101,20 @@ class TestProfileScopedResolution:
         finally:
             ss.reset_secret_scope(token)
 
+    def test_registered_scope_only_value_is_materialized(self, monkeypatch):
+        from tools.env_passthrough import resolve_registered_passthrough_values
+
+        register_env_passthrough(["SERVICE_TOKEN"])
+        monkeypatch.delenv("SERVICE_TOKEN", raising=False)
+        ss.set_multiplex_active(True)
+        token = ss.set_secret_scope({"SERVICE_TOKEN": "profile-only"})
+        try:
+            assert resolve_registered_passthrough_values({}) == {
+                "SERVICE_TOKEN": "profile-only"
+            }
+        finally:
+            ss.reset_secret_scope(token)
+
 
 class TestExecuteCodeIntegration:
     """Verify that the passthrough is checked in execute_code's env filtering."""
@@ -186,6 +200,20 @@ class TestExecuteCodeIntegration:
 
         assert "SERVICE_TOKEN" not in child_env
 
+    def test_execute_code_materializes_scope_only_passthrough(self, monkeypatch):
+        from tools.code_execution_tool import _scrub_child_env
+
+        register_env_passthrough(["SERVICE_TOKEN"])
+        monkeypatch.delenv("SERVICE_TOKEN", raising=False)
+        ss.set_multiplex_active(True)
+        token = ss.set_secret_scope({"SERVICE_TOKEN": "profile-only"})
+        try:
+            child_env = _scrub_child_env({})
+        finally:
+            ss.reset_secret_scope(token)
+
+        assert child_env["SERVICE_TOKEN"] == "profile-only"
+
 
 class TestTerminalIntegration:
     """Verify that the passthrough is checked in terminal's env sanitizers."""
@@ -225,6 +253,25 @@ class TestTerminalIntegration:
 
         assert "SERVICE_TOKEN" not in child_env
 
+    @pytest.mark.parametrize("builder", ["foreground", "background"])
+    def test_terminal_materializes_scope_only_passthrough(self, monkeypatch, builder):
+        from tools.environments.local import _make_run_env, _sanitize_subprocess_env
+
+        register_env_passthrough(["SERVICE_TOKEN"])
+        monkeypatch.delenv("SERVICE_TOKEN", raising=False)
+        ss.set_multiplex_active(True)
+        token = ss.set_secret_scope({"SERVICE_TOKEN": "profile-only"})
+        try:
+            child_env = (
+                _make_run_env({})
+                if builder == "foreground"
+                else _sanitize_subprocess_env({})
+            )
+        finally:
+            ss.reset_secret_scope(token)
+
+        assert child_env["SERVICE_TOKEN"] == "profile-only"
+
     def test_shared_local_snapshot_re_resolves_current_profile(self, monkeypatch, tmp_path):
         """A persistent shell snapshot must not retain the previous profile's value."""
         from tools.environments.local import LocalEnvironment
@@ -261,6 +308,24 @@ class TestTerminalIntegration:
 
         assert result["output"] == "token-for-profile-b"
         assert missing["output"] == "unset"
+
+    def test_local_terminal_executes_with_scope_only_passthrough(self, monkeypatch, tmp_path):
+        from tools.environments.local import LocalEnvironment
+
+        register_env_passthrough(["SERVICE_TOKEN"])
+        monkeypatch.delenv("SERVICE_TOKEN", raising=False)
+        ss.set_multiplex_active(True)
+        token = ss.set_secret_scope({"SERVICE_TOKEN": "profile-only"})
+        env = None
+        try:
+            env = LocalEnvironment(cwd=str(tmp_path))
+            result = env.execute("printf '%s' \"$SERVICE_TOKEN\"")
+        finally:
+            ss.reset_secret_scope(token)
+            if env is not None:
+                env.cleanup()
+
+        assert result["output"] == "profile-only"
 
     def test_blocklisted_var_blocked_by_default(self):
         from tools.environments.local import _sanitize_subprocess_env, _HERMES_PROVIDER_ENV_BLOCKLIST

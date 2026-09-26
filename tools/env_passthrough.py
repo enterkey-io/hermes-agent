@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 from contextvars import ContextVar
-from typing import Iterable
+from typing import Iterable, Mapping
 from hermes_cli.config import cfg_get
 
 logger = logging.getLogger(__name__)
@@ -216,6 +216,26 @@ def resolve_passthrough_value(
             return get_secret(name)
         return fallback
     return get_secret(name, None if multiplex_active else fallback)
+
+
+def resolve_registered_passthrough_values(
+    fallbacks: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Resolve every registered passthrough from the active profile scope.
+
+    A routed profile's credential can exist only in its context-local secret
+    scope, with no same-named value in ``os.environ``. Environment builders
+    therefore cannot discover passthrough names solely by iterating inherited
+    input. Resolve the registry itself so those scope-only values are
+    materialized while retaining the fail-closed multiplex behavior above.
+    """
+    source = fallbacks or {}
+    resolved: dict[str, str] = {}
+    for name in sorted(get_all_passthrough()):
+        value = resolve_passthrough_value(name, source.get(name))
+        if value is not None:
+            resolved[name] = value
+    return resolved
 
 
 def clear_env_passthrough() -> None:

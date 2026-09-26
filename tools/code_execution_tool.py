@@ -223,10 +223,12 @@ def _scrub_child_env(source_env, is_passthrough=None, is_windows=None):
     spawning a subprocess.
     """
     resolve_passthrough_value = None
+    resolve_registered_passthrough_values = None
     if is_passthrough is None:
         try:
             from tools.env_passthrough import (
                 is_env_passthrough as _ep,
+                resolve_registered_passthrough_values,
                 resolve_passthrough_value,
             )
         except Exception:
@@ -271,6 +273,8 @@ def _scrub_child_env(source_env, is_passthrough=None, is_windows=None):
             # Non-secret (secrets were already dropped above) and not in any
             # allowlist — a deliberately-dropped HERMES_* var.
             _dropped_hermes.append(k)
+    if resolve_registered_passthrough_values is not None:
+        scrubbed.update(resolve_registered_passthrough_values(source_env))
     if _dropped_hermes:
         logger.debug(
             "execute_code: dropped %d non-allowlisted HERMES_* var(s) from the "
