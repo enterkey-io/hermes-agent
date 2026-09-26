@@ -129,7 +129,7 @@ def test_canonical_compile_includes_active_chloe_emma_and_priya(tmp_path):
         assert "report_to_origin" not in managed
 
     # Lifecycle blocks are derived from organization metadata, not copied into
-    # 22 independent private profiles.
+    # Independent private profiles.
     sloane_text = (tmp_path / "sloane" / "AGENTS.md").read_text()
     reese_text = (tmp_path / "reese" / "AGENTS.md").read_text()
     sage_text = (tmp_path / "sage" / "AGENTS.md").read_text()

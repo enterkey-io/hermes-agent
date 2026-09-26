@@ -33,11 +33,12 @@ def test_config_plan_is_complete_exact_and_non_mutating(tmp_path: Path):
 
     assert report["valid"] is True
     assert report["mutation_performed"] is False
-    assert len(report["profiles"]) == 22
+    assert len(report["profiles"]) == 23
     by_agent = {item["agent"]: item for item in report["profiles"]}
     assert by_agent["root"]["profile"] == "main"
     assert by_agent["root"]["home_room"] == "director-operations"
     assert by_agent["chloe"]["home_room"] == "admin"
+    assert by_agent["priya"]["home_room"] == "staff-trading"
     assert "general" in by_agent["chloe"]["rooms"]
     assert "general" in by_agent["emma"]["rooms"]
     assert all(
