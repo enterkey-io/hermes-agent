@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 from contextvars import ContextVar
-from typing import Iterable
+from typing import Iterable, Mapping
 from hermes_cli.config import cfg_get
 
 logger = logging.getLogger(__name__)
@@ -43,8 +43,10 @@ def _get_allowed() -> set[str]:
         return val
 
 
-# Cache for the config-based allowlist (loaded once per process).
-_config_passthrough: frozenset[str] | None = None
+# Config-based allowlists are profile-local. A multiplex gateway serves several
+# Hermes homes in one process, so one shared cache entry would let the first
+# profile's operator allowlist govern every later profile's sandbox children.
+_config_passthrough: dict[str, frozenset[str]] = {}
 
 
 def _is_hermes_provider_credential(name: str) -> bool:
@@ -125,9 +127,16 @@ def register_env_passthrough(var_names: Iterable[str]) -> None:
 
 def _load_config_passthrough() -> frozenset[str]:
     """Load ``tools.env_passthrough`` from config.yaml (cached)."""
-    global _config_passthrough
-    if _config_passthrough is not None:
-        return _config_passthrough
+    from hermes_constants import hermes_home_key
+
+    try:
+        home_key = hermes_home_key()
+    except (RuntimeError, OSError):
+        # Sandboxed Windows children can have no resolvable HOME/USERPROFILE.
+        home_key = ""
+    cached = _config_passthrough.get(home_key)
+    if cached is not None:
+        return cached
 
     result: set[str] = set()
     try:
@@ -159,8 +168,8 @@ def _load_config_passthrough() -> frozenset[str]:
     except Exception as e:
         logger.debug("Could not read tools.env_passthrough from config: %s", e)
 
-    _config_passthrough = frozenset(result)
-    return _config_passthrough
+    _config_passthrough[home_key] = frozenset(result)
+    return _config_passthrough[home_key]
 
 
 def is_env_passthrough(var_name: str) -> bool:
@@ -216,6 +225,26 @@ def resolve_passthrough_value(
             return get_secret(name)
         return fallback
     return get_secret(name, None if multiplex_active else fallback)
+
+
+def resolve_registered_passthrough_values(
+    fallbacks: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Resolve every registered passthrough from the active profile scope.
+
+    A routed profile's credential can exist only in its context-local secret
+    scope, with no same-named value in ``os.environ``. Environment builders
+    therefore cannot discover passthrough names solely by iterating inherited
+    input. Resolve the registry itself so those scope-only values are
+    materialized while retaining the fail-closed multiplex behavior above.
+    """
+    source = fallbacks or {}
+    resolved: dict[str, str] = {}
+    for name in sorted(get_all_passthrough()):
+        value = resolve_passthrough_value(name, source.get(name))
+        if value is not None:
+            resolved[name] = value
+    return resolved
 
 
 def clear_env_passthrough() -> None:

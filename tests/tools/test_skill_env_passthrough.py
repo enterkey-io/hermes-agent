@@ -12,10 +12,10 @@ from tools.env_passthrough import clear_env_passthrough, is_env_passthrough
 @pytest.fixture(autouse=True)
 def _clean_passthrough():
     clear_env_passthrough()
-    _ep_mod._config_passthrough = None
+    _ep_mod._config_passthrough.clear()
     yield
     clear_env_passthrough()
-    _ep_mod._config_passthrough = None
+    _ep_mod._config_passthrough.clear()
 
 
 def _create_skill(tmp_path, name, frontmatter_extra=""):

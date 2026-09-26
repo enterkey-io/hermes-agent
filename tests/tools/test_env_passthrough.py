@@ -19,11 +19,11 @@ from tools.env_passthrough import (
 def _clean_passthrough():
     """Ensure a clean passthrough state for every test."""
     clear_env_passthrough()
-    _ep_mod._config_passthrough = None
+    _ep_mod._config_passthrough.clear()
     ss.set_multiplex_active(False)
     yield
     clear_env_passthrough()
-    _ep_mod._config_passthrough = None
+    _ep_mod._config_passthrough.clear()
     ss.set_multiplex_active(False)
 
 
@@ -46,7 +46,7 @@ class TestConfigPassthrough:
         config_path = tmp_path / "config.yaml"
         config_path.write_text(yaml.dump(config), encoding="utf-8")
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-        _ep_mod._config_passthrough = None
+        _ep_mod._config_passthrough.clear()
 
         assert is_env_passthrough("MY_CUSTOM_KEY")
         assert is_env_passthrough("ANOTHER_TOKEN")
@@ -58,7 +58,7 @@ class TestConfigPassthrough:
         config_path = tmp_path / "config.yaml"
         config_path.write_text(yaml.dump(config), encoding="utf-8")
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-        _ep_mod._config_passthrough = None
+        _ep_mod._config_passthrough.clear()
 
         register_env_passthrough(["SKILL_KEY"])
         all_pt = get_all_passthrough()
@@ -67,6 +67,42 @@ class TestConfigPassthrough:
 
 
 class TestProfileScopedResolution:
+    def test_scope_only_config_allowlist_is_profile_local(self, tmp_path):
+        from hermes_constants import (
+            reset_hermes_home_override,
+            set_hermes_home_override,
+        )
+        from tools.env_passthrough import resolve_registered_passthrough_values
+
+        profile_a = tmp_path / "profiles" / "a"
+        profile_b = tmp_path / "profiles" / "b"
+        profile_a.mkdir(parents=True)
+        profile_b.mkdir(parents=True)
+        (profile_a / "config.yaml").write_text(
+            yaml.safe_dump({"terminal": {"env_passthrough": ["SERVICE_TOKEN"]}}),
+            encoding="utf-8",
+        )
+        (profile_b / "config.yaml").write_text("{}\n", encoding="utf-8")
+
+        ss.set_multiplex_active(True)
+        secret_token = ss.set_secret_scope({"SERVICE_TOKEN": "profile-only"})
+        try:
+            home_token = set_hermes_home_override(profile_a)
+            try:
+                assert resolve_registered_passthrough_values({}) == {
+                    "SERVICE_TOKEN": "profile-only"
+                }
+            finally:
+                reset_hermes_home_override(home_token)
+
+            home_token = set_hermes_home_override(profile_b)
+            try:
+                assert resolve_registered_passthrough_values({}) == {}
+            finally:
+                reset_hermes_home_override(home_token)
+        finally:
+            ss.reset_secret_scope(secret_token)
+
     def test_active_scope_overrides_process_fallback(self):
         ss.set_multiplex_active(True)
         token = ss.set_secret_scope({"SERVICE_TOKEN": "profile-b"})
@@ -98,6 +134,20 @@ class TestProfileScopedResolution:
         token = ss.set_secret_scope({})
         try:
             assert resolve_passthrough_value("TERMINAL_CWD", "/explicit") == "/explicit"
+        finally:
+            ss.reset_secret_scope(token)
+
+    def test_registered_scope_only_value_is_materialized(self, monkeypatch):
+        from tools.env_passthrough import resolve_registered_passthrough_values
+
+        register_env_passthrough(["SERVICE_TOKEN"])
+        monkeypatch.delenv("SERVICE_TOKEN", raising=False)
+        ss.set_multiplex_active(True)
+        token = ss.set_secret_scope({"SERVICE_TOKEN": "profile-only"})
+        try:
+            assert resolve_registered_passthrough_values({}) == {
+                "SERVICE_TOKEN": "profile-only"
+            }
         finally:
             ss.reset_secret_scope(token)
 
@@ -186,6 +236,20 @@ class TestExecuteCodeIntegration:
 
         assert "SERVICE_TOKEN" not in child_env
 
+    def test_execute_code_materializes_scope_only_passthrough(self, monkeypatch):
+        from tools.code_execution_tool import _scrub_child_env
+
+        register_env_passthrough(["SERVICE_TOKEN"])
+        monkeypatch.delenv("SERVICE_TOKEN", raising=False)
+        ss.set_multiplex_active(True)
+        token = ss.set_secret_scope({"SERVICE_TOKEN": "profile-only"})
+        try:
+            child_env = _scrub_child_env({})
+        finally:
+            ss.reset_secret_scope(token)
+
+        assert child_env["SERVICE_TOKEN"] == "profile-only"
+
 
 class TestTerminalIntegration:
     """Verify that the passthrough is checked in terminal's env sanitizers."""
@@ -225,6 +289,25 @@ class TestTerminalIntegration:
 
         assert "SERVICE_TOKEN" not in child_env
 
+    @pytest.mark.parametrize("builder", ["foreground", "background"])
+    def test_terminal_materializes_scope_only_passthrough(self, monkeypatch, builder):
+        from tools.environments.local import _make_run_env, _sanitize_subprocess_env
+
+        register_env_passthrough(["SERVICE_TOKEN"])
+        monkeypatch.delenv("SERVICE_TOKEN", raising=False)
+        ss.set_multiplex_active(True)
+        token = ss.set_secret_scope({"SERVICE_TOKEN": "profile-only"})
+        try:
+            child_env = (
+                _make_run_env({})
+                if builder == "foreground"
+                else _sanitize_subprocess_env({})
+            )
+        finally:
+            ss.reset_secret_scope(token)
+
+        assert child_env["SERVICE_TOKEN"] == "profile-only"
+
     def test_shared_local_snapshot_re_resolves_current_profile(self, monkeypatch, tmp_path):
         """A persistent shell snapshot must not retain the previous profile's value."""
         from tools.environments.local import LocalEnvironment
@@ -261,6 +344,24 @@ class TestTerminalIntegration:
 
         assert result["output"] == "token-for-profile-b"
         assert missing["output"] == "unset"
+
+    def test_local_terminal_executes_with_scope_only_passthrough(self, monkeypatch, tmp_path):
+        from tools.environments.local import LocalEnvironment
+
+        register_env_passthrough(["SERVICE_TOKEN"])
+        monkeypatch.delenv("SERVICE_TOKEN", raising=False)
+        ss.set_multiplex_active(True)
+        token = ss.set_secret_scope({"SERVICE_TOKEN": "profile-only"})
+        env = None
+        try:
+            env = LocalEnvironment(cwd=str(tmp_path))
+            result = env.execute("printf '%s' \"$SERVICE_TOKEN\"")
+        finally:
+            ss.reset_secret_scope(token)
+            if env is not None:
+                env.cleanup()
+
+        assert result["output"] == "profile-only"
 
     def test_blocklisted_var_blocked_by_default(self):
         from tools.environments.local import _sanitize_subprocess_env, _HERMES_PROVIDER_ENV_BLOCKLIST

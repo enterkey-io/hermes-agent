@@ -472,10 +472,12 @@ def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = Non
     try:
         from tools.env_passthrough import (
             is_env_passthrough as _is_passthrough,
+            resolve_registered_passthrough_values as _resolve_registered_passthrough_values,
             resolve_passthrough_value as _resolve_passthrough_value,
         )
     except Exception:
         _is_passthrough = lambda _: False  # noqa: E731
+        _resolve_registered_passthrough_values = lambda _fallbacks: {}  # noqa: E731
         _resolve_passthrough_value = lambda _name, fallback: fallback  # noqa: E731
 
     sanitized: dict[str, str] = {}
@@ -507,6 +509,17 @@ def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = Non
             resolved = _resolve_passthrough_value(key, value) if passthrough else value
             if resolved is not None:
                 sanitized[key] = resolved
+
+    fallbacks = dict(base_env or {})
+    fallbacks.update(extra_env or {})
+    for key, value in _resolve_registered_passthrough_values(fallbacks).items():
+        if (
+            key in _ALWAYS_STRIP_KEYS
+            or key in _HERMES_PROVIDER_ENV_BLOCKLIST
+            or _is_hermes_internal_secret(key)
+        ):
+            continue
+        sanitized[key] = value
 
     _inject_context_hermes_home(sanitized)
 
@@ -1305,10 +1318,12 @@ def _make_run_env(env: dict) -> dict:
     try:
         from tools.env_passthrough import (
             is_env_passthrough as _is_passthrough,
+            resolve_registered_passthrough_values as _resolve_registered_passthrough_values,
             resolve_passthrough_value as _resolve_passthrough_value,
         )
     except Exception:
         _is_passthrough = lambda _: False  # noqa: E731
+        _resolve_registered_passthrough_values = lambda _fallbacks: {}  # noqa: E731
         _resolve_passthrough_value = lambda _name, fallback: fallback  # noqa: E731
 
     merged = dict(os.environ | env)
@@ -1328,6 +1343,14 @@ def _make_run_env(env: dict) -> dict:
             value = _resolve_passthrough_value(k, v) if passthrough else v
             if value is not None:
                 run_env[k] = value
+    for key, value in _resolve_registered_passthrough_values(merged).items():
+        if (
+            key in _ALWAYS_STRIP_KEYS
+            or key in _HERMES_PROVIDER_ENV_BLOCKLIST
+            or _is_hermes_internal_secret(key)
+        ):
+            continue
+        run_env[key] = value
     path_key = _path_env_key(run_env)
     if path_key is not None:
         new_path = _append_missing_sane_path_entries(run_env.get(path_key, ""))
