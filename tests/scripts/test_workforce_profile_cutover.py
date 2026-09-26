@@ -85,3 +85,52 @@ def test_atomic_profile_cutover_creates_verified_archive_and_rolls_back(tmp_path
     for name in original:
         assert (profiles / name / "AGENTS.md").read_bytes() == original[name]
     assert not shared_target.exists()
+
+
+def test_cutover_applies_and_rolls_back_externalized_contract(tmp_path: Path):
+    profiles = tmp_path / "profiles"
+    aurora = profiles / "aurora"
+    aurora.mkdir(parents=True)
+    agents = aurora / "AGENTS.md"
+    agents.write_text("startup core\n")
+    external = aurora / "WORKFORCE_CONTRACT.md"
+    external.write_text("legacy contract\n")
+    candidate_agents = tmp_path / "candidates" / "aurora" / "AGENTS.md"
+    candidate_agents.parent.mkdir(parents=True)
+    candidate_agents.write_text("startup core\n")
+    candidate_external = candidate_agents.parent / "WORKFORCE_CONTRACT.md"
+    candidate_external.write_text("current contract\n")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({
+        "profiles": [{
+            "agent": "aurora", "status": "active", "source": str(agents),
+            "source_sha256": digest(agents), "candidate": str(candidate_agents),
+            "candidate_sha256": digest(candidate_agents),
+        }],
+        "additional_writes": [{
+            "agent": "aurora", "kind": "externalized-workforce-contract",
+            "status": "active", "source": str(external), "target": str(external),
+            "source_sha256": digest(external), "candidate": str(candidate_external),
+            "candidate_sha256": digest(candidate_external),
+        }],
+    }))
+    full_backup = tmp_path / "full-backup"
+    create_backup(profiles, full_backup)
+    verify_backup(full_backup, tmp_path / "full-restore-test")
+    immediate = tmp_path / "immediate"
+
+    report, prepared = preflight(manifest)
+    assert report["valid"] is True
+    assert report["profiles"] == 1
+    assert report["additional_writes"] == 1
+    assert report["writes_ready"] == 2
+    assert len(prepared) == 2
+
+    applied = apply_cutover(manifest, full_backup, immediate)
+    assert applied["valid"] is True
+    assert external.read_text() == "current contract\n"
+    assert applied["immediate_backup"]["files"] == 2
+
+    restored = rollback_cutover(immediate)
+    assert restored["valid"] is True
+    assert external.read_text() == "legacy contract\n"

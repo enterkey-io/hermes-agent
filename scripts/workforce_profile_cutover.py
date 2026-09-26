@@ -33,9 +33,13 @@ def preflight(manifest_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]
     rows = manifest.get("profiles")
     if not isinstance(rows, list) or not rows:
         raise ValueError("profile rewrite manifest is empty")
+    additional_writes = manifest.get("additional_writes", [])
+    if not isinstance(additional_writes, list):
+        raise ValueError("additional_writes must be a list")
+    all_writes = [*rows, *additional_writes]
     prepared = []
     gates = []
-    for row in rows:
+    for row in all_writes:
         agent = str(row.get("agent") or "")
         status = str(row.get("status") or "")
         source = Path(str(row.get("source") or ""))
@@ -74,9 +78,10 @@ def preflight(manifest_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]
             }
         )
     report = {
-        "valid": not gates and len(prepared) == len(rows),
+        "valid": not gates and len(prepared) == len(all_writes),
         "applied": False,
         "profiles": len(rows),
+        "additional_writes": len(additional_writes),
         "writes_ready": len(prepared),
         "gates": gates,
         "expected_writes": [

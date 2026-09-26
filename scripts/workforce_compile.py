@@ -22,6 +22,7 @@ from hermes_cli.workforce_org import (
 BEGIN = "<!-- BEGIN MANAGED WORKFORCE CONTRACT -->"
 END = "<!-- END MANAGED WORKFORCE CONTRACT -->"
 EXTERNALIZED = "<!-- MANAGED WORKFORCE CONTRACT: EXTERNALIZED -->"
+EXTERNALIZED_CONTRACT_FILE = "WORKFORCE_CONTRACT.md"
 BLOCK_RE = re.compile(rf"{re.escape(BEGIN)}.*?{re.escape(END)}", re.DOTALL)
 PROTECTED = ("SOUL.md", "identity.md", "user.md")
 
@@ -212,6 +213,7 @@ def compile_profiles(
     template = template_path.read_text(encoding="utf-8")
     output.mkdir(parents=True, exist_ok=True)
     entries = []
+    additional_writes = []
     for agent in _compile_order(org):
         target = output / agent.agent
         target.mkdir(parents=True, exist_ok=True)
@@ -232,9 +234,8 @@ def compile_profiles(
             source_kind = "planned-private-source"
         if source.is_file():
             original = source.read_text(encoding="utf-8-sig")
-            candidate, operation = insert_block(
-                original, render_block(agent, template, version, org)
-            )
+            rendered_block = render_block(agent, template, version, org)
+            candidate, operation = insert_block(original, rendered_block)
             source_hash = sha(source)
         elif agent.status == "planned":
             original = f"# {agent.display_name} Operating Instructions\n"
@@ -247,6 +248,24 @@ def compile_profiles(
             raise FileNotFoundError(f"active profile instruction missing: {source}")
         candidate_path = target / "AGENTS.md"
         candidate_path.write_text(candidate, encoding="utf-8")
+        if operation == "preserve-externalized":
+            external_source = Path(agent.profile_path or "") / EXTERNALIZED_CONTRACT_FILE
+            if not external_source.is_file():
+                raise FileNotFoundError(
+                    f"externalized workforce contract missing: {external_source}"
+                )
+            external_candidate = target / EXTERNALIZED_CONTRACT_FILE
+            external_candidate.write_text(rendered_block + "\n", encoding="utf-8")
+            additional_writes.append({
+                "agent": agent.agent,
+                "kind": "externalized-workforce-contract",
+                "status": agent.status,
+                "source": str(external_source),
+                "target": str(external_source),
+                "source_sha256": sha(external_source),
+                "candidate": str(external_candidate),
+                "candidate_sha256": sha(external_candidate),
+            })
         protected: dict[str, object] = {"file_count": 0, "aggregate_sha256": None}
         if agent.profile_path:
             protected = _protected_tree(Path(agent.profile_path))
@@ -269,7 +288,11 @@ def compile_profiles(
             ),
             "protected_tree": protected,
         })
-    manifest = {"contract_version": version, "profiles": entries}
+    manifest = {
+        "contract_version": version,
+        "profiles": entries,
+        "additional_writes": additional_writes,
+    }
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return manifest
 

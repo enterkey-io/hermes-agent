@@ -41,6 +41,8 @@ def test_compile_reports_externalized_contract_reconciliation(tmp_path):
     )
     source = tmp_path / "workforce-profiles" / "aurora" / "AGENTS.md"
     source.write_text("# Aurora\n" + module.EXTERNALIZED + "\n")
+    external = source.parent / module.EXTERNALIZED_CONTRACT_FILE
+    external.write_text("legacy external contract\n")
     manifest = module.compile_profiles(
         organization, ROOT / "workforce" / "templates" / "workforce-contract.md", tmp_path / "out"
     )
@@ -49,6 +51,13 @@ def test_compile_reports_externalized_contract_reconciliation(tmp_path):
     assert entry["managed_contract_mode"] == "externalized-reference"
     assert entry["template_reconciliation_required"] is True
     assert (tmp_path / "out" / "aurora" / "AGENTS.md").read_text() == source.read_text()
+    assert len(manifest["additional_writes"]) == 1
+    external_write = manifest["additional_writes"][0]
+    assert external_write["agent"] == "aurora"
+    assert external_write["source"] == str(external)
+    external_candidate = Path(external_write["candidate"])
+    assert "Paperclip is the active durable execution control plane" in external_candidate.read_text()
+    assert "Hermes Kanban" in external_candidate.read_text()
 
 
 def test_canonical_compile_includes_active_chloe_emma_and_priya(tmp_path):
