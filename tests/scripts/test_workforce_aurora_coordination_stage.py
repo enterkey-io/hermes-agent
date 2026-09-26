@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -39,14 +40,20 @@ def test_stages_only_compact_aurora_block_and_preserves_source(tmp_path):
 
     manifest = module.stage_profile(profile=profile, output=output)
     candidate = (output / "AGENTS.md").read_text(encoding="utf-8")
+    normalized = re.sub(r"\s+", " ", candidate)
 
     assert (profile / "AGENTS.md").read_text(encoding="utf-8") == original
     assert manifest["source_unchanged"] is True
     assert manifest["operation"] == "insert"
     assert candidate.count(module.BEGIN) == 1
     assert candidate.index(module.BEGIN) < candidate.index(module.ROUTING_ANCHOR)
-    assert "`report_to_origin: true`" in candidate
-    assert "`coordination: {}`" in candidate
+    assert "exactly one Aurora-owned Paperclip root issue" in normalized
+    assert "return owner and destination" in normalized
+    assert "stay on that same issue" in normalized
+    assert "child only for a distinct independently owned deliverable" in normalized
+    assert "record delivery there" in normalized
+    assert "report_to_origin" not in normalized
+    assert "coordination: {}" not in normalized
     assert "Contract version:" not in candidate
     assert candidate.startswith(original.split(module.ROUTING_ANCHOR)[0])
     assert candidate.endswith(
@@ -83,6 +90,29 @@ def test_rejects_noncompact_or_non_aurora_target(tmp_path):
 
     with pytest.raises(ValueError, match="compact externalized"):
         module.stage_profile(profile=profile, output=tmp_path / "stage")
+
+
+def test_rejects_retired_kanban_intake_template(tmp_path):
+    profile, _ = _profile(tmp_path)
+    template = tmp_path / "retired-intake.md"
+    template.write_text(
+        f"{module.BEGIN}\n"
+        "When I explicitly accept a clear Elliott request, I create exactly one "
+        "Aurora-owned Paperclip root issue with return owner and destination. "
+        "All phases stay on that same issue, with a child only for a distinct "
+        "independently owned deliverable, and I record delivery there. This applies "
+        "before synchronous answers, exploration or discovery. Legacy Kanban root "
+        "fields include report_to_origin and coordination: {}.\n"
+        f"{module.END}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="retired Kanban routing"):
+        module.stage_profile(
+            profile=profile,
+            output=tmp_path / "stage",
+            template=template,
+        )
 
 
 def test_rejects_symlink_output_directory_or_file(tmp_path):

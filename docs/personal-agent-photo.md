@@ -1,10 +1,19 @@
 # Personal Agent Photos
 
-The native `agent_photo` tool is limited to canonical personal profiles whose
+The native `agent_photo` tool is available to canonical personal profiles whose
 organization status is `friend` and which are not operational workforce agents.
-It invokes the fixed administrator-installed `hermes-agent-photo` wrapper,
-never a shell command supplied by the model. The wrapper owns credential
-injection, Characters bindings, identity assets and output paths.
+An operational profile is denied by default and may use the tool only when its
+canonical `workforce/organization.yaml` entry explicitly includes
+`capabilities: [agent_photo]`. Treat that per-agent grant as the authoritative,
+auditable exception; do not infer it from toolsets, local files, role, or prior
+access. Removing the capability revokes eligibility after organization reload.
+
+The capability grant changes only profile eligibility. It does not expand the
+agent's authority, bypass user-request or human approval provenance, permit
+extra provider attempts, or relax spending and publication gates. The tool
+invokes the fixed administrator-installed `hermes-agent-photo` wrapper, never a
+shell command supplied by the model. The wrapper owns credential injection,
+Characters bindings, identity assets and output paths.
 
 ## Current Requests
 
