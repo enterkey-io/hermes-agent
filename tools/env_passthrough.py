@@ -43,8 +43,10 @@ def _get_allowed() -> set[str]:
         return val
 
 
-# Cache for the config-based allowlist (loaded once per process).
-_config_passthrough: frozenset[str] | None = None
+# Config-based allowlists are profile-local. A multiplex gateway serves several
+# Hermes homes in one process, so one shared cache entry would let the first
+# profile's operator allowlist govern every later profile's sandbox children.
+_config_passthrough: dict[str, frozenset[str]] = {}
 
 
 def _is_hermes_provider_credential(name: str) -> bool:
@@ -125,9 +127,16 @@ def register_env_passthrough(var_names: Iterable[str]) -> None:
 
 def _load_config_passthrough() -> frozenset[str]:
     """Load ``tools.env_passthrough`` from config.yaml (cached)."""
-    global _config_passthrough
-    if _config_passthrough is not None:
-        return _config_passthrough
+    from hermes_constants import hermes_home_key
+
+    try:
+        home_key = hermes_home_key()
+    except (RuntimeError, OSError):
+        # Sandboxed Windows children can have no resolvable HOME/USERPROFILE.
+        home_key = ""
+    cached = _config_passthrough.get(home_key)
+    if cached is not None:
+        return cached
 
     result: set[str] = set()
     try:
@@ -159,8 +168,8 @@ def _load_config_passthrough() -> frozenset[str]:
     except Exception as e:
         logger.debug("Could not read tools.env_passthrough from config: %s", e)
 
-    _config_passthrough = frozenset(result)
-    return _config_passthrough
+    _config_passthrough[home_key] = frozenset(result)
+    return _config_passthrough[home_key]
 
 
 def is_env_passthrough(var_name: str) -> bool:
