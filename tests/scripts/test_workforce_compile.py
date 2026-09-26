@@ -88,10 +88,10 @@ def test_canonical_compile_includes_active_chloe_and_emma(tmp_path):
     assert "Root is a configured, active worker under the `main` profile" in aurora_text
     assert "I assign DigitalOcean" in aurora_text
     assert "Close every accepted commitment" in aurora_text
-    assert "report_to_origin: true" in aurora_text
-    assert "coordination: {}` before any delegation" in aurora_text
+    assert "exactly one Aurora-owned Paperclip root issue" in aurora_text
+    assert "return owner and destination" in aurora_text
     assert "synchronous answers, exploration or discovery" in aurora_text
-    assert "exact DM, room thread, or conversation" in aurora_text
+    assert "Never make Elliott inspect Paperclip" in aurora_text
 
     alina_text = (tmp_path / "alina" / "AGENTS.md").read_text()
     assert "I do not own DigitalOcean" in alina_text
@@ -100,30 +100,33 @@ def test_canonical_compile_includes_active_chloe_and_emma(tmp_path):
     root_text = (tmp_path / "root" / "AGENTS.md").read_text()
     assert "active Hermes worker under profile directory `main`" in root_text
     assert "I own DigitalOcean" in root_text
-    assert "coordination: {}` before any delegation" not in root_text
+    assert "exactly one Aurora-owned Paperclip root issue" not in root_text
 
     for entry in manifest["profiles"]:
         contract = (tmp_path / entry["agent"] / "AGENTS.md").read_text()
-        assert "before creating the ordinary final aggregation" in contract
-        assert "ordinary return card does not establish request-wide coordination" in contract
-        assert "If there is no inherited root, use ordinary internal task" in contract
-        assert "do not require a worker or receiving manager" in contract
-        assert "Never invent a user origin, session, or" in contract
-        assert "records a pending transfer" in contract
-        assert "delivery_mode` `session_wake` or `request_final_return`" in contract
-        assert "Never recreate or rebind the" in contract
+        managed = contract.split(module.BEGIN, 1)[1].split(module.END, 1)[0]
+        assert "Paperclip is the active durable execution control plane" in managed
+        assert "Do not create, claim, update, or route current work through Hermes Kanban" in managed
+        assert "exactly one canonical Paperclip root issue" in managed
+        assert "Never create status, retry, notification, handoff, or completion" in managed
+        assert "Implementation, review, rework, validation, activation, and acceptance normally" in managed
+        assert "then records the" in managed
+        assert "delivery on the root issue" in managed
+        assert "workforce_materialize" in managed
+        assert "shadow queue" in managed
+        assert "report_to_origin" not in managed
 
     # Lifecycle blocks are derived from organization metadata, not copied into
     # 22 independent private profiles.
     sloane_text = (tmp_path / "sloane" / "AGENTS.md").read_text()
     reese_text = (tmp_path / "reese" / "AGENTS.md").read_text()
     sage_text = (tmp_path / "sage" / "AGENTS.md").read_text()
-    assert "## Kanban role lifecycle" in sloane_text
+    assert "## Paperclip issue lifecycle" in sloane_text
     assert "Normal receiver: `reese`" in sloane_text
     assert "Technical-review PASS: `intent_validator`" in reese_text
     assert "Technical-review FAIL: `implementer`" in reese_text
     assert "Normal receiver: `emily`" in sage_text
-    assert "Never close another role's phase" in sloane_text
+    assert "Reassign the same issue" in sloane_text
 
 
 def test_planned_profile_can_use_owner_only_private_source(tmp_path):
