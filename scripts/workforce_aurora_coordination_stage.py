@@ -45,15 +45,21 @@ def _load_block(path: Path) -> str:
     block = path.read_text(encoding="utf-8").strip()
     if block.count(BEGIN) != 1 or block.count(END) != 1:
         raise ValueError("Aurora intake template must contain one managed block")
+    normalized = re.sub(r"\s+", " ", block)
     required = (
         "explicitly accept a clear Elliott request",
-        "`report_to_origin: true`",
-        "`coordination: {}`",
-        "before any delegation",
+        "exactly one Aurora-owned Paperclip root issue",
+        "return owner and destination",
+        "stay on that same issue",
+        "child only for a distinct independently owned deliverable",
+        "record delivery there",
         "synchronous answers, exploration or discovery",
     )
-    if any(value not in block for value in required):
+    if any(value not in normalized for value in required):
         raise ValueError("Aurora intake template is missing a required boundary")
+    retired = ("Kanban root", "report_to_origin", "coordination: {}")
+    if any(value in normalized for value in retired):
+        raise ValueError("Aurora intake template contains retired Kanban routing")
     return block
 
 

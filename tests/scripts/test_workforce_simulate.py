@@ -23,7 +23,7 @@ def test_staged_whole_workforce_passes_proactive_authority_simulation(tmp_path: 
         staging,
     )
     assert result["valid"] is True
-    assert result["profiles_simulated"] == 22
+    assert result["profiles_simulated"] == 23
     assert all(result["interactions"].values())
     assert all(
         item["routine_approved_work"] == "execute_verify_close"

@@ -20,6 +20,7 @@ profile_home_rooms:
   emma: staff-marketing
   xenia: director-trading
   oyku: staff-trading
+  priya: staff-trading
   maggie: director-finance
   mel: director-vision
 profile_additional_rooms:
@@ -80,7 +81,7 @@ rooms:
     status: candidate
     visibility: private
     purpose: Trading research assignments, blockers, coordination, and verified outcomes.
-    members: [elliott, xenia, oyku]
+    members: [elliott, xenia, oyku, priya]
   - name: executive-support
     status: confirmed
     visibility: private

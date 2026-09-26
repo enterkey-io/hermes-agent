@@ -45,7 +45,8 @@ RESERVED_SIGNALS = (
     "Continue unrelated safe work",
 )
 DURABLE_SIGNALS = (
-    "Active work, ownership, handoffs, dependencies, and signals belong in Hermes Kanban",
+    "Paperclip is the active durable execution control plane",
+    "Do not create, claim, update, or route current work through Hermes Kanban",
     "Recurring procedures belong in the Workflow Registry, canonical runbooks, and Hermes Cron",
     "Buzz is focused conversation and operational delivery, not the durable source of truth",
 )

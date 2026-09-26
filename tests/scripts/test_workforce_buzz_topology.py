@@ -34,6 +34,10 @@ def test_topology_preserves_confirmed_admin_and_excludes_friends():
         "chloe": ["general"],
         "emma": ["general"],
     }
+    staff_trading = next(
+        room for room in topology["rooms"] if room["name"] == "staff-trading"
+    )
+    assert set(staff_trading["members"]) == {"elliott", "xenia", "oyku", "priya"}
     assert {room["name"] for room in topology["rooms"] if room["name"].startswith("staff-")} == {
         "staff-marketing", "staff-product", "staff-trading"
     }
