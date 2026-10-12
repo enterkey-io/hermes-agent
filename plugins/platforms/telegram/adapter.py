@@ -5682,7 +5682,17 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
         # 5) Bold **text** → *text*; 6) Italic *text* → _text_ ([^*\n]+ keeps matches on one line, or *
         # bullet lists corrupt); 7) Strikethrough ~~text~~ → ~text~; 8) Spoiler ||text|| kept as-is.
         text = re.sub(r'\*\*(.+?)\*\*', _ph_wrap('*', '*'), text)
+        # Underscore emphasis must not consume identifiers, escaped text, or
+        # code and links already protected behind placeholders.
+        text = re.sub(
+            r'(?<![\w\\_])__(?![_\s])([^\n]*?)(?<![\s\\_])__(?![\w_])',
+            _ph_wrap('*', '*'), text,
+        )
         text = re.sub(r'\*([^*\n]+)\*', _ph_wrap('_', '_'), text)
+        text = re.sub(
+            r'(?<![\w\\_])_(?![_\s])([^\n]*?)(?<![\s\\_])_(?![\w_])',
+            _ph_wrap('_', '_'), text,
+        )
         text = re.sub(r'~~(.+?)~~', _ph_wrap('~', '~'), text)
         text = re.sub(r'\|\|(.+?)\|\|', _ph_wrap('||', '||'), text)
         # 9) Blockquotes: protect leading > from escaping; expandable quotes (**> starts, trailing || ends).

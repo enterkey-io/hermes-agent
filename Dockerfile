@@ -172,7 +172,10 @@ RUN set -eu; \
 COPY --chmod=0755 docker/tini-shim.sh /usr/bin/tini
 
 # Non-root user for runtime; UID can be overridden via HERMES_UID at runtime
-RUN useradd -u 10000 -m -d /opt/data hermes
+ARG HERMES_BUILD_UID=10000
+ARG HERMES_BUILD_GID=10000
+RUN groupadd -g "${HERMES_BUILD_GID}" hermes && \
+    useradd -u "${HERMES_BUILD_UID}" -g hermes -m -d /opt/data hermes
 
 
 WORKDIR /opt/hermes
